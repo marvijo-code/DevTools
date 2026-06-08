@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Handle Shadow -->
+  <line x1="348" y1="360" x2="430" y2="442" stroke="rgba(0,0,0,0.2)" stroke-width="36" stroke-linecap="round" />
+  
+  <!-- Glass Shadow -->
+  <circle cx="256" cy="264" r="130" fill="rgba(0,0,0,0.2)" />
+  
+  <!-- Handle -->
+  <line x1="348" y1="348" x2="430" y2="430" stroke="#ffffff" stroke-width="36" stroke-linecap="round" />
+  
+  <!-- Magnifying glass body -->
+  <circle cx="256" cy="256" r="130" fill="#24292e" />
+  
+  <!-- Inside glass: Workflow lines -->
+  <!-- Main vertical track -->
+  <path d="M 216 186 L 216 326" fill="none" stroke="#8b949e" stroke-width="12" />
+  <!-- Branch track -->
+  <path d="M 216 256 L 296 256" fill="none" stroke="#8b949e" stroke-width="12" />
+  
+  <!-- Nodes -->
+  <circle cx="216" cy="186" r="18" fill="#238636" />
+  <circle cx="216" cy="256" r="18" fill="#2f81f7" />
+  <circle cx="216" cy="326" r="18" fill="#8957e5" />
+  <circle cx="296" cy="256" r="18" fill="#d29922" />
+  
+  <!-- Glass border drawn last so it covers edges -->
+  <circle cx="256" cy="256" r="130" fill="none" stroke="#ffffff" stroke-width="20" />
+  
+  <!-- Highlight reflection on glass -->
+  <path d="M 160 180 A 100 100 0 0 1 240 145" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="12" stroke-linecap="round" />
+</svg>

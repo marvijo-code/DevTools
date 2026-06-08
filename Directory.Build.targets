@@ -1,0 +1,19 @@
+<Project>
+  <Target Name="CopyAppOutputToRootBin" AfterTargets="Build">
+    <PropertyGroup>
+      <RootBinDir>$(MSBuildThisFileDirectory)bin\</RootBinDir>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <BuildOutputFiles Include="$(TargetDir)**\*"
+                        Exclude="$(TargetDir)publish\**\*;$(TargetDir)ref\**\*" />
+    </ItemGroup>
+
+    <MakeDir Directories="$(RootBinDir)" />
+    <Copy SourceFiles="@(BuildOutputFiles)"
+          DestinationFiles="@(BuildOutputFiles->'$(RootBinDir)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Delete Files="$(RootBinDir)github-token.txt;$(RootBinDir).github-workflow-watch-token"
+            TreatErrorsAsWarnings="true" />
+  </Target>
+</Project>

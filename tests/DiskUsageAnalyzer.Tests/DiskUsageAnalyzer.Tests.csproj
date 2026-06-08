@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="System.Management" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\DevTools\Infrastructure\AppLog.cs" Link="Infrastructure\AppLog.cs" />
+    <Compile Include="..\..\DevTools\Infrastructure\ObservableObject.cs" Link="Infrastructure\ObservableObject.cs" />
+    <Compile Include="..\..\DevTools\Models\DiskUsageEntry.cs" Link="Models\DiskUsageEntry.cs" />
+    <Compile Include="..\..\DevTools\Models\DiskUsageSection.cs" Link="Models\DiskUsageSection.cs" />
+    <Compile Include="..\..\DevTools\Models\ProcessKillEntry.cs" Link="Models\ProcessKillEntry.cs" />
+    <Compile Include="..\..\DevTools\Models\ProcessKillSection.cs" Link="Models\ProcessKillSection.cs" />
+    <Compile Include="..\..\DevTools\Services\CodexSessionCatalog.cs" Link="Services\CodexSessionCatalog.cs" />
+    <Compile Include="..\..\DevTools\Services\ProcessDisplayNameResolver.cs" Link="Services\ProcessDisplayNameResolver.cs" />
+    <Compile Include="..\..\DevTools\Services\ProcessKillFilter.cs" Link="Services\ProcessKillFilter.cs" />
+    <Compile Include="..\..\DevTools\Services\ProcessWindowTitleResolver.cs" Link="Services\ProcessWindowTitleResolver.cs" />
+    <Compile Include="..\..\DevTools\Services\ProcessCommandLineResolver.cs" Link="Services\ProcessCommandLineResolver.cs" />
+    <Compile Include="..\..\DevTools\Services\ProcessKillCatalog.cs" Link="Services\ProcessKillCatalog.cs" />
+    <Compile Include="..\..\DevTools\Services\RunningProcessCollector.cs" Link="Services\RunningProcessCollector.cs" />
+    <Compile Include="..\..\DevTools\Services\DiskUsageAnalyzer.cs" Link="Services\DiskUsageAnalyzer.cs" />
+  </ItemGroup>
+</Project>

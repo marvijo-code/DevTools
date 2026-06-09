@@ -488,4 +488,5 @@ solution-config.props
 # Publish Profiles
 !**/Properties/PublishProfiles/*.pubxml
 .dustprobe/
+.dustprobe*
 .tools/

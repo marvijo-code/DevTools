@@ -526,69 +526,6 @@ public sealed class DiskUsageAnalyzer
                ".";
     }
 
-    public static IReadOnlyList<DiskUsageEntry> TryParseEverythingCsvRows(string csv)
-    {
-        var entries = new List<DiskUsageEntry>();
-        if (string.IsNullOrWhiteSpace(csv))
-        {
-            return entries;
-        }
-
-        foreach (var line in csv.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
-        {
-            var columns = ParseCsvLine(line);
-            if (columns.Count < 2 || string.Equals(columns[0], "Filename", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            if (!long.TryParse(columns[1], out var sizeBytes))
-            {
-                continue;
-            }
-
-            entries.Add(DiskUsageEntry.CreateCompleted(columns[0], true, sizeBytes, FormatBytes(sizeBytes), "Measured by Everything."));
-        }
-
-        return entries;
-    }
-
-    private static List<string> ParseCsvLine(string line)
-    {
-        var columns = new List<string>();
-        var current = new System.Text.StringBuilder();
-        var inQuotes = false;
-
-        for (var i = 0; i < line.Length; i++)
-        {
-            var currentChar = line[i];
-            if (currentChar == '"')
-            {
-                if (inQuotes && i + 1 < line.Length && line[i + 1] == '"')
-                {
-                    current.Append('"');
-                    i++;
-                    continue;
-                }
-
-                inQuotes = !inQuotes;
-                continue;
-            }
-
-            if (currentChar == ',' && !inQuotes)
-            {
-                columns.Add(current.ToString());
-                current.Clear();
-                continue;
-            }
-
-            current.Append(currentChar);
-        }
-
-        columns.Add(current.ToString());
-        return columns;
-    }
-
     private static long? TryParseSize(string usage)
     {
         if (string.IsNullOrWhiteSpace(usage))
@@ -613,20 +550,7 @@ public sealed class DiskUsageAnalyzer
         };
     }
 
-    private static string FormatBytes(long bytes)
-    {
-        const double scale = 1024d;
-        string[] suffixes = ["B", "KB", "MB", "GB", "TB"];
-        var suffixIndex = 0;
-        double displayValue = bytes;
-        while (displayValue >= scale && suffixIndex < suffixes.Length - 1)
-        {
-            displayValue /= scale;
-            suffixIndex++;
-        }
-
-        return suffixIndex == 0 ? $"{displayValue:0} {suffixes[suffixIndex]}" : $"{displayValue:0.00} {suffixes[suffixIndex]}";
-    }
+    private static string FormatBytes(long bytes) => ByteFormatter.Format(bytes);
 
     private sealed class DustNode
     {

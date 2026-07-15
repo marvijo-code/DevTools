@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\DevTools\Infrastructure\AppLog.cs" Link="Infrastructure\AppLog.cs" />
+    <Compile Include="..\..\DevTools\Infrastructure\ByteFormatter.cs" Link="Infrastructure\ByteFormatter.cs" />
     <Compile Include="..\..\DevTools\Infrastructure\ObservableObject.cs" Link="Infrastructure\ObservableObject.cs" />
     <Compile Include="..\..\DevTools\Models\DiskUsageEntry.cs" Link="Models\DiskUsageEntry.cs" />
     <Compile Include="..\..\DevTools\Models\DiskUsageSection.cs" Link="Models\DiskUsageSection.cs" />
@@ -31,5 +32,10 @@
     <Compile Include="..\..\DevTools\Services\ProcessKillCatalog.cs" Link="Services\ProcessKillCatalog.cs" />
     <Compile Include="..\..\DevTools\Services\RunningProcessCollector.cs" Link="Services\RunningProcessCollector.cs" />
     <Compile Include="..\..\DevTools\Services\DiskUsageAnalyzer.cs" Link="Services\DiskUsageAnalyzer.cs" />
+    <Compile Include="..\..\DevTools\Services\BiggestFiles\BiggestFilesModels.cs" Link="Services\BiggestFiles\BiggestFilesModels.cs" />
+    <Compile Include="..\..\DevTools\Services\BiggestFiles\TopNAccumulator.cs" Link="Services\BiggestFiles\TopNAccumulator.cs" />
+    <Compile Include="..\..\DevTools\Services\BiggestFiles\ElevationService.cs" Link="Services\BiggestFiles\ElevationService.cs" />
+    <Compile Include="..\..\DevTools\Services\BiggestFiles\ParallelFileScanner.cs" Link="Services\BiggestFiles\ParallelFileScanner.cs" />
+    <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\MftRecordParser.cs" Link="Services\BiggestFiles\Ntfs\MftRecordParser.cs" />
   </ItemGroup>
 </Project>

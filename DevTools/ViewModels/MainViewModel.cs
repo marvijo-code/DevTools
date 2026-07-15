@@ -6,6 +6,7 @@ using System.Text.Json;
 using DevTools.Infrastructure;
 using DevTools.Models;
 using DevTools.Services;
+using DevTools.Services.BiggestFiles;
 
 namespace DevTools.ViewModels;
 
@@ -26,6 +27,7 @@ public sealed class MainViewModel : ObservableObject
     private static readonly string SettingsFilePath = Path.Combine(SettingsDirectory, "settings.json");
     private static readonly IReadOnlyList<string> DiskUsageAnimationFrames = ["Measuring", "Measuring.", "Measuring..", "Measuring..."];
     private static readonly IReadOnlyList<int> RefreshIntervalChoices = [5, 10, 15, 30, 60];
+    private static readonly IReadOnlyList<int> BiggestFilesTopCountChoices = [50, 100, 250, 500];
     private static readonly IReadOnlyList<string> StatusChoices = ["All", "Success", "In Progress", "Failed", "Cancelled", "Other"];
     private static readonly HashSet<string> FilterSensitiveRunProperties =
     [
@@ -60,6 +62,10 @@ public sealed class MainViewModel : ObservableObject
     private readonly List<WorkflowRunItem> _allRuns = [];
     private readonly ObservableCollection<DiskUsageSection> _diskUsageSections = [];
     private readonly ObservableCollection<ProcessKillSection> _killProcessSections = [];
+    private readonly BiggestFilesEngine _biggestFilesEngine = new();
+    private readonly SemaphoreSlim _biggestFilesGate = new(1, 1);
+    private readonly ObservableCollection<BiggestFileEntry> _biggestFiles = [];
+    private readonly List<BiggestFileEntry> _allBiggestFiles = [];
 
     private string _ownerInput = "example-owner";
     private string _repoInput = "example-repo";
@@ -87,6 +93,14 @@ public sealed class MainViewModel : ObservableObject
     private bool _autoRefreshEnabled = true;
     private int _refreshIntervalSeconds = 10;
     private MainContentTab _activeTab = MainContentTab.KillProcesses;
+    private CancellationTokenSource? _biggestFilesCts;
+    private string _biggestFilesFilterText = string.Empty;
+    private string _biggestFilesScanRoot = Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\";
+    private int _biggestFilesTopCount = 100;
+    private bool _isBiggestFilesScanning;
+    private bool _hasBiggestFilesSnapshot;
+    private string _biggestFilesHeadline = "Scan a drive or folder to find the largest files.";
+    private string _biggestFilesStatusText = "No scan yet.";
     private bool _isLoadingSettings;
     private string _statusFilter = "All";
     private string? _encryptedPersonalAccessToken;
@@ -160,6 +174,61 @@ public sealed class MainViewModel : ObservableObject
     public bool IsDiskUsageVisible => _activeTab == MainContentTab.DiskUsage;
 
     public MainContentTab ActiveTab => _activeTab;
+
+    public ObservableCollection<BiggestFileEntry> BiggestFiles => _biggestFiles;
+
+    public IReadOnlyList<int> BiggestFilesTopCountOptions => BiggestFilesTopCountChoices;
+
+    public string BiggestFilesHeadline => _biggestFilesHeadline;
+
+    public string BiggestFilesStatusText => _biggestFilesStatusText;
+
+    public bool IsBiggestFilesScanning => _isBiggestFilesScanning;
+
+    public bool HasBiggestFilesSnapshot => _hasBiggestFilesSnapshot;
+
+    public bool ShowElevationHint => !ElevationService.IsProcessElevated();
+
+    public string VisibleBiggestFilesText =>
+        _allBiggestFiles.Count == _biggestFiles.Count
+            ? $"{_biggestFiles.Count} file(s)"
+            : $"{_biggestFiles.Count} of {_allBiggestFiles.Count} file(s)";
+
+    public string BiggestFilesScanRoot
+    {
+        get => _biggestFilesScanRoot;
+        set
+        {
+            if (SetProperty(ref _biggestFilesScanRoot, value))
+            {
+                SaveSettings();
+            }
+        }
+    }
+
+    public int BiggestFilesTopCount
+    {
+        get => _biggestFilesTopCount;
+        set
+        {
+            if (SetProperty(ref _biggestFilesTopCount, NormalizeTopCount(value)))
+            {
+                SaveSettings();
+            }
+        }
+    }
+
+    public string BiggestFilesFilterText
+    {
+        get => _biggestFilesFilterText;
+        set
+        {
+            if (SetProperty(ref _biggestFilesFilterText, value))
+            {
+                ApplyBiggestFilesFilter();
+            }
+        }
+    }
 
     public string OwnerInput
     {
@@ -604,6 +673,140 @@ public sealed class MainViewModel : ObservableObject
         SetActiveTab(MainContentTab.DiskUsage);
     }
 
+    public async Task StartBiggestFilesScanAsync()
+    {
+        if (!await _biggestFilesGate.WaitAsync(0))
+        {
+            StatusMessage = "A biggest-files scan is already running.";
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        _biggestFilesCts = cts;
+
+        try
+        {
+            SetBiggestFilesScanning(true);
+            _hasBiggestFilesSnapshot = false;
+            RaisePropertyChanged(nameof(HasBiggestFilesSnapshot));
+
+            var request = new BiggestFilesRequest(BiggestFilesScanRoot, BiggestFilesTopCount);
+            var selection = BiggestFilesEngine.ResolveEngine(request.ScanRoot, request.AllowMft);
+            _biggestFilesHeadline = $"Scanning {request.ScanRoot} for the {request.TopCount} biggest files...";
+            SetBiggestFilesStatus(selection.Reason);
+            RaisePropertyChanged(nameof(BiggestFilesHeadline));
+            StatusMessage = $"Scanning {request.ScanRoot} with {selection.EngineName}...";
+
+            var progress = new Progress<BiggestFilesProgress>(update =>
+            {
+                SetBiggestFilesResults(update.CurrentTop);
+                SetBiggestFilesStatus(
+                    $"{update.FilesSeen:N0} files · {update.FilesPerSecond:N0}/s · {FormatElapsed(update.Elapsed)} · {selection.EngineName}");
+            });
+
+            // Task.Run: the MFT engine's volume reads are synchronous before its first await and
+            // would otherwise freeze the dispatcher. Progress<T> still marshals back to the UI thread.
+            var result = await Task.Run(() => _biggestFilesEngine.ScanAsync(request, progress, cts.Token), cts.Token);
+
+            SetBiggestFilesResults(result.Top);
+            _hasBiggestFilesSnapshot = true;
+            RaisePropertyChanged(nameof(HasBiggestFilesSnapshot));
+            _biggestFilesHeadline =
+                $"Top {result.Top.Count} files under {request.ScanRoot} — scanned {result.FilesSeen:N0} files in {FormatElapsed(result.Elapsed)} ({result.EngineName}).";
+            RaisePropertyChanged(nameof(BiggestFilesHeadline));
+            SetBiggestFilesStatus(result.Warning ??
+                $"Done. {result.FilesSeen:N0} files, {ByteFormatter.Format(result.BytesSeen)} scanned in {FormatElapsed(result.Elapsed)}.");
+            StatusMessage = $"Biggest-files scan complete via {result.EngineName}.";
+        }
+        catch (OperationCanceledException)
+        {
+            SetBiggestFilesStatus("Biggest-files scan canceled.");
+            StatusMessage = "Biggest-files scan canceled.";
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("StartBiggestFilesScanAsync failed.", ex);
+            SetBiggestFilesStatus($"Scan failed: {ex.Message}");
+            StatusMessage = ex.Message;
+        }
+        finally
+        {
+            SetBiggestFilesScanning(false);
+            _biggestFilesCts = null;
+            cts.Dispose();
+            _biggestFilesGate.Release();
+        }
+    }
+
+    public void CancelBiggestFilesScan()
+    {
+        _biggestFilesCts?.Cancel();
+    }
+
+    public async Task<bool> DeleteBiggestFileAsync(BiggestFileEntry? entry, CancellationToken cancellationToken)
+    {
+        if (entry is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            await Task.Run(() =>
+            {
+                if (!File.Exists(entry.Path))
+                {
+                    return;
+                }
+
+                try
+                {
+                    File.SetAttributes(entry.Path, System.IO.FileAttributes.Normal);
+                }
+                catch
+                {
+                    // Best-effort attribute reset before delete.
+                }
+
+                File.Delete(entry.Path);
+            }, cancellationToken);
+
+            _allBiggestFiles.Remove(entry);
+            _biggestFiles.Remove(entry);
+            RaisePropertyChanged(nameof(VisibleBiggestFilesText));
+            StatusMessage = $"Deleted {entry.Path}.";
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+            _allBiggestFiles.Remove(entry);
+            _biggestFiles.Remove(entry);
+            RaisePropertyChanged(nameof(VisibleBiggestFilesText));
+            StatusMessage = $"File was already gone: {entry.Path}.";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error($"DeleteBiggestFileAsync failed for {entry.Path}.", ex);
+            StatusMessage = $"Delete failed: {ex.Message}";
+            return false;
+        }
+    }
+
+    public bool RequestRestartAsAdmin()
+    {
+        SaveSettings();
+
+        if (ElevationService.TryRestartAsAdmin(out var error))
+        {
+            StatusMessage = "Relaunching DevTools as administrator...";
+            return true;
+        }
+
+        StatusMessage = error ?? "Could not relaunch as administrator.";
+        return false;
+    }
+
     public async Task EnsureKillProcessesLoadedAsync(CancellationToken cancellationToken)
     {
         if (_hasKillProcessSnapshot || IsKillProcessesRefreshing)
@@ -873,6 +1076,93 @@ public sealed class MainViewModel : ObservableObject
         RaisePropertyChanged(nameof(KillProcessesHeadline));
     }
 
+    private void SetBiggestFilesResults(IReadOnlyList<FileSizeHit> hits)
+    {
+        _allBiggestFiles.Clear();
+        foreach (var hit in hits)
+        {
+            _allBiggestFiles.Add(BiggestFileEntry.FromHit(hit));
+        }
+
+        ApplyBiggestFilesFilter();
+    }
+
+    private void ApplyBiggestFilesFilter()
+    {
+        var terms = TokenizeFilterTerms(_biggestFilesFilterText);
+        IEnumerable<BiggestFileEntry> filtered = _allBiggestFiles;
+        if (terms.Count > 0)
+        {
+            filtered = _allBiggestFiles.Where(entry => terms.Any(term =>
+                entry.FileName.Contains(term, StringComparison.OrdinalIgnoreCase) ||
+                entry.DirectoryPath.Contains(term, StringComparison.OrdinalIgnoreCase) ||
+                entry.Path.Contains(term, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        var desired = filtered.ToList();
+        if (SameBiggestFiles(desired))
+        {
+            return;
+        }
+
+        _biggestFiles.Clear();
+        foreach (var entry in desired)
+        {
+            _biggestFiles.Add(entry);
+        }
+
+        RaisePropertyChanged(nameof(VisibleBiggestFilesText));
+    }
+
+    private bool SameBiggestFiles(IReadOnlyList<BiggestFileEntry> desired)
+    {
+        if (desired.Count != _biggestFiles.Count)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < desired.Count; i++)
+        {
+            if (!ReferenceEquals(desired[i], _biggestFiles[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private void SetBiggestFilesScanning(bool isScanning)
+    {
+        if (SetProperty(ref _isBiggestFilesScanning, isScanning, nameof(IsBiggestFilesScanning)))
+        {
+            RaisePropertyChanged(nameof(ShowElevationHint));
+        }
+    }
+
+    private void SetBiggestFilesStatus(string statusText)
+    {
+        if (_biggestFilesStatusText == statusText)
+        {
+            return;
+        }
+
+        _biggestFilesStatusText = statusText;
+        RaisePropertyChanged(nameof(BiggestFilesStatusText));
+    }
+
+    private static int NormalizeTopCount(int value)
+    {
+        return BiggestFilesTopCountChoices.Contains(value) ? value : 100;
+    }
+
+    private static string FormatElapsed(TimeSpan elapsed)
+    {
+        return elapsed.TotalHours >= 1
+            ? elapsed.ToString(@"hh\:mm\:ss")
+            : elapsed.ToString(@"mm\:ss");
+    }
+
     private void SetActiveTab(MainContentTab tab)
     {
         if (SetProperty(ref _activeTab, tab, nameof(ActiveTab)))
@@ -1099,6 +1389,13 @@ public sealed class MainViewModel : ObservableObject
             _activeTab = ResolveActiveTab(settings);
             _encryptedPersonalAccessToken = settings.EncryptedPersonalAccessToken;
 
+            if (!string.IsNullOrWhiteSpace(settings.BiggestFilesScanRoot))
+            {
+                _biggestFilesScanRoot = settings.BiggestFilesScanRoot;
+            }
+
+            _biggestFilesTopCount = NormalizeTopCount(settings.BiggestFilesTopCount);
+
             var persistedPat = UnprotectSecret(_encryptedPersonalAccessToken);
             if (!string.IsNullOrWhiteSpace(persistedPat))
             {
@@ -1133,7 +1430,9 @@ public sealed class MainViewModel : ObservableObject
                         AutoRefreshEnabled = AutoRefreshEnabled,
                         RefreshIntervalSeconds = RefreshIntervalSeconds,
                         ActiveTab = _activeTab.ToString(),
-                        EncryptedPersonalAccessToken = _encryptedPersonalAccessToken
+                        EncryptedPersonalAccessToken = _encryptedPersonalAccessToken,
+                        BiggestFilesScanRoot = _biggestFilesScanRoot,
+                        BiggestFilesTopCount = _biggestFilesTopCount
                     },
                     new JsonSerializerOptions
                     {
@@ -1318,5 +1617,9 @@ public sealed class MainViewModel : ObservableObject
         public bool IsDiskUsageVisible { get; set; }
 
         public string? EncryptedPersonalAccessToken { get; set; }
+
+        public string? BiggestFilesScanRoot { get; set; }
+
+        public int BiggestFilesTopCount { get; set; } = 100;
     }
 }

@@ -9,6 +9,7 @@ public sealed class DiskUsageEntry : ObservableObject
     private string? _displayName;
     private bool _isMeasuring;
     private bool _existsOnDisk = true;
+    private bool _isExpanded;
     private long? _sizeBytes;
     private DateTimeOffset? _measurementStartedAt;
     private IReadOnlyList<DiskUsageEntry> _children = [];
@@ -69,6 +70,27 @@ public sealed class DiskUsageEntry : ObservableObject
 
     public IReadOnlyList<DiskUsageEntry> Children => _children;
 
+    public bool HasChildren => _children.Count > 0;
+
+    public string ExpandGlyph => IsExpanded ? "−" : "+";
+
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set
+        {
+            if (SetProperty(ref _isExpanded, value))
+            {
+                RaisePropertyChanged(nameof(ExpandGlyph));
+            }
+        }
+    }
+
+    public void ToggleExpanded()
+    {
+        IsExpanded = !IsExpanded;
+    }
+
     public static DiskUsageEntry CreateQueued(string path, string? note = null)
     {
         return new DiskUsageEntry(path, "Queued", note ?? "Waiting for an analyzer worker.");
@@ -121,6 +143,7 @@ public sealed class DiskUsageEntry : ObservableObject
             .ThenBy(child => child.Path, StringComparer.OrdinalIgnoreCase)
             .ToList();
         RaisePropertyChanged(nameof(Children));
+        RaisePropertyChanged(nameof(HasChildren));
     }
 
     public void StartMeasurement(string? note = null, DateTimeOffset? startedAt = null)

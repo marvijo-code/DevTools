@@ -76,13 +76,15 @@ public sealed partial class MainPage : Page
         try
         {
             await ViewModel.InitializeAsync(cts.Token);
+            // Tab data loads run unbounded — the 8s startup token is only for the auth/run check,
+            // and cancelling a disk scan mid-flight leaves the tab stuck on "Canceled".
             if (ViewModel.IsKillProcessesVisible)
             {
-                await ViewModel.EnsureKillProcessesLoadedAsync(cts.Token);
+                await ViewModel.EnsureKillProcessesLoadedAsync(CancellationToken.None);
             }
             else if (ViewModel.IsDiskUsageVisible)
             {
-                await ViewModel.EnsureDiskUsageLoadedAsync(cts.Token);
+                await ViewModel.EnsureDiskUsageLoadedAsync(CancellationToken.None);
             }
 
             ApplyRefreshTimerSettings();
@@ -321,6 +323,16 @@ public sealed partial class MainPage : Page
         section.ToggleExpanded();
     }
 
+    private void ToggleDiskEntry_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.Tag is not DiskUsageEntry entry)
+        {
+            return;
+        }
+
+        entry.ToggleExpanded();
+    }
+
     private void CopyProcessInfo_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement element || element.Tag is not ProcessKillEntry entry)
@@ -453,6 +465,115 @@ public sealed partial class MainPage : Page
     private async void RefreshDiskUsage_Click(object sender, RoutedEventArgs e)
     {
         await ViewModel.RefreshDiskUsageAsync(CancellationToken.None);
+    }
+
+    private async void StartBiggestFilesScan_Click(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.StartBiggestFilesScanAsync();
+    }
+
+    private void CancelBiggestFilesScan_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.CancelBiggestFilesScan();
+    }
+
+    private void SetBiggestFilesRootSystem_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.BiggestFilesScanRoot = Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\";
+    }
+
+    private void SetBiggestFilesRootDev_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.BiggestFilesScanRoot = @"C:\dev";
+    }
+
+    private async void RestartAsAdmin_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.IsBiggestFilesScanning)
+        {
+            ViewModel.StatusMessage = "Cancel the running scan before restarting as admin.";
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = "Restart as Administrator?",
+            Content = "DevTools will close and relaunch with administrator rights so it can read the NTFS Master File Table directly. A Windows UAC prompt will appear.",
+            PrimaryButtonText = "Restart",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot
+        };
+
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        if (ViewModel.RequestRestartAsAdmin())
+        {
+            Application.Current.Exit();
+        }
+    }
+
+    private void RevealBiggestFile_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.Tag is not string rawPath || string.IsNullOrWhiteSpace(rawPath))
+        {
+            return;
+        }
+
+        if (File.Exists(rawPath))
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"/select,\"{rawPath}\"",
+                UseShellExecute = true
+            });
+            AppLog.Info($"Revealed file in Explorer: {rawPath}");
+            return;
+        }
+
+        ViewModel.StatusMessage = $"File no longer exists: {rawPath}";
+    }
+
+    private void CopyBiggestFilePath_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.Tag is not BiggestFileEntry entry)
+        {
+            return;
+        }
+
+        var dataPackage = new DataPackage();
+        dataPackage.SetText(entry.CopyText);
+        Clipboard.SetContent(dataPackage);
+        ViewModel.StatusMessage = $"Copied path: {entry.Path}";
+    }
+
+    private async void DeleteBiggestFile_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.Tag is not BiggestFileEntry entry)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = "Delete File?",
+            Content = $"Permanently delete this file?\n\n{entry.Path}\n\nSize: {entry.Usage}",
+            PrimaryButtonText = "Delete",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot
+        };
+
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        await ViewModel.DeleteBiggestFileAsync(entry, CancellationToken.None);
     }
 
     private void NavigateToRepos_Click(object sender, RoutedEventArgs e)

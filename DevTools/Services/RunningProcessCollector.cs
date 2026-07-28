@@ -1,5 +1,6 @@
 using System.Management;
 using DevTools.Models;
+using DevTools.Services.Resources;
 
 namespace DevTools.Services;
 
@@ -7,6 +8,12 @@ public sealed class RunningProcessCollector
 {
     private const int MinimumWorkingSetBytes = 4 * 1024 * 1024;
     private const int MaxProcessCount = 40;
+
+    /// <summary>
+    /// Supplies each process's working directory, which is what lets the Processes tab group by agent
+    /// session (the repo being worked in) instead of by executable name.
+    /// </summary>
+    private readonly ProcessDetailsReader _detailsReader = new();
 
     public IReadOnlyList<RunningProcessSnapshot> Capture(CodexSessionCatalog? sessionCatalog = null)
     {
@@ -62,7 +69,8 @@ public sealed class RunningProcessCollector
                         commandLine,
                         measurementPath,
                         displayName,
-                        workingSetBytes));
+                        workingSetBytes,
+                        _detailsReader.Read(processId).WorkingDirectory));
                 }
             }
         }
@@ -103,4 +111,5 @@ public sealed record RunningProcessSnapshot(
     string CommandLine,
     string MeasurementPath,
     string DisplayName,
-    long WorkingSetBytes);
+    long WorkingSetBytes,
+    string WorkingDirectory = "");

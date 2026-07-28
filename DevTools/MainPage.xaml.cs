@@ -15,6 +15,7 @@ public sealed partial class MainPage : Page
 {
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _refreshTimer;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _liveRunTimer;
+    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _resourceTimer;
     private readonly WindowZoomController _windowZoomController;
     private CancellationTokenSource? _selectionCts;
 
@@ -33,7 +34,10 @@ public sealed partial class MainPage : Page
         _liveRunTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
         _liveRunTimer.Interval = TimeSpan.FromMilliseconds(500);
         _liveRunTimer.Tick += LiveRunTimer_Tick;
+        _resourceTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
+        _resourceTimer.Tick += ResourceTimer_Tick;
         ApplyRefreshTimerSettings();
+        ApplyResourceTimerSettings();
         ApplyActivePaneState();
         RootLayoutGrid.KeyDown += RootLayoutGrid_KeyDown;
 
@@ -45,6 +49,7 @@ public sealed partial class MainPage : Page
     {
         AppLog.Info("MainPage loaded.");
         _liveRunTimer.Start();
+        ApplyResourceTimerSettings();
         _ = InitializePageAsync();
     }
 
@@ -53,6 +58,7 @@ public sealed partial class MainPage : Page
         AppLog.Info("MainPage unloaded.");
         _refreshTimer.Stop();
         _liveRunTimer.Stop();
+        _resourceTimer.Stop();
         ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
         _selectionCts?.Cancel();
         _selectionCts?.Dispose();
@@ -67,6 +73,11 @@ public sealed partial class MainPage : Page
     {
         ViewModel.RefreshLiveRunMetrics();
         ViewModel.RefreshDiskUsageAnimation();
+    }
+
+    private async void ResourceTimer_Tick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+    {
+        await ViewModel.SampleResourcesAsync();
     }
 
     private async Task InitializePageAsync()
@@ -261,6 +272,35 @@ public sealed partial class MainPage : Page
         ViewModel.ShowKillProcesses();
         ApplyActivePaneState();
         await ViewModel.EnsureKillProcessesLoadedAsync(CancellationToken.None);
+    }
+
+    private void ResourcesTabButton_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ShowResources();
+        ApplyActivePaneState();
+    }
+
+    private void NavigateToResources_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ShowResources();
+        ApplyActivePaneState();
+        ResourcesScroll.ChangeView(null, 0, null, true);
+        ResourcesScroll.Focus(FocusState.Programmatic);
+    }
+
+    private void ClearResourceHistory_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ResetResourceHistory();
+    }
+
+    private void ToggleAgentSession_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.Tag is not AgentSessionEntry session)
+        {
+            return;
+        }
+
+        session.ToggleExpanded();
     }
 
     private void WorkflowTabButton_Click(object sender, RoutedEventArgs e)
@@ -591,6 +631,12 @@ public sealed partial class MainPage : Page
             ApplyRefreshTimerSettings();
         }
 
+        if (e.PropertyName is nameof(MainViewModel.ResourceIntervalSeconds) or
+            nameof(MainViewModel.ResourceMonitoringEnabled))
+        {
+            ApplyResourceTimerSettings();
+        }
+
         if (e.PropertyName is nameof(MainViewModel.IsKillProcessesVisible) or
             nameof(MainViewModel.IsWorkflowExplorerVisible) or
             nameof(MainViewModel.IsDiskUsageVisible) or
@@ -620,19 +666,49 @@ public sealed partial class MainPage : Page
         AppLog.Info("Refresh timer paused.");
     }
 
+    /// <summary>
+    /// Sampling runs regardless of which tab is showing so the history is already populated when the user
+    /// switches to Resources after noticing the machine struggling.
+    /// </summary>
+    private void ApplyResourceTimerSettings()
+    {
+        _resourceTimer.Stop();
+
+        if (!ViewModel.ResourceMonitoringEnabled)
+        {
+            AppLog.Info("Resource monitor paused.");
+            return;
+        }
+
+        _resourceTimer.Interval = TimeSpan.FromSeconds(ViewModel.ResourceIntervalSeconds);
+        _resourceTimer.Start();
+        AppLog.Info($"Resource monitor active. Interval={ViewModel.ResourceIntervalSeconds}s");
+    }
+
     private void ApplyActivePaneState()
     {
         var isKillVisible = ViewModel.IsKillProcessesVisible;
         var isWorkflowVisible = ViewModel.IsWorkflowExplorerVisible;
         var isDiskVisible = ViewModel.IsDiskUsageVisible;
+        var isResourcesVisible = ViewModel.IsResourcesVisible;
 
         KillProcessesContentPane.Visibility = isKillVisible ? Visibility.Visible : Visibility.Collapsed;
         WorkflowContentPane.Visibility = isWorkflowVisible ? Visibility.Visible : Visibility.Collapsed;
         DiskContentPane.Visibility = isDiskVisible ? Visibility.Visible : Visibility.Collapsed;
+        ResourcesContentPane.Visibility = isResourcesVisible ? Visibility.Visible : Visibility.Collapsed;
+
+        // The right-hand panel is shared: it shows run details for the workflow tabs and a system overview
+        // for Resources, so its content follows the active tab rather than always describing a run.
+        RunDetailsBorder.Visibility = Visibility.Visible;
+        Grid.SetColumnSpan(MainContentBorder, 1);
+        DetailsScroll.Visibility = isResourcesVisible ? Visibility.Collapsed : Visibility.Visible;
+        SystemOverviewScroll.Visibility = isResourcesVisible ? Visibility.Visible : Visibility.Collapsed;
+        RunStatusBadge.Visibility = isResourcesVisible ? Visibility.Collapsed : Visibility.Visible;
 
         ApplyTabButtonState(KillProcessesTabButton, isKillVisible);
         ApplyTabButtonState(WorkflowTabButton, isWorkflowVisible);
         ApplyTabButtonState(DiskTabButton, isDiskVisible);
+        ApplyTabButtonState(ResourcesTabButton, isResourcesVisible);
     }
 
     private static void ApplyTabButtonState(Button button, bool isActive)

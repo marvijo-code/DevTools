@@ -14,10 +14,11 @@ public enum MainContentTab
 {
     KillProcesses,
     WorkflowExplorer,
-    DiskUsage
+    DiskUsage,
+    Resources
 }
 
-public sealed class MainViewModel : ObservableObject
+public sealed partial class MainViewModel : ObservableObject
 {
     private static readonly RepositoryDefinition DefaultRepository = new("example-owner", "example-repo");
     private static readonly string SettingsDirectory = Path.Combine(
@@ -172,6 +173,8 @@ public sealed class MainViewModel : ObservableObject
     public bool IsWorkflowExplorerVisible => _activeTab == MainContentTab.WorkflowExplorer;
 
     public bool IsDiskUsageVisible => _activeTab == MainContentTab.DiskUsage;
+
+    public bool IsResourcesVisible => _activeTab == MainContentTab.Resources;
 
     public MainContentTab ActiveTab => _activeTab;
 
@@ -673,6 +676,11 @@ public sealed class MainViewModel : ObservableObject
         SetActiveTab(MainContentTab.DiskUsage);
     }
 
+    public void ShowResources()
+    {
+        SetActiveTab(MainContentTab.Resources);
+    }
+
     public async Task StartBiggestFilesScanAsync()
     {
         if (!await _biggestFilesGate.WaitAsync(0))
@@ -1171,6 +1179,9 @@ public sealed class MainViewModel : ObservableObject
             RaisePropertyChanged(nameof(IsKillProcessesVisible));
             RaisePropertyChanged(nameof(IsWorkflowExplorerVisible));
             RaisePropertyChanged(nameof(IsDiskUsageVisible));
+            RaisePropertyChanged(nameof(IsResourcesVisible));
+            RaisePropertyChanged(nameof(ContextPaneTitle));
+            RaisePropertyChanged(nameof(ContextPaneSubtitle));
         }
     }
 
@@ -1395,6 +1406,10 @@ public sealed class MainViewModel : ObservableObject
             }
 
             _biggestFilesTopCount = NormalizeTopCount(settings.BiggestFilesTopCount);
+            _resourceMonitoringEnabled = settings.ResourceMonitoringEnabled;
+            _resourceIntervalSeconds = ResourceIntervalOptions.Contains(settings.ResourceIntervalSeconds)
+                ? settings.ResourceIntervalSeconds
+                : 1;
 
             var persistedPat = UnprotectSecret(_encryptedPersonalAccessToken);
             if (!string.IsNullOrWhiteSpace(persistedPat))
@@ -1432,7 +1447,9 @@ public sealed class MainViewModel : ObservableObject
                         ActiveTab = _activeTab.ToString(),
                         EncryptedPersonalAccessToken = _encryptedPersonalAccessToken,
                         BiggestFilesScanRoot = _biggestFilesScanRoot,
-                        BiggestFilesTopCount = _biggestFilesTopCount
+                        BiggestFilesTopCount = _biggestFilesTopCount,
+                        ResourceMonitoringEnabled = _resourceMonitoringEnabled,
+                        ResourceIntervalSeconds = _resourceIntervalSeconds
                     },
                     new JsonSerializerOptions
                     {
@@ -1621,5 +1638,9 @@ public sealed class MainViewModel : ObservableObject
         public string? BiggestFilesScanRoot { get; set; }
 
         public int BiggestFilesTopCount { get; set; } = 100;
+
+        public bool ResourceMonitoringEnabled { get; set; } = true;
+
+        public int ResourceIntervalSeconds { get; set; } = 1;
     }
 }

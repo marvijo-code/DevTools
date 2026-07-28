@@ -37,5 +37,14 @@
     <Compile Include="..\..\DevTools\Services\BiggestFiles\ElevationService.cs" Link="Services\BiggestFiles\ElevationService.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\ParallelFileScanner.cs" Link="Services\BiggestFiles\ParallelFileScanner.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\MftRecordParser.cs" Link="Services\BiggestFiles\Ntfs\MftRecordParser.cs" />
+    <Compile Include="..\..\DevTools\Models\ResourceSample.cs" Link="Models\ResourceSample.cs" />
+    <Compile Include="..\..\DevTools\Models\AgentSessionUsage.cs" Link="Models\AgentSessionUsage.cs" />
+    <Compile Include="..\..\DevTools\Models\AgentSessionEntry.cs" Link="Models\AgentSessionEntry.cs" />
+    <Compile Include="..\..\DevTools\Models\ResourceHistory.cs" Link="Models\ResourceHistory.cs" />
+    <Compile Include="..\..\DevTools\Models\ResourceAdvice.cs" Link="Models\ResourceAdvice.cs" />
+    <Compile Include="..\..\DevTools\Services\Resources\WorkloadClassifier.cs" Link="Services\Resources\WorkloadClassifier.cs" />
+    <Compile Include="..\..\DevTools\Services\Resources\ProcessDetailsReader.cs" Link="Services\Resources\ProcessDetailsReader.cs" />
+    <Compile Include="..\..\DevTools\Services\Resources\ClaudeSessionCatalog.cs" Link="Services\Resources\ClaudeSessionCatalog.cs" />
+    <Compile Include="..\..\DevTools\Services\Resources\ResourceAdvisor.cs" Link="Services\Resources\ResourceAdvisor.cs" />
   </ItemGroup>
 </Project>

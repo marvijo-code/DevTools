@@ -1,10 +1,12 @@
 using DevTools.Models;
+using DevTools.Services.Resources;
 
 namespace DevTools.Services;
 
 public sealed class ProcessKillCatalog
 {
     private readonly RunningProcessCollector _runningProcessCollector = new();
+    private readonly ClaudeSessionCatalog _claudeSessions = new();
 
     public IReadOnlyList<ProcessKillSection> CaptureSections(CodexSessionCatalog? sessionCatalog = null)
     {
@@ -23,7 +25,7 @@ public sealed class ProcessKillCatalog
 
         return ProcessKillFilter.Apply(
             processes
-            .GroupBy(process => ResolveGroupTitle(process.DisplayName), StringComparer.OrdinalIgnoreCase)
+            .GroupBy(ResolveSessionGroupTitle, StringComparer.OrdinalIgnoreCase)
             .Select(group =>
             {
                 var entries = group
@@ -53,9 +55,18 @@ public sealed class ProcessKillCatalog
 
                 var totalWorkingSet = group.Sum(process => process.WorkingSetBytes);
                 var sectionStartPath = ResolveSectionStartPath(group.Key, group);
+                var summary = $"{entries.Count} process(es), {FormatBytes(totalWorkingSet)} working set combined.";
+
+                // Lead the summary with what the session is actually working on, when the agent reports it.
+                var sessionTitle = _claudeSessions.ResolveTitle(group.Select(process => process.ProcessId));
+                if (!string.IsNullOrWhiteSpace(sessionTitle))
+                {
+                    summary = $"{sessionTitle} — {summary}";
+                }
+
                 return new ProcessKillSection(
                     group.Key,
-                    $"{entries.Count} process(es), {FormatBytes(totalWorkingSet)} working set combined.",
+                    summary,
                     sectionStartPath,
                     entries);
             })
@@ -71,9 +82,83 @@ public sealed class ProcessKillCatalog
             : displayName.Trim();
     }
 
+    /// <summary>
+    /// Group title for one process. Developer processes are keyed by the workspace they are running in, so
+    /// two Claude sessions in different repos become two groups instead of collapsing into one "Claude"
+    /// row. Child processes inherit their parent's working directory, so they land in the same group
+    /// without needing to walk the process tree.
+    /// </summary>
+    public static string ResolveSessionGroupTitle(RunningProcessSnapshot process)
+    {
+        var baseTitle = ResolveGroupTitle(process.DisplayName);
+        var workspace = DescribeWorkspace(process.WorkingDirectory);
+
+        if (workspace.Length == 0)
+        {
+            return baseTitle;
+        }
+
+        var category = WorkloadClassifier.Classify(process.ProcessName);
+        return WorkloadClassifier.IsDeveloperWorkload(category)
+            ? $"{baseTitle} · {workspace}"
+            : baseTitle;
+    }
+
+    private static string DescribeWorkspace(string? workingDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = workingDirectory.TrimEnd('\\', '/');
+
+        // A process sitting in a system directory or the user profile root tells us nothing about which
+        // repo it belongs to, so it stays in the plain executable group.
+        if (IsUninformativeDirectory(trimmed))
+        {
+            return string.Empty;
+        }
+
+        var separatorIndex = trimmed.LastIndexOfAny(['\\', '/']);
+        return separatorIndex >= 0 && separatorIndex < trimmed.Length - 1
+            ? trimmed[(separatorIndex + 1)..]
+            : trimmed;
+    }
+
+    private static bool IsUninformativeDirectory(string directory)
+    {
+        if (directory.Length <= 3)
+        {
+            return true;
+        }
+
+        string[] uninformativeRoots =
+        [
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)
+        ];
+
+        return uninformativeRoots.Any(root =>
+            !string.IsNullOrEmpty(root) &&
+            string.Equals(directory, root.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Strips the " · workspace" suffix off a session group title, leaving the executable name that the
+    /// per-entry display names are actually prefixed with.
+    /// </summary>
+    private static string BaseTitleOf(string groupTitle)
+    {
+        var separatorIndex = groupTitle.IndexOf(" · ", StringComparison.Ordinal);
+        return separatorIndex > 0 ? groupTitle[..separatorIndex].Trim() : groupTitle;
+    }
+
     public static string StripChildDisplayName(string groupTitle, string displayName)
     {
-        var prefix = $"{groupTitle} — ";
+        var prefix = $"{BaseTitleOf(groupTitle)} — ";
         return displayName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
             ? displayName[prefix.Length..].Trim()
             : displayName.Trim();
@@ -82,7 +167,7 @@ public sealed class ProcessKillCatalog
     public static string ResolveEntryDisplayName(string groupTitle, RunningProcessSnapshot process)
     {
         var childDisplayName = StripChildDisplayName(groupTitle, process.DisplayName);
-        if (!string.Equals(childDisplayName, groupTitle, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(childDisplayName, BaseTitleOf(groupTitle), StringComparison.OrdinalIgnoreCase))
         {
             return childDisplayName;
         }
@@ -114,7 +199,7 @@ public sealed class ProcessKillCatalog
     private static bool IsParentProcess(string groupTitle, RunningProcessSnapshot process)
     {
         var childDisplayName = StripChildDisplayName(groupTitle, process.DisplayName);
-        if (!string.Equals(childDisplayName, groupTitle, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(childDisplayName, BaseTitleOf(groupTitle), StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }

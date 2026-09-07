@@ -3,6 +3,7 @@ param(
     [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $repository = 'marvijo-code/DevTools'
 $assetName = 'DevTools-win-x64.zip'
 New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
@@ -88,8 +89,16 @@ try {
     $versionsPath = Join-Path $InstallRoot 'versions'
     New-Item -ItemType Directory -Path $versionsPath -Force | Out-Null
     $destination = Join-Path $versionsPath ($release.tagName + '-' + $expectedHash.Substring(0,12).ToLowerInvariant())
+    $resolvedStaging = [IO.Path]::GetFullPath($staging)
+    $resolvedDestination = [IO.Path]::GetFullPath($destination)
+    $stagingBoundary = [IO.Path]::GetFullPath($downloadFolder) + [IO.Path]::DirectorySeparatorChar
+    $versionsBoundary = [IO.Path]::GetFullPath($versionsPath) + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolvedStaging.StartsWith($stagingBoundary, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $resolvedDestination.StartsWith($versionsBoundary, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The update paths fall outside the installation directories.'
+    }
     if (-not (Test-Path -LiteralPath $destination)) {
-        Move-Item -LiteralPath $staging -Destination $destination
+        Move-Item -LiteralPath $resolvedStaging -Destination $resolvedDestination
     }
     Save-JsonAtomic $currentPath @{ version = $release.tagName; directory = $destination; sha256 = $expectedHash }
     Save-JsonAtomic $statePath @{ checkedAt = [DateTimeOffset]::UtcNow.ToString('o'); status = 'ready'; version = $release.tagName }

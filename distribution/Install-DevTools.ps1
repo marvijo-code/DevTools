@@ -3,6 +3,7 @@ param(
     [switch]$NoLaunch
 )
 $ErrorActionPreference = 'Stop'
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $shell = (Get-Command pwsh -ErrorAction Stop).Source
 $null = Get-Command gh -ErrorAction Stop
 New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null

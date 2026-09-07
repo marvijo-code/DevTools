@@ -1,5 +1,6 @@
 param([string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'MarvijoDevTools'))
 $ErrorActionPreference = 'Stop'
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $currentPath = Join-Path $InstallRoot 'current.json'
 $updater = Join-Path $PSScriptRoot 'Update-DevTools.ps1'
 if (-not (Test-Path -LiteralPath $currentPath)) {

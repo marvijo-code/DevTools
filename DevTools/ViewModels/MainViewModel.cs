@@ -10,14 +10,6 @@ using DevTools.Services.BiggestFiles;
 
 namespace DevTools.ViewModels;
 
-public enum MainContentTab
-{
-    KillProcesses,
-    WorkflowExplorer,
-    DiskUsage,
-    Resources
-}
-
 public sealed partial class MainViewModel : ObservableObject
 {
     private static readonly RepositoryDefinition DefaultRepository = new("example-owner", "example-repo");
@@ -86,6 +78,7 @@ public sealed partial class MainViewModel : ObservableObject
     private string _lastRunsHash = string.Empty;
     private DateTimeOffset? _lastRefreshAt;
     private WorkflowRunItem? _selectedRun;
+    private ProcessKillEntry? _selectedProcess;
     private bool _isRefreshing;
     private bool _isDiskUsageRefreshing;
     private bool _isKillProcessesRefreshing;
@@ -349,7 +342,32 @@ public sealed partial class MainViewModel : ObservableObject
     public WorkflowRunItem? SelectedRun
     {
         get => _selectedRun;
-        set => SetProperty(ref _selectedRun, value);
+        set
+        {
+            if (SetProperty(ref _selectedRun, value))
+            {
+                RaisePropertyChanged(nameof(ContextPaneSubtitle));
+                RaisePropertyChanged(nameof(HasSelectedRun));
+            }
+        }
+    }
+
+    public bool HasSelectedRun => SelectedRun is not null;
+    public bool HasSelectedProcess => SelectedProcess is not null;
+    public ProcessKillEntry? SelectedProcess
+    {
+        get => _selectedProcess;
+        set
+        {
+            if (ReferenceEquals(_selectedProcess, value)) return;
+            if (_selectedProcess is not null) _selectedProcess.IsSelected = false;
+            if (value is not null) value.IsSelected = true;
+            if (SetProperty(ref _selectedProcess, value))
+            {
+                RaisePropertyChanged(nameof(HasSelectedProcess));
+                RaisePropertyChanged(nameof(ContextPaneSubtitle));
+            }
+        }
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
@@ -505,8 +523,6 @@ public sealed partial class MainViewModel : ObservableObject
             IsRefreshing = true;
             StatusMessage = "Refreshing workflow runs...";
 
-            var selectedRunId = SelectedRun?.Id;
-
             var fetchTasks = Repositories
                 .Select(repository => _gitHubApiClient.GetWorkflowRunsAsync(repository, 25, cancellationToken))
                 .ToList();
@@ -544,7 +560,7 @@ public sealed partial class MainViewModel : ObservableObject
                 run.PropertyChanged += WorkflowRunItem_PropertyChanged;
             }
 
-            ApplyRunFilter(selectedRunId);
+            ApplyRunFilter();
 
             if (SelectedRun is not null)
             {
@@ -569,23 +585,24 @@ public sealed partial class MainViewModel : ObservableObject
 
     public async Task ResolveSelectedRunAsync(CancellationToken cancellationToken)
     {
-        if (SelectedRun is null || SelectedRun.IsResolving)
+        var run = SelectedRun;
+        if (run is null || run.IsResolving)
         {
             return;
         }
 
-        if (SelectedRun.HasActualCommitUrl && string.IsNullOrWhiteSpace(SelectedRun.ResolutionError))
+        if (run.HasActualCommitUrl && string.IsNullOrWhiteSpace(run.ResolutionError))
         {
             return;
         }
 
-        AppLog.Info($"ResolveSelectedRunAsync started for run {SelectedRun.Id}.");
-        await _gitHubApiClient.ResolveRunDetailsAsync(SelectedRun, cancellationToken);
-        if (!string.IsNullOrWhiteSpace(RunFilterText))
+        AppLog.Info($"ResolveSelectedRunAsync started for run {run.Id}.");
+        await _gitHubApiClient.ResolveRunDetailsAsync(run, cancellationToken);
+        if (ReferenceEquals(SelectedRun, run) && !string.IsNullOrWhiteSpace(RunFilterText))
         {
-            ApplyRunFilter(SelectedRun.Id);
+            ApplyRunFilter();
         }
-        AppLog.Info($"ResolveSelectedRunAsync completed for run {SelectedRun.Id}.");
+        AppLog.Info($"ResolveSelectedRunAsync completed for run {run.Id}.");
     }
 
     public void RefreshLiveRunMetrics()
@@ -958,30 +975,21 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        ApplyRunFilter(run.Id);
+        ApplyRunFilter();
     }
 
     private void ApplyRunFilter(long? preferredRunId = null)
     {
+        var targetRunId = preferredRunId ?? SelectedRun?.Id;
         var filteredRuns = !HasActiveRunFilter()
             ? _allRuns
             : _allRuns.Where(MatchesFilter).ToList();
 
-        if (!Runs.SequenceEqual(filteredRuns))
-        {
-            Runs.Clear();
-            foreach (var run in filteredRuns)
-            {
-                Runs.Add(run);
-            }
-        }
+        SelectionRetention.Synchronize(Runs, filteredRuns);
 
         RaisePropertyChanged(nameof(VisibleRunsText));
 
-        var targetRunId = preferredRunId ?? SelectedRun?.Id;
-        SelectedRun = targetRunId is null
-            ? Runs.FirstOrDefault()
-            : Runs.FirstOrDefault(run => run.Id == targetRunId) ?? Runs.FirstOrDefault();
+        SelectedRun = SelectionRetention.Find(Runs, targetRunId, run => run.Id);
     }
 
     private bool HasActiveRunFilter()
@@ -1072,6 +1080,8 @@ public sealed partial class MainViewModel : ObservableObject
         var filteredSections = ProcessKillFilter.Apply(_allKillProcessSections, _processFilterText,
             _processViewState.SortColumn, _processViewState.SortDescending);
         SetKillProcessSections(filteredSections);
+        SelectedProcess = SelectionRetention.Find(_killProcessSections.SelectMany(section => section.Entries),
+            SelectedProcess?.ProcessId, entry => entry.ProcessId);
 
         var visibleCount = filteredSections.Sum(section => section.Entries.Count(entry => entry.CanKill));
         var groupCount = filteredSections.Count;

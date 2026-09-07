@@ -18,6 +18,8 @@
 
   <ItemGroup>
     <Compile Include="..\..\DevTools\Models\ProcessViewState.cs" Link="Models\ProcessViewState.cs" />
+    <Compile Include="..\..\DevTools\Models\WorkspaceContext.cs" Link="Models\WorkspaceContext.cs" />
+    <Compile Include="..\..\DevTools\Services\SelectionRetention.cs" Link="Services\SelectionRetention.cs" />
     <Compile Include="..\..\DevTools\Infrastructure\AppLog.cs" Link="Infrastructure\AppLog.cs" />
     <Compile Include="..\..\DevTools\Infrastructure\ByteFormatter.cs" Link="Infrastructure\ByteFormatter.cs" />
     <Compile Include="..\..\DevTools\Infrastructure\ObservableObject.cs" Link="Infrastructure\ObservableObject.cs" />

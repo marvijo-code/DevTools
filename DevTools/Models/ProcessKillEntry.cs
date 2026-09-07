@@ -4,6 +4,16 @@ namespace DevTools.Models;
 
 public sealed class ProcessKillEntry : ObservableObject
 {
+    private bool _isSelected;
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set
+        {
+            if (SetProperty(ref _isSelected, value)) RaisePropertyChanged(nameof(SelectionActionText));
+        }
+    }
+    public string SelectionActionText => IsSelected ? "Selected" : "Details";
     public ProcessKillEntry(
         int processId,
         int parentProcessId,

@@ -18,6 +18,8 @@ The updater verifies the package SHA-256 and release identity before changing th
 
 ## Processes and System Informer
 
+The navigation rail uses consistent button widths and indicates the active workspace. Both content panes have equal width. The right pane follows the active workspace: selected process details in Processes, selected workflow details in Runs, disk information in Storage, and the machine overview in Resources. Click a process row or its Details button to select it. Filtering away a selected row clears its details instead of substituting another item. Background run updates preserve the user's selection.
+
 DevTools collects process memory from Windows and groups processes by application or agent session. The list includes all enumerated processes, without the previous 40-process cap. Protected processes can lack executable paths and command lines.
 
 Click **Inspect** to select that process in the installed official System Informer. Use its process properties for threads, handles, modules and connections. This is a separate executable integration; it does not load a custom plugin or replace System Informer's driver. System Informer is not the source of DevTools' memory readings or browser tab names. Install and update the official application separately through its own updater.

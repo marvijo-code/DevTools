@@ -187,6 +187,7 @@ public sealed partial class MainPage : Page
 
     private async void RunsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (sender is ListView list) ViewModel.SelectedRun = list.SelectedItem as WorkflowRunItem;
         _selectionCts?.Cancel();
         _selectionCts?.Dispose();
         _selectionCts = new CancellationTokenSource();
@@ -268,19 +269,6 @@ public sealed partial class MainPage : Page
         await Launcher.LaunchFolderPathAsync(AppLog.LogDirectory);
     }
 
-    private async void KillProcessesTabButton_Click(object sender, RoutedEventArgs e)
-    {
-        ViewModel.ShowKillProcesses();
-        ApplyActivePaneState();
-        await ViewModel.EnsureKillProcessesLoadedAsync(CancellationToken.None);
-    }
-
-    private void ResourcesTabButton_Click(object sender, RoutedEventArgs e)
-    {
-        ViewModel.ShowResources();
-        ApplyActivePaneState();
-    }
-
     private void NavigateToResources_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowResources();
@@ -304,19 +292,6 @@ public sealed partial class MainPage : Page
         session.ToggleExpanded();
     }
 
-    private void WorkflowTabButton_Click(object sender, RoutedEventArgs e)
-    {
-        ViewModel.ShowWorkflowExplorer();
-        ApplyActivePaneState();
-    }
-
-    private async void DiskTabButton_Click(object sender, RoutedEventArgs e)
-    {
-        ViewModel.ShowDiskUsage();
-        ApplyActivePaneState();
-        await ViewModel.EnsureDiskUsageLoadedAsync(CancellationToken.None);
-    }
-
     private async void NavigateToKillProcesses_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowKillProcesses();
@@ -336,8 +311,11 @@ public sealed partial class MainPage : Page
 
     private void NavigateToDetails_Click(object sender, RoutedEventArgs e)
     {
-        DetailsScroll.ChangeView(null, 0, null, true);
-        DetailsScroll.Focus(FocusState.Programmatic);
+        var scroll = ViewModel.IsKillProcessesVisible ? ProcessDetailsScroll
+            : ViewModel.IsDiskUsageVisible ? StorageOverviewScroll
+            : ViewModel.IsResourcesVisible ? SystemOverviewScroll : DetailsScroll;
+        scroll.ChangeView(null, 0, null, true);
+        scroll.Focus(FocusState.Programmatic);
     }
 
     private async void NavigateToDisk_Click(object sender, RoutedEventArgs e)
@@ -418,6 +396,16 @@ public sealed partial class MainPage : Page
         if (sender is FrameworkElement element && element.Tag is string tag &&
             Enum.TryParse<ProcessSortColumn>(tag, out var column))
             ViewModel.SortProcesses(column);
+    }
+
+    private void SelectProcess_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: ProcessKillEntry entry }) ViewModel.SelectedProcess = entry;
+    }
+
+    private void ProcessRow_Tapped(object sender, TappedRoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: ProcessKillEntry entry }) ViewModel.SelectedProcess = entry;
     }
 
     private void ToggleProcessSection_Click(object sender, RoutedEventArgs e)
@@ -715,6 +703,7 @@ public sealed partial class MainPage : Page
         if (e.PropertyName is nameof(MainViewModel.SelectedRun))
         {
             UpdateRunDetailsExpanders();
+            RunStatusBadge.Visibility = ViewModel.IsWorkflowExplorerVisible && ViewModel.HasSelectedRun ? Visibility.Visible : Visibility.Collapsed;
         }
     }
 
@@ -754,28 +743,29 @@ public sealed partial class MainPage : Page
 
     private void ApplyActivePaneState()
     {
-        var isKillVisible = ViewModel.IsKillProcessesVisible;
-        var isWorkflowVisible = ViewModel.IsWorkflowExplorerVisible;
-        var isDiskVisible = ViewModel.IsDiskUsageVisible;
-        var isResourcesVisible = ViewModel.IsResourcesVisible;
+        var context = WorkspaceContext.For(ViewModel.ActiveTab);
+        var isKillVisible = context.ShowProcesses;
+        var isWorkflowVisible = context.ShowRuns;
+        var isDiskVisible = context.ShowStorage;
+        var isResourcesVisible = context.ShowSystem;
 
         KillProcessesContentPane.Visibility = isKillVisible ? Visibility.Visible : Visibility.Collapsed;
         WorkflowContentPane.Visibility = isWorkflowVisible ? Visibility.Visible : Visibility.Collapsed;
         DiskContentPane.Visibility = isDiskVisible ? Visibility.Visible : Visibility.Collapsed;
         ResourcesContentPane.Visibility = isResourcesVisible ? Visibility.Visible : Visibility.Collapsed;
 
-        // The right-hand panel is shared: it shows run details for the workflow tabs and a system overview
-        // for Resources, so its content follows the active tab rather than always describing a run.
         RunDetailsBorder.Visibility = Visibility.Visible;
         Grid.SetColumnSpan(MainContentBorder, 1);
-        DetailsScroll.Visibility = isResourcesVisible ? Visibility.Collapsed : Visibility.Visible;
+        DetailsScroll.Visibility = isWorkflowVisible ? Visibility.Visible : Visibility.Collapsed;
+        ProcessDetailsScroll.Visibility = isKillVisible ? Visibility.Visible : Visibility.Collapsed;
+        StorageOverviewScroll.Visibility = isDiskVisible ? Visibility.Visible : Visibility.Collapsed;
         SystemOverviewScroll.Visibility = isResourcesVisible ? Visibility.Visible : Visibility.Collapsed;
-        RunStatusBadge.Visibility = isResourcesVisible ? Visibility.Collapsed : Visibility.Visible;
+        RunStatusBadge.Visibility = isWorkflowVisible && ViewModel.HasSelectedRun ? Visibility.Visible : Visibility.Collapsed;
 
-        ApplyTabButtonState(KillProcessesTabButton, isKillVisible);
-        ApplyTabButtonState(WorkflowTabButton, isWorkflowVisible);
-        ApplyTabButtonState(DiskTabButton, isDiskVisible);
-        ApplyTabButtonState(ResourcesTabButton, isResourcesVisible);
+        ApplyTabButtonState(ResourcesNavigationButton, isResourcesVisible);
+        ApplyTabButtonState(ProcessesNavigationButton, isKillVisible);
+        ApplyTabButtonState(RunsNavigationButton, isWorkflowVisible);
+        ApplyTabButtonState(StorageNavigationButton, isDiskVisible);
     }
 
     private static void ApplyTabButtonState(Button button, bool isActive)

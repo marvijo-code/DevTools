@@ -6,6 +6,12 @@
       Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
   <Page.Resources>
     <infra:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+    <Style x:Key="NavigationButtonStyle" TargetType="Button">
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="MinHeight" Value="40" />
+      <Setter Property="Padding" Value="10,8" />
+    </Style>
     <Style TargetType="ListView">
       <Setter Property="HorizontalAlignment"
               Value="Stretch" />
@@ -109,13 +115,13 @@
     <Grid Grid.Row="0"
           ColumnSpacing="12">
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="104" />
+        <ColumnDefinition Width="124" />
         <ColumnDefinition Width="*" />
         <ColumnDefinition Width="Auto" />
       </Grid.ColumnDefinitions>
 
-      <Border Grid.Column="1"
-              Padding="16"
+      <Border Grid.Column="0" Grid.ColumnSpan="2"
+              Padding="12"
               CornerRadius="18"
               HorizontalAlignment="Stretch"
               Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
@@ -127,10 +133,7 @@
             <ColumnDefinition Width="Auto" />
             <ColumnDefinition Width="*" />
           </Grid.ColumnDefinitions>
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-          </Grid.RowDefinitions>
+
 
           <TextBlock Text="DevTools"
                      FontSize="26"
@@ -138,33 +141,13 @@
                      VerticalAlignment="Center" />
 
           <TextBlock Grid.Column="1"
-                     Grid.RowSpan="2"
-                     Text="Compact repo dashboard for workflow runs, PR context, and disk usage hotspots."
+                     Text="Processes, system resources, workflow runs and storage."
                      Opacity="0.72"
                      MaxWidth="680"
                      VerticalAlignment="Center"
                      TextWrapping="WrapWholeWords" />
 
-          <StackPanel Grid.Row="1"
-                      Orientation="Horizontal"
-                      Spacing="8">
-            <Button x:Name="ResourcesTabButton"
-                    Content="Resources"
-                    Click="ResourcesTabButton_Click"
-                    MinWidth="120" />
-            <Button x:Name="KillProcessesTabButton"
-                    Content="Kill Processes"
-                    Click="KillProcessesTabButton_Click"
-                    MinWidth="140" />
-            <Button x:Name="WorkflowTabButton"
-                    Content="GitHub Workflow Explorer"
-                    Click="WorkflowTabButton_Click"
-                    MinWidth="160" />
-            <Button x:Name="DiskTabButton"
-                    Content="Disk Usage Analysis"
-                    Click="DiskTabButton_Click"
-                    MinWidth="160" />
-          </StackPanel>
+
         </Grid>
       </Border>
 
@@ -178,9 +161,9 @@
     <Grid Grid.Row="1"
           ColumnSpacing="12">
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="104" />
-        <ColumnDefinition Width="1.55*" />
-        <ColumnDefinition Width="1.1*" />
+        <ColumnDefinition Width="124" />
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="*" />
       </Grid.ColumnDefinitions>
 
       <Border Grid.Column="0"
@@ -211,18 +194,25 @@
           <StackPanel Grid.Row="1"
                       Spacing="8">
             <Button Content="Resources"
+                    x:Name="ResourcesNavigationButton" Style="{StaticResource NavigationButtonStyle}"
                     Click="NavigateToResources_Click" />
             <Button Content="Processes"
+                    x:Name="ProcessesNavigationButton" Style="{StaticResource NavigationButtonStyle}"
                     Click="NavigateToKillProcesses_Click" />
             <Button Content="Runs"
+                    x:Name="RunsNavigationButton" Style="{StaticResource NavigationButtonStyle}"
                     Click="NavigateToRuns_Click" />
             <Button Content="Details"
+                    Style="{StaticResource NavigationButtonStyle}"
                     Click="NavigateToDetails_Click" />
             <Button Content="Storage"
+                    x:Name="StorageNavigationButton" Style="{StaticResource NavigationButtonStyle}"
                     Click="NavigateToDisk_Click" />
             <Button Content="Auth"
+                    Style="{StaticResource NavigationButtonStyle}"
                     Click="NavigateToRepos_Click" />
             <Button Content="Logs"
+                    Style="{StaticResource NavigationButtonStyle}"
                     Click="OpenLogs_Click" />
           </StackPanel>
 
@@ -265,7 +255,7 @@
               </Grid.ColumnDefinitions>
 
               <StackPanel>
-                <TextBlock Text="Kill Processes"
+                <TextBlock Text="Processes"
                            FontSize="20"
                            FontWeight="SemiBold"
                            Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
@@ -385,8 +375,8 @@
                               <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="1.1*" />
                                 <ColumnDefinition Width="1.9*" />
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="100" />
+                                <ColumnDefinition Width="90" />
                               </Grid.ColumnDefinitions>
                               <Button Content="Process" Tag="Process" Click="SortProcesses_Click"
                                       AutomationProperties.AutomationId="SortProcess"
@@ -409,13 +399,14 @@
                               <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="models:ProcessKillEntry">
                                   <Grid ColumnSpacing="10"
+                                        Tapped="ProcessRow_Tapped"
                                         HorizontalAlignment="Stretch"
                                         Margin="0,0,0,6">
                                     <Grid.ColumnDefinitions>
                                       <ColumnDefinition Width="1.1*" />
                                       <ColumnDefinition Width="1.9*" />
-                                      <ColumnDefinition Width="Auto" />
-                                      <ColumnDefinition Width="Auto" />
+                                      <ColumnDefinition Width="100" />
+                                      <ColumnDefinition Width="90" />
                                     </Grid.ColumnDefinitions>
 
                                     <StackPanel>
@@ -436,7 +427,7 @@
                                                IsTextSelectionEnabled="True"
                                                FontFamily="Consolas"
                                                FontSize="11"
-                                               TextWrapping="WrapWholeWords"
+                                               TextWrapping="Wrap"
                                                VerticalAlignment="Top"
                                                Margin="10,0,0,0" />
 
@@ -450,6 +441,8 @@
                                                 Spacing="8"
                                                 Margin="10,0,0,0"
                                                 VerticalAlignment="Top">
+                                      <Button Content="{Binding SelectionActionText}" Click="SelectProcess_Click" Tag="{Binding}"
+                                              AutomationProperties.AutomationId="SelectProcessDetails" />
                                       <Button Content="Inspect"
                                               AutomationProperties.AutomationId="InspectProcess"
                                               ToolTipService.ToolTip="Open this process in System Informer"
@@ -1637,6 +1630,7 @@
                         VerticalScrollBarVisibility="Auto"
                         HorizontalScrollBarVisibility="Disabled">
             <StackPanel Spacing="10"
+                        Visibility="{Binding HasSelectedRun, Converter={StaticResource BoolToVisibilityConverter}}"
                         HorizontalAlignment="Stretch">
               <StackPanel Spacing="4"
                           HorizontalAlignment="Stretch">
@@ -1828,7 +1822,53 @@
             </StackPanel>
           </ScrollViewer>
 
-          <!-- Context for the Resources tab: what this machine is, and what is currently worst on it. -->
+          <ScrollViewer x:Name="ProcessDetailsScroll" Grid.Row="1" Visibility="Collapsed"
+                        VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Spacing="12" Visibility="{Binding HasSelectedProcess, Converter={StaticResource BoolToVisibilityConverter}}">
+              <TextBlock Text="{Binding SelectedProcess.DisplayName}" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" />
+              <Border Style="{StaticResource ContextCardStyle}">
+                <StackPanel Spacing="6">
+                  <TextBlock Text="Process memory" Style="{StaticResource ContextCardHeaderStyle}" />
+                  <TextBlock Text="{Binding SelectedProcess.Usage}" FontSize="20" FontWeight="SemiBold" />
+                  <TextBlock Text="{Binding SelectedProcess.Note}" TextWrapping="Wrap" Opacity="0.72" />
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource ContextCardStyle}">
+                <StackPanel Spacing="6">
+                  <TextBlock Text="Start path" Style="{StaticResource ContextCardHeaderStyle}" />
+                  <TextBlock Text="{Binding SelectedProcess.StartPath}" TextWrapping="Wrap" IsTextSelectionEnabled="True" FontFamily="Consolas" FontSize="12" />
+                </StackPanel>
+              </Border>
+              <Expander Header="Full command line">
+                <TextBlock Text="{Binding SelectedProcess.CommandLine}" TextWrapping="Wrap" IsTextSelectionEnabled="True" FontFamily="Consolas" FontSize="12" />
+              </Expander>
+              <Button Content="Inspect in System Informer" Click="InspectProcess_Click" Tag="{Binding SelectedProcess.ProcessId}" />
+              <Button Content="Copy process details" Click="CopyProcessInfo_Click" Tag="{Binding SelectedProcess}" />
+            </StackPanel>
+          </ScrollViewer>
+
+          <ScrollViewer x:Name="StorageOverviewScroll" Grid.Row="1" Visibility="Collapsed"
+                        VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Spacing="12">
+              <Border Style="{StaticResource ContextCardStyle}">
+                <StackPanel Spacing="6">
+                  <TextBlock Text="Disk analysis" Style="{StaticResource ContextCardHeaderStyle}" />
+                  <TextBlock Text="{Binding DiskUsageHeadline}" TextWrapping="Wrap" />
+                  <TextBlock Text="{Binding DiskUsageAnalysis}" TextWrapping="Wrap" Opacity="0.8" />
+                  <TextBlock Text="{Binding DiskUsageStatusText}" TextWrapping="Wrap" Opacity="0.7" />
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource ContextCardStyle}">
+                <StackPanel Spacing="6">
+                  <TextBlock Text="Largest files" Style="{StaticResource ContextCardHeaderStyle}" />
+                  <TextBlock Text="{Binding BiggestFilesScanRoot}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                  <TextBlock Text="{Binding BiggestFilesStatusText}" TextWrapping="Wrap" Opacity="0.8" />
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </ScrollViewer>
+
+          <!-- Live machine context belongs only to Resources. -->
           <ScrollViewer x:Name="SystemOverviewScroll"
                         Grid.Row="1"
                         Visibility="Collapsed"

@@ -110,11 +110,15 @@ public sealed partial class MainViewModel
     }
 
     /// <summary>Title of the shared right-hand panel, which follows whichever tab is active.</summary>
-    public string ContextPaneTitle => IsResourcesVisible ? "System Overview" : "Selected Run";
+    public string ContextPaneTitle => WorkspaceContext.For(_activeTab).Title;
 
-    public string ContextPaneSubtitle => IsResourcesVisible
-        ? ResourceCountsText
-        : SelectedRun?.Repository.FullName ?? "No run selected.";
+    public string ContextPaneSubtitle => _activeTab switch
+    {
+        MainContentTab.Resources => ResourceCountsText,
+        MainContentTab.WorkflowExplorer => SelectedRun?.Repository.FullName ?? "Select a workflow run to see its details.",
+        MainContentTab.KillProcesses => SelectedProcess?.Note ?? "Select a process row to inspect it here.",
+        _ => "Disk usage and scan information for this machine."
+    };
 
     public string ResourceVerdictText => _resourceVerdictText;
 

@@ -14,7 +14,7 @@ foreach ($script in @('Start-DevTools.ps1','Update-DevTools.ps1')) {
         Copy-Item -LiteralPath $source -Destination $destination -Force
     }
 }
-& (Join-Path $InstallRoot 'Update-DevTools.ps1') -InstallRoot $InstallRoot -Force
+& $shell -NoProfile -File (Join-Path $InstallRoot 'Update-DevTools.ps1') -InstallRoot $InstallRoot -Force
 if ($LASTEXITCODE -ne 0) { throw 'The release could not be installed.' }
 $shortcutDirectory = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'
 $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $shortcutDirectory 'DevTools.lnk'))

@@ -3,8 +3,9 @@ $ErrorActionPreference = 'Stop'
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $currentPath = Join-Path $InstallRoot 'current.json'
 $updater = Join-Path $PSScriptRoot 'Update-DevTools.ps1'
+$shell = (Get-Command pwsh -ErrorAction Stop).Source
 if (-not (Test-Path -LiteralPath $currentPath)) {
-    & $updater -InstallRoot $InstallRoot -Force
+    & $shell -NoProfile -File $updater -InstallRoot $InstallRoot -Force
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $currentPath)) { throw 'DevTools installation failed.' }
 }
 $current = Get-Content -LiteralPath $currentPath -Raw | ConvertFrom-Json
@@ -16,5 +17,4 @@ if (-not (Test-Path -LiteralPath $executable)) { throw 'The installed app execut
 $versionUpdater = Join-Path $directory 'Update-DevTools.ps1'
 if (Test-Path -LiteralPath $versionUpdater) { $updater = $versionUpdater }
 Start-Process -FilePath $executable -WorkingDirectory $directory
-$shell = (Get-Command pwsh -ErrorAction Stop).Source
 Start-Process -FilePath $shell -ArgumentList @('-NoProfile','-File',('"' + $updater + '"'),'-InstallRoot',('"' + $InstallRoot + '"')) -WindowStyle Hidden

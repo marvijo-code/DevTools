@@ -1,4 +1,5 @@
 using DevTools.Infrastructure;
+using DevTools.Services;
 
 namespace DevTools.Models;
 
@@ -47,6 +48,15 @@ public sealed class ProcessKillEntry : ObservableObject
 
     public string ExecutablePath { get; private set; }
 
+    public string ExecutableName => string.IsNullOrWhiteSpace(ExecutablePath)
+        ? "Path unavailable" : Path.GetFileName(ExecutablePath);
+
+    public string Role => ProcessCommandLineResolver.ResolveRole(CommandLine, ExecutablePath);
+
+    public string ProcessIdLabel => $"PID {ProcessId}";
+
+    public string ActionsLabel => $"Actions for {DisplayName}, PID {ProcessId}";
+
     public string StartPath { get; private set; }
 
     public long WorkingSetBytes { get; private set; }
@@ -70,7 +80,8 @@ public sealed class ProcessKillEntry : ObservableObject
         Note = source.Note;
         CopyText = source.CopyText;
         foreach (var property in new[] { nameof(ParentProcessId), nameof(DisplayName), nameof(CommandLine),
-            nameof(ExecutablePath), nameof(StartPath), nameof(WorkingSetBytes), nameof(Usage), nameof(Note), nameof(CopyText) })
+            nameof(ExecutablePath), nameof(ExecutableName), nameof(Role), nameof(ActionsLabel),
+            nameof(StartPath), nameof(WorkingSetBytes), nameof(Usage), nameof(Note), nameof(CopyText) })
             RaisePropertyChanged(property);
     }
 

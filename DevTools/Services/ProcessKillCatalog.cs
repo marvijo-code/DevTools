@@ -57,7 +57,7 @@ public sealed class ProcessKillCatalog
 
                 var totalWorkingSet = group.Sum(process => process.WorkingSetBytes);
                 var sectionStartPath = ResolveSectionStartPath(group.Key, group);
-                var summary = $"{entries.Count} process(es), {FormatBytes(totalWorkingSet)} working set combined.";
+                var summary = $"{entries.Count} processes · {FormatBytes(totalWorkingSet)} total memory";
 
                 // Lead the summary with what the session is actually working on, when the agent reports it.
                 var sessionTitle = _claudeSessions.ResolveTitle(group.Select(process => process.ProcessId));

@@ -7,6 +7,48 @@ namespace DiskUsageAnalyzer.Tests;
 
 public sealed class ProcessViewTests
 {
+    [Fact]
+    public void CompactExecutableKeepsFullPathAndKnownRoleAvailable()
+    {
+        const string path = @"C:\Program Files\WindowsApps\OpenAI.Codex_26.901.4073.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe";
+        var command = $"\"{path}\" --type=gpu-process";
+        var entry = new ProcessKillEntry(42, 1, "GPU Process", command, path,
+            ProcessCommandLineResolver.FormatStartPathDisplay(command, path), 1000, "1 KB", "PID 42");
+        Assert.Equal("ChatGPT.exe", entry.ExecutableName);
+        Assert.Equal("Graphics process", entry.Role);
+        Assert.Equal("PID 42", entry.ProcessIdLabel);
+        Assert.Contains(path, entry.StartPath);
+        Assert.Contains(path, entry.CopyText);
+        Assert.Equal(command, entry.CommandLine);
+    }
+
+    [Fact]
+    public void RefreshUpdatesCompactLabelsWithoutLosingSelection()
+    {
+        var entry = Entry(1, "Old", 100);
+        entry.IsSelected = true;
+        var notifications = new List<string?>();
+        entry.PropertyChanged += (_, e) => notifications.Add(e.PropertyName);
+        entry.UpdateFrom(new(1, 0, "Firefox", @"C:\Firefox\firefox.exe", @"C:\Firefox\firefox.exe",
+            @"C:\Firefox\firefox.exe", 200, "200 B", "PID 1"));
+        Assert.Equal("firefox.exe", entry.ExecutableName);
+        Assert.Equal("Browser main process", entry.Role);
+        Assert.Equal("Actions for Firefox, PID 1", entry.ActionsLabel);
+        Assert.True(entry.IsSelected);
+        Assert.Contains(nameof(ProcessKillEntry.ExecutableName), notifications);
+        Assert.Contains(nameof(ProcessKillEntry.Role), notifications);
+        Assert.Contains(nameof(ProcessKillEntry.ActionsLabel), notifications);
+    }
+
+    [Fact]
+    public void MissingExecutableHasAnExplicitLabelAndNoInventedPath()
+    {
+        var entry = Entry(1, "System", 0, "");
+        Assert.Equal("Path unavailable", entry.ExecutableName);
+        Assert.Empty(entry.Role);
+        Assert.Equal("System (PID 1)", entry.CopyText);
+    }
+
     private static ProcessKillEntry Entry(int pid, string name, long bytes, string path = "C:\\Apps\\app.exe") =>
         new(pid, 1, name, path, path, path, bytes, bytes.ToString(), "PID " + pid);
 

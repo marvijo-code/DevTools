@@ -403,6 +403,38 @@ public sealed partial class MainPage : Page
         if (sender is FrameworkElement { Tag: ProcessKillEntry entry }) ViewModel.SelectedProcess = entry;
     }
 
+    private void ProcessActions_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: ProcessKillEntry entry } anchor) return;
+        ViewModel.SelectedProcess = entry;
+        var menu = new MenuFlyout();
+        var details = new MenuFlyoutItem { Text = "Show details", Tag = entry };
+        details.Click += SelectProcess_Click;
+        var inspect = new MenuFlyoutItem { Text = "Inspect in System Informer", Tag = entry.ProcessId, IsEnabled = entry.CanKill };
+        inspect.Click += InspectProcess_Click;
+        var copy = new MenuFlyoutItem { Text = "Copy name, PID and full path", Tag = entry };
+        copy.Click += CopyProcessInfo_Click;
+        var end = new MenuFlyoutItem { Text = "End process...", Tag = entry.ProcessId, IsEnabled = entry.CanKill };
+        end.Click += KillProcess_Click;
+        menu.Items.Add(details);
+        menu.Items.Add(inspect);
+        menu.Items.Add(copy);
+        menu.Items.Add(new MenuFlyoutSeparator());
+        menu.Items.Add(end);
+        menu.ShowAt(anchor);
+    }
+
+    private void ProcessGroupActions_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: ProcessKillSection section } anchor) return;
+        var menu = new MenuFlyout();
+        var end = new MenuFlyoutItem { Text = "End all processes...", Tag = section,
+            IsEnabled = section.Entries.Any(entry => entry.CanKill) };
+        end.Click += KillProcessSection_Click;
+        menu.Items.Add(end);
+        menu.ShowAt(anchor);
+    }
+
     private void ProcessRow_Tapped(object sender, TappedRoutedEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: ProcessKillEntry entry }) ViewModel.SelectedProcess = entry;

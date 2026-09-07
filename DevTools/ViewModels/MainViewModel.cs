@@ -156,8 +156,8 @@ public sealed partial class MainViewModel : ObservableObject
             var visibleCount = _killProcessSections.Sum(section => section.Entries.Count(entry => entry.CanKill));
             var totalCount = _allKillProcessSections.Sum(section => section.Entries.Count(entry => entry.CanKill));
             return visibleCount == totalCount
-                ? $"{visibleCount} process(es)"
-                : $"{visibleCount} of {totalCount} process(es)";
+                ? $"{visibleCount} processes"
+                : $"{visibleCount} of {totalCount} processes";
         }
     }
 
@@ -1090,8 +1090,8 @@ public sealed partial class MainViewModel : ObservableObject
                 ? "No matching processes found."
                 : "No processes match the current search."
             : groupCount == 1
-                ? $"{visibleCount} process(es). {ProcessSortSummary}"
-                : $"{visibleCount} process(es) across {groupCount} group(s). {ProcessSortSummary}";
+                ? $"{visibleCount} processes. {ProcessSortSummary}"
+                : $"{visibleCount} processes in {groupCount} groups. {ProcessSortSummary}";
 
         RaisePropertyChanged(nameof(VisibleProcessesText));
         RaisePropertyChanged(nameof(KillProcessesHeadline));

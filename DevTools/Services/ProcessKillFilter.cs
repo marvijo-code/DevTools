@@ -29,7 +29,7 @@ public static class ProcessKillFilter
             var totalWorkingSet = matchingEntries.Sum(entry => entry.WorkingSetBytes);
             filteredSections.Add(new ProcessKillSection(
                 section.Title,
-                terms.Count == 0 ? section.Summary : $"{matchingEntries.Count} process(es), {FormatBytes(totalWorkingSet)} working set combined.",
+                terms.Count == 0 ? section.Summary : $"{matchingEntries.Count} processes · {FormatBytes(totalWorkingSet)} total memory",
                 section.StartPath,
                 matchingEntries)
             {

@@ -16,14 +16,7 @@ foreach ($script in @('Start-DevTools.ps1','Update-DevTools.ps1')) {
 }
 & $shell -NoProfile -File (Join-Path $InstallRoot 'Update-DevTools.ps1') -InstallRoot $InstallRoot -Force
 if ($LASTEXITCODE -ne 0) { throw 'The release could not be installed.' }
-$shortcutDirectory = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'
-$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $shortcutDirectory 'DevTools.lnk'))
-$shortcut.TargetPath = $shell
-$shortcut.Arguments = '-NoProfile -WindowStyle Hidden -File "' + (Join-Path $InstallRoot 'Start-DevTools.ps1') + '" -InstallRoot "' + $InstallRoot + '"'
-$shortcut.WorkingDirectory = $InstallRoot
-$shortcut.WindowStyle = 7
 $current = Get-Content -LiteralPath (Join-Path $InstallRoot 'current.json') -Raw | ConvertFrom-Json
-$shortcut.IconLocation = Join-Path $current.directory 'DevTools.exe'
-$shortcut.Save()
-if (-not $NoLaunch) { & (Join-Path $InstallRoot 'Start-DevTools.ps1') -InstallRoot $InstallRoot }
+& (Join-Path $current.directory 'Register-DevTools.ps1') -InstallRoot $InstallRoot
+if (-not $NoLaunch) { Start-Process -FilePath (Join-Path $InstallRoot 'DevTools.Launcher.exe') }
 Write-Output ('Installed ' + $current.version + '. Updates are checked automatically when DevTools starts.')

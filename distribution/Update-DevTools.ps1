@@ -101,6 +101,8 @@ try {
         Move-Item -LiteralPath $resolvedStaging -Destination $resolvedDestination
     }
     Save-JsonAtomic $currentPath @{ version = $release.tagName; directory = $destination; sha256 = $expectedHash }
+    $registration = Join-Path $destination 'Register-DevTools.ps1'
+    if (Test-Path -LiteralPath $registration) { & $registration -InstallRoot $InstallRoot }
     Save-JsonAtomic $statePath @{ checkedAt = [DateTimeOffset]::UtcNow.ToString('o'); status = 'ready'; version = $release.tagName }
     Write-Output ('Ready for the next launch: ' + $release.tagName)
 }

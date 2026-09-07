@@ -13,6 +13,8 @@ public partial class App : Application
     /// </summary>
     public App()
     {
+        try { ShellIdentity.ConfigureProcess(); }
+        catch (Exception ex) { AppLog.Error("Setting Windows app identity failed.", ex); }
         this.InitializeComponent();
         AppLog.Info("App constructed.");
     }
@@ -59,6 +61,8 @@ public partial class App : Application
         }
 
         MainWindow.SetWindowIcon();
+        try { ShellIdentity.ConfigureWindow(WinRT.Interop.WindowNative.GetWindowHandle(MainWindow)); }
+        catch (Exception ex) { AppLog.Error("Setting Windows taskbar identity failed.", ex); }
         // Ensure the current window is active
         MainWindow.Activate();
         AppLog.Info("Main window activated.");

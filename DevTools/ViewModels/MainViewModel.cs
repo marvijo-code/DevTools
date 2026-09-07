@@ -59,7 +59,8 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly SemaphoreSlim _killProcessesRefreshGate = new(1, 1);
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private readonly Dictionary<string, bool> _diskUsageSectionExpansionStates = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, bool> _killProcessSectionExpansionStates = new(StringComparer.OrdinalIgnoreCase);
+    private ProcessViewState _processViewState = new();
+    private Dictionary<string, bool> _killProcessSectionExpansionStates => _processViewState.ExpandedSections;
     private readonly List<WorkflowRunItem> _allRuns = [];
     private readonly ObservableCollection<DiskUsageSection> _diskUsageSections = [];
     private readonly ObservableCollection<ProcessKillSection> _killProcessSections = [];
@@ -150,6 +151,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (SetProperty(ref _processFilterText, value))
             {
                 ApplyProcessFilter();
+                SaveSettings();
             }
         }
     }
@@ -1067,7 +1069,8 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void ApplyProcessFilter()
     {
-        var filteredSections = ProcessKillFilter.Apply(_allKillProcessSections, _processFilterText);
+        var filteredSections = ProcessKillFilter.Apply(_allKillProcessSections, _processFilterText,
+            _processViewState.SortColumn, _processViewState.SortDescending);
         SetKillProcessSections(filteredSections);
 
         var visibleCount = filteredSections.Sum(section => section.Entries.Count(entry => entry.CanKill));
@@ -1077,11 +1080,28 @@ public sealed partial class MainViewModel : ObservableObject
                 ? "No matching processes found."
                 : "No processes match the current search."
             : groupCount == 1
-                ? $"{visibleCount} process(es), ordered by memory."
-                : $"{visibleCount} process(es) across {groupCount} group(s), ordered by memory.";
+                ? $"{visibleCount} process(es). {ProcessSortSummary}"
+                : $"{visibleCount} process(es) across {groupCount} group(s). {ProcessSortSummary}";
 
         RaisePropertyChanged(nameof(VisibleProcessesText));
         RaisePropertyChanged(nameof(KillProcessesHeadline));
+    }
+
+    public string ProcessSortSummary => $"Sorted by {(_processViewState.SortColumn == ProcessSortColumn.StartPath ? "start path" : _processViewState.SortColumn.ToString().ToLowerInvariant())}, {(_processViewState.SortDescending ? "descending" : "ascending")}.";
+
+    public void SortProcesses(ProcessSortColumn column)
+    {
+        _processViewState.ToggleSort(column);
+        ApplyProcessFilter();
+        SaveSettings();
+        RaisePropertyChanged(nameof(ProcessSortSummary));
+    }
+
+    public void ToggleProcessSection(ProcessKillSection section)
+    {
+        section.ToggleExpanded();
+        RememberKillProcessSectionExpansionStates();
+        SaveSettings();
     }
 
     private void SetBiggestFilesResults(IReadOnlyList<FileSizeHit> hits)
@@ -1399,6 +1419,9 @@ public sealed partial class MainViewModel : ObservableObject
             _refreshIntervalSeconds = NormalizeRefreshInterval(settings.RefreshIntervalSeconds);
             _activeTab = ResolveActiveTab(settings);
             _encryptedPersonalAccessToken = settings.EncryptedPersonalAccessToken;
+            _processViewState = settings.ProcessView ?? new();
+            _processViewState.Normalize();
+            _processFilterText = _processViewState.FilterText;
 
             if (!string.IsNullOrWhiteSpace(settings.BiggestFilesScanRoot))
             {
@@ -1437,14 +1460,17 @@ public sealed partial class MainViewModel : ObservableObject
         try
         {
             Directory.CreateDirectory(SettingsDirectory);
+            RememberKillProcessSectionExpansionStates();
+            _processViewState.FilterText = _processFilterText;
             File.WriteAllText(
-                SettingsFilePath,
+                SettingsFilePath + ".tmp",
                 JsonSerializer.Serialize(
                     new AppSettings
                     {
                         AutoRefreshEnabled = AutoRefreshEnabled,
                         RefreshIntervalSeconds = RefreshIntervalSeconds,
                         ActiveTab = _activeTab.ToString(),
+                        ProcessView = _processViewState,
                         EncryptedPersonalAccessToken = _encryptedPersonalAccessToken,
                         BiggestFilesScanRoot = _biggestFilesScanRoot,
                         BiggestFilesTopCount = _biggestFilesTopCount,
@@ -1455,6 +1481,7 @@ public sealed partial class MainViewModel : ObservableObject
                     {
                         WriteIndented = true
                     }));
+            File.Move(SettingsFilePath + ".tmp", SettingsFilePath, overwrite: true);
         }
         catch (Exception ex)
         {
@@ -1625,6 +1652,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     private sealed class AppSettings
     {
+        public ProcessViewState? ProcessView { get; set; }
         public bool AutoRefreshEnabled { get; set; } = true;
 
         public int RefreshIntervalSeconds { get; set; } = 10;

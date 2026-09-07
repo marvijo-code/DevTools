@@ -3,6 +3,7 @@ using System.Diagnostics;
 using DevTools.Models;
 using DevTools.Infrastructure;
 using DevTools.ViewModels;
+using DevTools.Services;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
@@ -353,6 +354,72 @@ public sealed partial class MainPage : Page
         await ViewModel.RefreshKillProcessesAsync(CancellationToken.None);
     }
 
+    private void OpenSystemInformer_Click(object sender, RoutedEventArgs e) => OpenInspector(null);
+
+    private async void ConnectFirefox_Click(object sender, RoutedEventArgs e)
+    {
+        var port = new NumberBox { Header = "Local Firefox port", Value = 63419, Minimum = 1024, Maximum = 65535 };
+        var content = new StackPanel { Spacing = 12 };
+        content.Children.Add(new TextBlock
+        {
+            Text = "Connect to Firefox's local developer server to show tab names beside process memory. Enable the developer server in Firefox first. Private and unloaded tabs are excluded.",
+            TextWrapping = TextWrapping.Wrap, MaxWidth = 460
+        });
+        content.Children.Add(port);
+        content.Children.Add(new TextBlock { Text = FirefoxTabBridge.Status, TextWrapping = TextWrapping.Wrap, MaxWidth = 460 });
+        var dialog = new ContentDialog
+        {
+            Title = "Connect Firefox tabs", Content = content,
+            PrimaryButtonText = "Connect", CloseButtonText = "Cancel", XamlRoot = XamlRoot
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        try
+        {
+            await FirefoxTabBridge.ConnectAsync((int)port.Value);
+            await ViewModel.RefreshKillProcessesAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Firefox connection failed.", ex);
+            await new ContentDialog
+            {
+                Title = "Firefox connection", Content = FirefoxTabBridge.Status,
+                CloseButtonText = "Close", XamlRoot = XamlRoot
+            }.ShowAsync();
+        }
+    }
+
+    private void InspectProcess_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: int processId } && processId > 0)
+            OpenInspector(processId);
+    }
+
+    private async void OpenInspector(int? processId)
+    {
+        try
+        {
+            new SystemInformerIntegration().Open(processId);
+            AppLog.Info($"Opened official System Informer. ProcessId={processId}");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Could not open System Informer.", ex);
+            await new ContentDialog
+            {
+                Title = "System Informer", Content = ex.Message,
+                CloseButtonText = "Close", XamlRoot = XamlRoot
+            }.ShowAsync();
+        }
+    }
+
+    private void SortProcesses_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement element && element.Tag is string tag &&
+            Enum.TryParse<ProcessSortColumn>(tag, out var column))
+            ViewModel.SortProcesses(column);
+    }
+
     private void ToggleProcessSection_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement element || element.Tag is not ProcessKillSection section)
@@ -360,7 +427,7 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        section.ToggleExpanded();
+        ViewModel.ToggleProcessSection(section);
     }
 
     private void ToggleDiskEntry_Click(object sender, RoutedEventArgs e)

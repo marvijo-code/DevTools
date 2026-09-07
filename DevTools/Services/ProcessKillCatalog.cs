@@ -39,7 +39,8 @@ public sealed class ProcessKillCatalog
                         var startPath = ProcessCommandLineResolver.FormatStartPathDisplay(
                             process.CommandLine,
                             process.MeasurementPath);
-                        var childDisplayName = ResolveEntryDisplayName(group.Key, process);
+                        var childDisplayName = string.IsNullOrWhiteSpace(process.BrowserTabs)
+                            ? ResolveEntryDisplayName(group.Key, process) : process.BrowserTabs;
                         return new ProcessKillEntry(
                             process.ProcessId,
                             process.ParentProcessId,
@@ -49,7 +50,8 @@ public sealed class ProcessKillCatalog
                             startPath,
                             process.WorkingSetBytes,
                             FormatBytes(process.WorkingSetBytes),
-                            $"PID {process.ProcessId} | {process.ProcessName}");
+                            $"PID {process.ProcessId} | {process.ProcessName}" +
+                            (string.IsNullOrWhiteSpace(process.BrowserTabs) ? string.Empty : " | Process memory, shared by its tabs"));
                     })
                     .ToList();
 

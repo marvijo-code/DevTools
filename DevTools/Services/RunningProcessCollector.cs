@@ -6,9 +6,6 @@ namespace DevTools.Services;
 
 public sealed class RunningProcessCollector
 {
-    private const int MinimumWorkingSetBytes = 4 * 1024 * 1024;
-    private const int MaxProcessCount = 40;
-
     /// <summary>
     /// Supplies each process's working directory, which is what lets the Processes tab group by agent
     /// session (the repo being worked in) instead of by executable name.
@@ -19,6 +16,7 @@ public sealed class RunningProcessCollector
     {
         var catalog = sessionCatalog ?? CodexSessionCatalog.LoadDefault();
         var processes = new List<RunningProcessSnapshot>();
+        var firefoxTitles = FirefoxTabBridge.ReadProcessTitlesAsync().GetAwaiter().GetResult();
 
         try
         {
@@ -35,15 +33,9 @@ public sealed class RunningProcessCollector
                     var executablePath = processObject["ExecutablePath"]?.ToString();
                     var workingSetBytes = Convert.ToInt64(processObject["WorkingSetSize"] ?? 0);
 
-                    if (workingSetBytes < MinimumWorkingSetBytes &&
-                        !IsAlwaysInteresting(processName, commandLine, executablePath))
-                    {
-                        continue;
-                    }
-
                     if (string.IsNullOrWhiteSpace(commandLine))
                     {
-                        commandLine = executablePath;
+                        commandLine = !string.IsNullOrWhiteSpace(executablePath) ? executablePath : processName;
                     }
 
                     if (string.IsNullOrWhiteSpace(commandLine))
@@ -70,7 +62,8 @@ public sealed class RunningProcessCollector
                         measurementPath,
                         displayName,
                         workingSetBytes,
-                        _detailsReader.Read(processId).WorkingDirectory));
+                        _detailsReader.Read(processId).WorkingDirectory,
+                        firefoxTitles.TryGetValue(processId, out var tabTitles) ? tabTitles : string.Empty));
                 }
             }
         }
@@ -79,28 +72,17 @@ public sealed class RunningProcessCollector
             return [];
         }
 
+        return OrderSnapshot(processes);
+    }
+
+    public static IReadOnlyList<RunningProcessSnapshot> OrderSnapshot(IEnumerable<RunningProcessSnapshot> processes)
+    {
         return processes
-            .GroupBy(process => process.CommandLine, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(process => process.ProcessId)
             .Select(group => group.OrderByDescending(item => item.WorkingSetBytes).First())
             .OrderByDescending(process => process.WorkingSetBytes)
             .ThenBy(process => process.DisplayName, StringComparer.OrdinalIgnoreCase)
-            .Take(MaxProcessCount)
             .ToList();
-    }
-
-    private static bool IsAlwaysInteresting(string? processName, string? commandLine, string? executablePath)
-    {
-        var haystack = string.Join(
-            ' ',
-            new[] { processName, commandLine, executablePath }.Where(value => !string.IsNullOrWhiteSpace(value)));
-        return haystack.Contains("Codex", StringComparison.OrdinalIgnoreCase) ||
-               haystack.Contains("OpenAI.Codex", StringComparison.OrdinalIgnoreCase) ||
-               haystack.Contains(@"\WindowsApps\", StringComparison.OrdinalIgnoreCase) ||
-               haystack.Contains(@"\Google\Chrome\", StringComparison.OrdinalIgnoreCase) ||
-               haystack.Contains(@"\Mozilla Firefox\", StringComparison.OrdinalIgnoreCase) ||
-               haystack.Contains("AnthropicClaude", StringComparison.OrdinalIgnoreCase) ||
-               haystack.Contains("VBCSCompiler", StringComparison.OrdinalIgnoreCase) ||
-               haystack.Contains("MSBuild", StringComparison.OrdinalIgnoreCase);
     }
 }
 
@@ -112,4 +94,5 @@ public sealed record RunningProcessSnapshot(
     string MeasurementPath,
     string DisplayName,
     long WorkingSetBytes,
-    string WorkingDirectory = "");
+    string WorkingDirectory = "",
+    string BrowserTabs = "");

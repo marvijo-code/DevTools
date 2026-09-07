@@ -215,13 +215,12 @@ public static partial class ProcessDisplayNameResolver
             return "Firefox";
         }
 
-        var processTypeMatch = FirefoxProcessTypeRegex.Match(commandLine);
-        if (!processTypeMatch.Success)
+        var processType = ProcessCommandLineResolver.GetFirefoxProcessType(commandLine);
+        if (string.IsNullOrEmpty(processType))
         {
             return "Firefox — Content Process";
         }
 
-        var processType = processTypeMatch.Groups["type"].Value;
         if (processType.Equals("tab", StringComparison.OrdinalIgnoreCase))
         {
             var windowTitle = ProcessWindowTitleResolver.TryGetWindowTitle(processId);

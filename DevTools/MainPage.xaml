@@ -286,9 +286,16 @@
                 </StackPanel>
               </StackPanel>
 
-              <Button Grid.Column="1"
-                      Content="Refresh Processes"
-                      Click="RefreshKillProcesses_Click" />
+              <StackPanel Grid.Column="1" Spacing="6">
+                <Button Content="Connect Firefox"
+                        AutomationProperties.AutomationId="ConnectFirefox"
+                        Click="ConnectFirefox_Click" />
+                <Button Content="System Informer"
+                        AutomationProperties.AutomationId="OpenSystemInformer"
+                        Click="OpenSystemInformer_Click" />
+                <Button Content="Refresh Processes"
+                        Click="RefreshKillProcesses_Click" />
+              </StackPanel>
             </Grid>
 
             <TextBox x:Name="ProcessFilterBox"
@@ -381,22 +388,15 @@
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                               </Grid.ColumnDefinitions>
-                              <TextBlock Text="Process"
-                                         FontSize="11"
-                                         FontWeight="SemiBold"
-                                         Opacity="0.62" />
-                              <TextBlock Grid.Column="1"
-                                         Text="Start Path"
-                                         FontSize="11"
-                                         FontWeight="SemiBold"
-                                         Opacity="0.62"
-                                         Margin="10,0,0,0" />
-                              <TextBlock Grid.Column="2"
-                                         Text="Memory"
-                                         FontSize="11"
-                                         FontWeight="SemiBold"
-                                         Opacity="0.62"
-                                         Margin="10,0,0,0" />
+                              <Button Content="Process" Tag="Process" Click="SortProcesses_Click"
+                                      AutomationProperties.AutomationId="SortProcess"
+                                      ToolTipService.ToolTip="Sort by process name. Click again to reverse." />
+                              <Button Grid.Column="1" Content="Start Path" Tag="StartPath" Click="SortProcesses_Click"
+                                      AutomationProperties.AutomationId="SortStartPath"
+                                      ToolTipService.ToolTip="Sort by start path. Click again to reverse." Margin="10,0,0,0" />
+                              <Button Grid.Column="2" Content="Memory" Tag="Memory" Click="SortProcesses_Click"
+                                      AutomationProperties.AutomationId="SortMemory"
+                                      ToolTipService.ToolTip="Sort by memory. Click again to reverse." Margin="10,0,0,0" />
                               <TextBlock Grid.Column="3"
                                          Text="Action"
                                          FontSize="11"
@@ -432,6 +432,8 @@
 
                                     <TextBlock Grid.Column="1"
                                                Text="{Binding StartPath}"
+                                               ToolTipService.ToolTip="{Binding CommandLine}"
+                                               IsTextSelectionEnabled="True"
                                                FontFamily="Consolas"
                                                FontSize="11"
                                                TextWrapping="WrapWholeWords"
@@ -444,10 +446,16 @@
                                                FontWeight="SemiBold"
                                                Margin="10,0,0,0" />
                                     <StackPanel Grid.Column="3"
-                                                Orientation="Horizontal"
+                                                Orientation="Vertical"
                                                 Spacing="8"
                                                 Margin="10,0,0,0"
                                                 VerticalAlignment="Top">
+                                      <Button Content="Inspect"
+                                              AutomationProperties.AutomationId="InspectProcess"
+                                              ToolTipService.ToolTip="Open this process in System Informer"
+                                              Click="InspectProcess_Click"
+                                              Tag="{Binding ProcessId}"
+                                              IsEnabled="{Binding CanKill}" />
                                       <Button Content="Copy"
                                               Click="CopyProcessInfo_Click"
                                               Tag="{Binding}" />

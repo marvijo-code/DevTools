@@ -86,6 +86,7 @@ public sealed class ProcessKillSection : ObservableObject
             {
                 Entries.Move(existingIndex, i);
             }
+            Entries[i].UpdateFrom(incomingEntry);
         }
 
         for (var i = Entries.Count - 1; i >= 0; i--)

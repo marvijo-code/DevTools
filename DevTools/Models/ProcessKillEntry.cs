@@ -29,23 +29,40 @@ public sealed class ProcessKillEntry : ObservableObject
 
     public int ProcessId { get; }
 
-    public int ParentProcessId { get; }
+    public int ParentProcessId { get; private set; }
 
-    public string DisplayName { get; }
+    public string DisplayName { get; private set; }
 
-    public string CommandLine { get; }
+    public string CommandLine { get; private set; }
 
-    public string ExecutablePath { get; }
+    public string ExecutablePath { get; private set; }
 
-    public string StartPath { get; }
+    public string StartPath { get; private set; }
 
-    public long WorkingSetBytes { get; }
+    public long WorkingSetBytes { get; private set; }
 
-    public string Usage { get; }
+    public string Usage { get; private set; }
 
-    public string Note { get; }
+    public string Note { get; private set; }
 
-    public string CopyText { get; }
+    public string CopyText { get; private set; }
+
+    public void UpdateFrom(ProcessKillEntry source)
+    {
+        if (ProcessId != source.ProcessId) throw new InvalidOperationException("Process identity changed.");
+        ParentProcessId = source.ParentProcessId;
+        DisplayName = source.DisplayName;
+        CommandLine = source.CommandLine;
+        ExecutablePath = source.ExecutablePath;
+        StartPath = source.StartPath;
+        WorkingSetBytes = source.WorkingSetBytes;
+        Usage = source.Usage;
+        Note = source.Note;
+        CopyText = source.CopyText;
+        foreach (var property in new[] { nameof(ParentProcessId), nameof(DisplayName), nameof(CommandLine),
+            nameof(ExecutablePath), nameof(StartPath), nameof(WorkingSetBytes), nameof(Usage), nameof(Note), nameof(CopyText) })
+            RaisePropertyChanged(property);
+    }
 
     public bool CanKill => ProcessId > 0;
 

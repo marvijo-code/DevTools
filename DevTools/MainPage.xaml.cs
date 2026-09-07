@@ -309,15 +309,6 @@ public sealed partial class MainPage : Page
         RunFilterBox.Focus(FocusState.Programmatic);
     }
 
-    private void NavigateToDetails_Click(object sender, RoutedEventArgs e)
-    {
-        var scroll = ViewModel.IsKillProcessesVisible ? ProcessDetailsScroll
-            : ViewModel.IsDiskUsageVisible ? StorageOverviewScroll
-            : ViewModel.IsResourcesVisible ? SystemOverviewScroll : DetailsScroll;
-        scroll.ChangeView(null, 0, null, true);
-        scroll.Focus(FocusState.Programmatic);
-    }
-
     private async void NavigateToDisk_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowDiskUsage();
@@ -396,6 +387,60 @@ public sealed partial class MainPage : Page
         if (sender is FrameworkElement element && element.Tag is string tag &&
             Enum.TryParse<ProcessSortColumn>(tag, out var column))
             ViewModel.SortProcesses(column);
+    }
+
+    private void SelectActivity_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: AppActivityEntry activity }) ViewModel.SelectedActivity = activity;
+    }
+
+    private async void EndActivityProcess_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: AppActivityEntry activity } || !activity.CanEndProcess) return;
+        ViewModel.SelectedActivity = activity;
+        var processId = activity.ProcessId!.Value;
+        DateTime? processStartedAt = null;
+        async Task<bool> StillMatchesAsync()
+        {
+            if (activity.ProcessId != processId) return false;
+            var titles = await FirefoxTabBridge.ReadProcessTitlesAsync();
+            if (!titles.TryGetValue(processId, out var names) ||
+                !names.Split(Environment.NewLine).Contains(activity.Title, StringComparer.Ordinal)) return false;
+            try
+            {
+                using var process = Process.GetProcessById(processId);
+                if (!process.ProcessName.Equals("firefox", StringComparison.OrdinalIgnoreCase)) return false;
+                var startedAt = process.StartTime;
+                if (processStartedAt is not null && processStartedAt != startedAt) return false;
+                processStartedAt = startedAt;
+                return true;
+            }
+            catch (ArgumentException) { return false; }
+        }
+        try
+        {
+            if (!await StillMatchesAsync())
+            {
+                await new ContentDialog { Title = "Tab process changed", Content = "Refresh or reconnect Firefox before ending this process.",
+                    CloseButtonText = "Close", XamlRoot = XamlRoot }.ShowAsync();
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                Title = "End shared Firefox process?",
+                Content = $"End PID {processId} for '{activity.Title}'? Other tabs sharing this process will also stop. If this is Firefox's main process, Firefox will close.",
+                PrimaryButtonText = "End process", CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close, XamlRoot = XamlRoot
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+            if (!await StillMatchesAsync()) { ViewModel.StatusMessage = "The tab process changed. Nothing was ended."; return; }
+            await ViewModel.KillProcessAsync(processId, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Could not end the Firefox tab process.", ex);
+            ViewModel.StatusMessage = "Could not end the tab process. Refresh Firefox and try again.";
+        }
     }
 
     private void SelectProcess_Click(object sender, RoutedEventArgs e)
@@ -539,11 +584,14 @@ public sealed partial class MainPage : Page
             return;
         }
 
+        var entry = ViewModel.KillProcessSections.SelectMany(section => section.Entries).FirstOrDefault(item => item.ProcessId == processId);
+        if (entry is not null) ViewModel.SelectedProcess = entry;
+        var name = entry?.DisplayName ?? "Process";
         var dialog = new ContentDialog
         {
-            Title = "Kill Process?",
-            Content = $"Kill PID {processId} and all of its subprocesses?",
-            PrimaryButtonText = "Kill",
+            Title = "End process?",
+            Content = $"End {name} (PID {processId}) and all of its subprocesses?",
+            PrimaryButtonText = "End process",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close,
             XamlRoot = XamlRoot
@@ -713,6 +761,9 @@ public sealed partial class MainPage : Page
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(MainViewModel.ProcessFilterText))
+            KillProcessesScroll.ChangeView(null, 0, null, true);
+
         if (e.PropertyName is nameof(MainViewModel.AutoRefreshEnabled) or nameof(MainViewModel.RefreshIntervalSeconds))
         {
             ApplyRefreshTimerSettings();
@@ -807,7 +858,7 @@ public sealed partial class MainPage : Page
         button.FontWeight = isActive ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
 
         if (Application.Current.Resources.TryGetValue(
-                isActive ? "AccentFillColorDefaultBrush" : "ControlFillColorDefaultBrush",
+                isActive ? "ControlFillColorSecondaryBrush" : "ControlFillColorTransparentBrush",
                 out var background) &&
             background is Brush backgroundBrush)
         {
@@ -815,7 +866,7 @@ public sealed partial class MainPage : Page
         }
 
         if (Application.Current.Resources.TryGetValue(
-                isActive ? "TextOnAccentFillColorPrimaryBrush" : "TextFillColorPrimaryBrush",
+                "TextFillColorPrimaryBrush",
                 out var foreground) &&
             foreground is Brush foregroundBrush)
         {

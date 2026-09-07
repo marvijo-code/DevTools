@@ -94,8 +94,7 @@ public static partial class ProcessDisplayNameResolver
         var typeMatch = ElectronTypeRegex.Match(commandLine);
         if (!typeMatch.Success)
         {
-            var sessionTitle = sessionCatalog?.GetMostRecentThreadTitle();
-            return string.IsNullOrWhiteSpace(sessionTitle) ? appName : $"{appName} — {sessionTitle}";
+            return appName;
         }
 
         var processType = typeMatch.Groups["type"].Value;
@@ -116,12 +115,7 @@ public static partial class ProcessDisplayNameResolver
         long workingSetBytes,
         CodexSessionCatalog? sessionCatalog)
     {
-        var sessionTitle = sessionCatalog?.GetMostRecentThreadTitle();
-        if (!string.IsNullOrWhiteSpace(sessionTitle) && workingSetBytes >= 32 * 1024 * 1024)
-        {
-            return $"{appName} — {sessionTitle}";
-        }
-
+        // A recent thread is not evidence that this renderer owns it.
         var windowTitle = ProcessWindowTitleResolver.TryGetWindowTitle(processId);
         if (!string.IsNullOrWhiteSpace(windowTitle) &&
             !ProcessWindowTitleResolver.IsGenericAppWindowTitle(windowTitle, appName))

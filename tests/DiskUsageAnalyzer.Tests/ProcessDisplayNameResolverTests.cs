@@ -6,7 +6,7 @@ namespace DiskUsageAnalyzer.Tests;
 public sealed class ProcessDisplayNameResolverTests
 {
     [Fact]
-    public void Resolve_CodexMainProcess_UsesLatestSessionTitle()
+    public void Resolve_CodexMainProcess_UsesAppName()
     {
         var catalog = new CodexSessionCatalog();
         var commandLine = "\"C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.602.4764.0_x64__2p2nqsd0c76g0\\app\\Codex.exe\"";
@@ -23,9 +23,9 @@ public sealed class ProcessDisplayNameResolverTests
     }
 
     [Fact]
-    public void Resolve_CodexRenderer_UsesSessionTitleWhenWorkingSetIsLarge()
+    public void Resolve_CodexRenderer_UsesProcessRole()
     {
-        var catalog = CodexSessionCatalog.LoadDefault();
+        var catalog = new CodexSessionCatalog();
         var commandLine =
             "\"C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.602.4764.0_x64__2p2nqsd0c76g0\\app\\Codex.exe\" " +
             "--type=renderer --renderer-client-id=5";

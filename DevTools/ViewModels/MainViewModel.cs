@@ -153,8 +153,8 @@ public sealed partial class MainViewModel : ObservableObject
     {
         get
         {
-            var visibleCount = _killProcessSections.Sum(section => section.Entries.Count(entry => entry.CanKill));
-            var totalCount = _allKillProcessSections.Sum(section => section.Entries.Count(entry => entry.CanKill));
+            var visibleCount = _killProcessSections.Sum(section => section.Entries.Count);
+            var totalCount = _allKillProcessSections.Sum(section => section.Entries.Count);
             return visibleCount == totalCount
                 ? $"{visibleCount} processes"
                 : $"{visibleCount} of {totalCount} processes";
@@ -353,6 +353,29 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     public bool HasSelectedRun => SelectedRun is not null;
+    private AppActivityEntry? _selectedActivity;
+    public AppActivityEntry? SelectedActivity
+    {
+        get => _selectedActivity;
+        set
+        {
+            if (ReferenceEquals(_selectedActivity, value)) return;
+            if (_selectedActivity is not null) _selectedActivity.IsSelected = false;
+            if (value is not null) { SelectedProcess = null; value.IsSelected = true; }
+            _selectedActivity = value;
+            RaisePropertyChanged(nameof(SelectedActivity));
+            RaisePropertyChanged(nameof(HasSelectedActivity));
+            RaisePropertyChanged(nameof(ShowProcessOverview));
+            RaisePropertyChanged(nameof(ContextPaneTitle));
+            RaisePropertyChanged(nameof(ContextPaneSubtitle));
+        }
+    }
+    public bool HasSelectedActivity => SelectedActivity is not null;
+    public bool ShowProcessOverview => SelectedProcess is null && SelectedActivity is null;
+    public IEnumerable<ProcessKillEntry> LargestProcesses => _allKillProcessSections.SelectMany(section => section.Entries)
+        .OrderByDescending(entry => entry.WorkingSetBytes).Take(5);
+    public string ProcessOverviewSummary => $"{_allKillProcessSections.Sum(section => section.Entries.Count)} processes · " +
+        $"{ByteFormatter.Format(_allKillProcessSections.SelectMany(section => section.Entries).Sum(entry => entry.WorkingSetBytes))} combined working set";
     public bool HasSelectedProcess => SelectedProcess is not null;
     public ProcessKillEntry? SelectedProcess
     {
@@ -361,10 +384,12 @@ public sealed partial class MainViewModel : ObservableObject
         {
             if (ReferenceEquals(_selectedProcess, value)) return;
             if (_selectedProcess is not null) _selectedProcess.IsSelected = false;
-            if (value is not null) value.IsSelected = true;
+            if (value is not null) { SelectedActivity = null; value.IsSelected = true; }
             if (SetProperty(ref _selectedProcess, value))
             {
                 RaisePropertyChanged(nameof(HasSelectedProcess));
+                RaisePropertyChanged(nameof(ShowProcessOverview));
+                RaisePropertyChanged(nameof(ContextPaneTitle));
                 RaisePropertyChanged(nameof(ContextPaneSubtitle));
             }
         }
@@ -858,7 +883,6 @@ public sealed partial class MainViewModel : ObservableObject
         {
             SetKillProcessesRefreshing(true);
             _hasKillProcessSnapshot = false;
-            SetKillProcessSections([]);
             _killProcessesHeadline = "Scanning running processes...";
             _killProcessesSummary = "Loading process names and memory usage.";
             SetKillProcessesStatus("Starting process refresh...");
@@ -869,7 +893,7 @@ public sealed partial class MainViewModel : ObservableObject
             _allKillProcessSections.Clear();
             _allKillProcessSections.AddRange(sections);
             ApplyProcessFilter();
-            var totalCount = _allKillProcessSections.Sum(section => section.Entries.Count(entry => entry.CanKill));
+            var totalCount = _allKillProcessSections.Sum(section => section.Entries.Count);
             _killProcessesSummary = "Expand groups with + on the left. Copy includes the process name, PID, and start path.";
             _hasKillProcessSnapshot = true;
             SetKillProcessesStatus($"Last refresh: {DateTimeOffset.Now.LocalDateTime:yyyy-MM-dd HH:mm:ss}");
@@ -1077,28 +1101,33 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void ApplyProcessFilter()
     {
+        var selectedActivityId = SelectedActivity?.Id;
         var filteredSections = ProcessKillFilter.Apply(_allKillProcessSections, _processFilterText,
             _processViewState.SortColumn, _processViewState.SortDescending);
         SetKillProcessSections(filteredSections);
         SelectedProcess = SelectionRetention.Find(_killProcessSections.SelectMany(section => section.Entries),
             SelectedProcess?.ProcessId, entry => entry.ProcessId);
+        SelectedActivity = _killProcessSections.SelectMany(section => section.Activities).FirstOrDefault(activity => activity.Id == selectedActivityId);
 
-        var visibleCount = filteredSections.Sum(section => section.Entries.Count(entry => entry.CanKill));
+        var visibleCount = filteredSections.Sum(section => section.Entries.Count);
         var groupCount = filteredSections.Count;
-        _killProcessesHeadline = visibleCount == 0
+        var activityCount = filteredSections.Sum(section => section.Activities.Count);
+        _killProcessesHeadline = visibleCount == 0 && activityCount == 0
             ? string.IsNullOrWhiteSpace(_processFilterText)
                 ? "No matching processes found."
                 : "No processes match the current search."
             : groupCount == 1
-                ? $"{visibleCount} processes. {ProcessSortSummary}"
-                : $"{visibleCount} processes in {groupCount} groups. {ProcessSortSummary}";
+                ? $"{visibleCount} processes · {activityCount} threads / tabs. {ProcessSortSummary}"
+                : $"{visibleCount} processes in {groupCount} groups · {activityCount} threads / tabs. {ProcessSortSummary}";
 
         RaisePropertyChanged(nameof(VisibleProcessesText));
         RaisePropertyChanged(nameof(KillProcessesHeadline));
+        RaisePropertyChanged(nameof(LargestProcesses));
+        RaisePropertyChanged(nameof(ProcessOverviewSummary));
+        RaisePropertyChanged(nameof(ContextPaneSubtitle));
     }
 
     public string ProcessSortSummary => $"Sorted by {(_processViewState.SortColumn == ProcessSortColumn.StartPath ? "start path" : _processViewState.SortColumn.ToString().ToLowerInvariant())}, {(_processViewState.SortDescending ? "descending" : "ascending")}.";
-
     public void SortProcesses(ProcessSortColumn column)
     {
         _processViewState.ToggleSort(column);

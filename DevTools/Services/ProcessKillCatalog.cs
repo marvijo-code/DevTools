@@ -10,18 +10,18 @@ public sealed class ProcessKillCatalog
 
     public IReadOnlyList<ProcessKillSection> CaptureSections(CodexSessionCatalog? sessionCatalog = null)
     {
+        sessionCatalog ??= CodexSessionCatalog.LoadDefault();
         var processes = _runningProcessCollector.Capture(sessionCatalog);
-        if (processes.Count == 0)
-        {
-            return
-            [
-                new ProcessKillSection(
-                    "No Processes",
-                    "No matching running processes were found on this machine.",
-                    string.Empty,
-                    [new ProcessKillEntry(0, 0, "No processes", string.Empty, string.Empty, string.Empty, 0, "Unavailable", "Process enumeration returned no results.")])
-            ];
-        }
+        var threads = sessionCatalog.RecentThreads();
+        var firefoxTabs = FirefoxTabBridge.IsConnected
+            ? processes.Where(process => !string.IsNullOrWhiteSpace(process.BrowserTabs))
+                .SelectMany(process => process.BrowserTabs.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                    .Select((title, index) => new AppActivityEntry($"firefox-live:{process.ProcessId}:{index}:{title}", title,
+                        "Firefox tab", $"Live · shared PID {process.ProcessId}",
+                        "Several tabs can share one process. Memory is shown once in the Processes list, not attributed to an individual tab.",
+                        "", process.ProcessId))).ToList()
+            : FirefoxSessionReader.ReadCurrentSessions();
+        if (processes.Count == 0) return [];
 
         return ProcessKillFilter.Apply(
             processes
@@ -39,8 +39,7 @@ public sealed class ProcessKillCatalog
                         var startPath = ProcessCommandLineResolver.FormatStartPathDisplay(
                             process.CommandLine,
                             process.MeasurementPath);
-                        var childDisplayName = string.IsNullOrWhiteSpace(process.BrowserTabs)
-                            ? ResolveEntryDisplayName(group.Key, process) : process.BrowserTabs;
+                        var childDisplayName = ResolveEntryDisplayName(group.Key, process);
                         return new ProcessKillEntry(
                             process.ProcessId,
                             process.ParentProcessId,
@@ -57,7 +56,7 @@ public sealed class ProcessKillCatalog
 
                 var totalWorkingSet = group.Sum(process => process.WorkingSetBytes);
                 var sectionStartPath = ResolveSectionStartPath(group.Key, group);
-                var summary = $"{entries.Count} processes · {FormatBytes(totalWorkingSet)} total memory";
+                var summary = $"{entries.Count} {(entries.Count == 1 ? "process" : "processes")} · {FormatBytes(totalWorkingSet)} total memory";
 
                 // Lead the summary with what the session is actually working on, when the agent reports it.
                 var sessionTitle = _claudeSessions.ResolveTitle(group.Select(process => process.ProcessId));
@@ -66,11 +65,17 @@ public sealed class ProcessKillCatalog
                     summary = $"{sessionTitle} — {summary}";
                 }
 
+                var activities = group.Key == "Codex" ? threads : group.Key == "Firefox" ? firefoxTabs : [];
+                var heading = group.Key == "Codex" ? "Recent threads" : group.Key == "Firefox" ? "Tabs" : "";
+                var status = group.Key == "Codex" ? "Recent local threads. Memory belongs to the app's processes."
+                    : group.Key == "Firefox" ? (FirefoxTabBridge.IsConnected ? FirefoxTabBridge.Status
+                        : activities.Count > 0 ? "Saved session titles. Connect Firefox for live process links."
+                        : "No current session titles found. Use Connect Firefox for live tabs.") : "";
                 return new ProcessKillSection(
                     group.Key,
                     summary,
                     sectionStartPath,
-                    entries);
+                    entries, activities, heading, status) { IsExpanded = heading.Length > 0 };
             })
             .ToList(),
             filterText: null);
@@ -93,6 +98,8 @@ public sealed class ProcessKillCatalog
     public static string ResolveSessionGroupTitle(RunningProcessSnapshot process)
     {
         var baseTitle = ResolveGroupTitle(process.DisplayName);
+        if (baseTitle == "Firefox") return "Firefox";
+        if (baseTitle == "Codex" && process.MeasurementPath.Contains("OpenAI.Codex", StringComparison.OrdinalIgnoreCase)) return "Codex";
         var workspace = DescribeWorkspace(process.WorkingDirectory);
 
         if (workspace.Length == 0)

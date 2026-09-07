@@ -48,6 +48,20 @@ public sealed class CodexSessionCatalog
             .FirstOrDefault(title => !string.IsNullOrWhiteSpace(title));
     }
 
+    public IReadOnlyList<DevTools.Models.AppActivityEntry> RecentThreads(int count = 30) => _sessionsById
+        .OrderByDescending(pair => pair.Value.UpdatedAt).Take(count)
+        .Select(pair => new DevTools.Models.AppActivityEntry("codex:" + pair.Key, pair.Value.ThreadName,
+            "Codex thread", $"Updated {pair.Value.UpdatedAt.LocalDateTime:g}",
+            "From the local Codex thread index. This is a recent thread, not a separate Windows process. Codex does not expose a reliable per-thread memory measurement.",
+            pair.Key, null)).ToList();
+
+    public static CodexSessionCatalog FromFile(string path)
+    {
+        var catalog = new CodexSessionCatalog();
+        catalog.MergeFromFile(path);
+        return catalog;
+    }
+
     private void MergeFromFile(string path)
     {
         if (!File.Exists(path))

@@ -110,13 +110,15 @@ public sealed partial class MainViewModel
     }
 
     /// <summary>Title of the shared right-hand panel, which follows whichever tab is active.</summary>
-    public string ContextPaneTitle => WorkspaceContext.For(_activeTab).Title;
+    public string ContextPaneTitle => _activeTab == MainContentTab.KillProcesses
+        ? SelectedActivity?.Kind ?? (HasSelectedProcess ? "Process details" : "Process overview")
+        : WorkspaceContext.For(_activeTab).Title;
 
     public string ContextPaneSubtitle => _activeTab switch
     {
         MainContentTab.Resources => ResourceCountsText,
         MainContentTab.WorkflowExplorer => SelectedRun?.Repository.FullName ?? "Select a workflow run to see its details.",
-        MainContentTab.KillProcesses => SelectedProcess?.Note ?? "Select a process row to inspect it here.",
+        MainContentTab.KillProcesses => SelectedActivity?.Subtitle ?? SelectedProcess?.Note ?? "Select a thread, tab or process to see its details.",
         _ => "Disk usage and scan information for this machine."
     };
 

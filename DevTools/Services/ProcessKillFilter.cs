@@ -16,12 +16,18 @@ public static class ProcessKillFilter
         var filteredSections = new List<ProcessKillSection>();
         foreach (var section in sections)
         {
+            var activities = section.Activities.Where(activity => terms.All(term =>
+                string.Join(' ', section.Title, activity.Title, activity.Kind, activity.Reference)
+                    .Contains(term, StringComparison.OrdinalIgnoreCase))).ToList();
             var matchingEntries = section.Entries
                 .Where(entry => Matches(entry, section.Title, section.StartPath, terms))
                 .ToList();
             matchingEntries = OrderEntries(matchingEntries, sortColumn, descending).ToList();
+            // A thread or tab match still belongs to this app's shared processes.
+            if (activities.Count > 0 && matchingEntries.Count == 0)
+                matchingEntries = OrderEntries(section.Entries, sortColumn, descending).ToList();
 
-            if (matchingEntries.Count == 0)
+            if (matchingEntries.Count == 0 && activities.Count == 0)
             {
                 continue;
             }
@@ -29,11 +35,14 @@ public static class ProcessKillFilter
             var totalWorkingSet = matchingEntries.Sum(entry => entry.WorkingSetBytes);
             filteredSections.Add(new ProcessKillSection(
                 section.Title,
-                terms.Count == 0 ? section.Summary : $"{matchingEntries.Count} processes · {FormatBytes(totalWorkingSet)} total memory",
+                terms.Count == 0 ? section.Summary : $"{matchingEntries.Count} {(matchingEntries.Count == 1 ? "process" : "processes")} · {FormatBytes(totalWorkingSet)} total memory",
                 section.StartPath,
-                matchingEntries)
+                matchingEntries, activities, section.ActivityHeading, section.ActivityStatus)
             {
-                IsExpanded = section.IsExpanded
+                IsExpanded = section.IsExpanded,
+                ProcessColumnLabel = "Process" + (sortColumn == ProcessSortColumn.Process ? descending ? " ↓" : " ↑" : ""),
+                PathColumnLabel = "Executable" + (sortColumn == ProcessSortColumn.StartPath ? descending ? " ↓" : " ↑" : ""),
+                MemoryColumnLabel = "Memory" + (sortColumn == ProcessSortColumn.Memory ? descending ? " ↓" : " ↑" : "")
             });
         }
 
@@ -46,7 +55,8 @@ public static class ProcessKillFilter
         var ordered = descending
             ? filteredSections.OrderByDescending(key, SortComparer)
             : filteredSections.OrderBy(key, SortComparer);
-        return ordered.ThenBy(section => section.Title, StringComparer.OrdinalIgnoreCase).ToList();
+        return ordered.ThenBy(section => section.Title, StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(section => section.HasActivitySource).ToList();
     }
 
     private static readonly IComparer<object> SortComparer = Comparer<object>.Create((left, right) =>

@@ -21,6 +21,10 @@ public partial class App : Application
 
     protected Window? MainWindow { get; private set; }
 
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         AppLog.Info($"OnLaunched called. Arguments='{args.Arguments ?? string.Empty}'");
@@ -63,9 +67,35 @@ public partial class App : Application
         MainWindow.SetWindowIcon();
         try { ShellIdentity.ConfigureWindow(WinRT.Interop.WindowNative.GetWindowHandle(MainWindow)); }
         catch (Exception ex) { AppLog.Error("Setting Windows taskbar identity failed.", ex); }
-        // Ensure the current window is active
+        // --minimized: open on the taskbar without taking focus (background starts and
+        // automated checks while someone is using the PC). Otherwise activate as usual.
+        var startMinimized = Environment.GetCommandLineArgs()
+            .Any(argument => string.Equals(argument, "--minimized", StringComparison.OrdinalIgnoreCase));
+        if (startMinimized && TryShowMinimized(MainWindow))
+        {
+            AppLog.Info("Main window shown minimized without focus (--minimized).");
+            return;
+        }
+
         MainWindow.Activate();
         AppLog.Info("Main window activated.");
+    }
+
+    private static bool TryShowMinimized(Window window)
+    {
+        try
+        {
+            // SW_SHOWMINNOACTIVE: show minimized and leave the active window (and focus) alone.
+            const int SwShowMinNoActive = 7;
+            var handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            ShowWindow(handle, SwShowMinNoActive);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Showing the window minimized failed; activating it instead.", ex);
+            return false;
+        }
     }
 
     /// <summary>

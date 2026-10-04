@@ -10,6 +10,8 @@ public sealed class DiskUsageEntry : ObservableObject
     private bool _isMeasuring;
     private bool _existsOnDisk = true;
     private bool _isExpanded;
+    private bool _canExpand;
+    private bool _childrenLoaded;
     private long? _sizeBytes;
     private DateTimeOffset? _measurementStartedAt;
     private IReadOnlyList<DiskUsageEntry> _children = [];
@@ -72,6 +74,16 @@ public sealed class DiskUsageEntry : ObservableObject
 
     public bool HasChildren => _children.Count > 0;
 
+    /// <summary>True once children have been measured (even if the folder turned out to be empty).</summary>
+    public bool HasLoadedChildren => _childrenLoaded;
+
+    /// <summary>True when this entry is a folder the user can expand with the "+" button.</summary>
+    public bool CanExpand
+    {
+        get => _canExpand;
+        private set => SetProperty(ref _canExpand, value);
+    }
+
     public string ExpandGlyph => IsExpanded ? "−" : "+";
 
     public bool IsExpanded
@@ -130,9 +142,12 @@ public sealed class DiskUsageEntry : ObservableObject
         Usage = source.Usage;
         Note = source.Note;
         _displayName = source._displayName;
+        CanExpand = source.CanExpand;
         RaisePropertyChanged(nameof(DisplayName));
         RaisePropertyChanged(nameof(HasDistinctDisplayName));
         SetChildren(source.Children);
+        _childrenLoaded = source._childrenLoaded;
+        RaisePropertyChanged(nameof(HasLoadedChildren));
         RaisePropertyChanged(nameof(CanClear));
     }
 
@@ -142,8 +157,15 @@ public sealed class DiskUsageEntry : ObservableObject
             .OrderByDescending(child => child.SizeBytes ?? -1)
             .ThenBy(child => child.Path, StringComparer.OrdinalIgnoreCase)
             .ToList();
+        _childrenLoaded = true;
         RaisePropertyChanged(nameof(Children));
         RaisePropertyChanged(nameof(HasChildren));
+        RaisePropertyChanged(nameof(HasLoadedChildren));
+    }
+
+    public void SetExpandable(bool canExpand)
+    {
+        CanExpand = canExpand;
     }
 
     public void StartMeasurement(string? note = null, DateTimeOffset? startedAt = null)

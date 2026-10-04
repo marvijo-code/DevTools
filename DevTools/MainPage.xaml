@@ -2,6 +2,7 @@
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:models="using:DevTools.Models"
+      xmlns:vm="using:DevTools.ViewModels"
       xmlns:infra="using:DevTools.Infrastructure"
       Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
   <Page.Resources>
@@ -823,6 +824,343 @@
                           VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled">
               <StackPanel Spacing="10">
+                <Border Padding="10,8"
+                        CornerRadius="10"
+                        Background="{ThemeResource AccentFillColorSecondaryBrush}"
+                        Visibility="{Binding ShowElevationHint, Converter={StaticResource BoolToVisibilityConverter}}">
+                  <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*" />
+                      <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Not running as administrator. Folder sizes come from Everything when it is running, otherwise from a slow folder walk. Restart as admin to read the NTFS Master File Table directly."
+                               TextWrapping="WrapWholeWords"
+                               VerticalAlignment="Center"
+                               FontSize="12" />
+                    <Button Grid.Column="1"
+                            Content="Restart as Admin"
+                            Click="RestartAsAdmin_Click"
+                            VerticalAlignment="Center" />
+                  </Grid>
+                </Border>
+
+                <Border Padding="12"
+                        CornerRadius="14"
+                        HorizontalAlignment="Stretch"
+                        Background="{ThemeResource LayerFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1">
+                  <StackPanel Spacing="4">
+                    <TextBlock Text="Startup and admin rights"
+                               FontSize="16"
+                               FontWeight="SemiBold" />
+                    <ToggleSwitch Header="Start DevTools as administrator"
+                                  IsOn="{Binding RunAsAdministrator, Mode=TwoWay}"
+                                  OnContent="On (fast NTFS folder scans)"
+                                  OffContent="Off (slower folder scans)" />
+                    <TextBlock Text="{Binding ElevationPreferenceText}"
+                               TextWrapping="WrapWholeWords"
+                               FontSize="12"
+                               Opacity="0.72" />
+                    <TextBlock Text="Administrator rights are the default because the fast folder scan needs them. The choice applies the next time you open DevTools from the Start menu. Use the 'DevTools (no admin)' shortcut to skip admin rights for one launch without changing this setting."
+                               TextWrapping="WrapWholeWords"
+                               FontSize="11"
+                               Opacity="0.6" />
+                  </StackPanel>
+                </Border>
+
+                <Border Padding="12"
+                        CornerRadius="14"
+                        HorizontalAlignment="Stretch"
+                        Background="{ThemeResource LayerFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1">
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="Bulk Cleanup"
+                               FontSize="16"
+                               FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding BulkCleanupHeadline}"
+                               TextWrapping="WrapWholeWords"
+                               Opacity="0.72"
+                               FontSize="12" />
+
+                    <Grid ColumnSpacing="8">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                      </Grid.ColumnDefinitions>
+                      <Button Grid.Column="0"
+                              Content="{Binding BulkCleanupButtonText}"
+                              Click="BulkCleanup_Click"
+                              IsEnabled="{Binding IsBulkCleanupAvailable}"
+                              VerticalAlignment="Center" />
+                      <Button Grid.Column="1"
+                              Content="Cancel"
+                              Click="CancelBulkCleanup_Click"
+                              IsEnabled="{Binding IsBulkCleanupRunning}"
+                              VerticalAlignment="Center" />
+                      <ProgressRing Grid.Column="2"
+                                    Width="16"
+                                    Height="16"
+                                    HorizontalAlignment="Left"
+                                    IsActive="{Binding IsBulkCleanupRunning}"
+                                    VerticalAlignment="Center" />
+                    </Grid>
+
+                    <TextBlock Text="{Binding BulkCleanupStatusText}"
+                               TextWrapping="WrapWholeWords"
+                               FontFamily="Consolas"
+                               FontSize="12"
+                               Opacity="0.8" />
+                    <TextBlock Text="{Binding BulkCleanupAvailabilityText}"
+                               TextWrapping="WrapWholeWords"
+                               FontSize="11"
+                               Opacity="0.6" />
+
+                    <Expander Header="Cleanup report"
+                              HorizontalAlignment="Stretch"
+                              Visibility="{Binding HasBulkCleanupReport, Converter={StaticResource BoolToVisibilityConverter}}">
+                      <ScrollViewer MaxHeight="260"
+                                    VerticalScrollBarVisibility="Auto"
+                                    HorizontalScrollBarVisibility="Auto">
+                        <TextBlock Text="{Binding BulkCleanupReportText}"
+                                   FontFamily="Consolas"
+                                   FontSize="11"
+                                   TextWrapping="NoWrap"
+                                   IsTextSelectionEnabled="True" />
+                      </ScrollViewer>
+                    </Expander>
+                  </StackPanel>
+                </Border>
+
+                <TextBlock Text="{Binding DiskUsageAnalysis}"
+                           TextWrapping="WrapWholeWords"
+                           Opacity="0.82" />
+
+                <Border x:Name="FolderBrowserCard"
+                        Padding="12"
+                        CornerRadius="14"
+                        HorizontalAlignment="Stretch"
+                        Background="{ThemeResource LayerFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1">
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="Folder Browser (all drives)"
+                               FontSize="16"
+                               FontWeight="SemiBold" />
+                    <ItemsControl ItemsSource="{Binding FolderBrowserDrives}">
+                      <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                          <StackPanel Orientation="Horizontal"
+                                      Spacing="6" />
+                        </ItemsPanelTemplate>
+                      </ItemsControl.ItemsPanel>
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="x:String">
+                          <Button Content="{Binding}"
+                                  Tag="{Binding}"
+                                  Click="BrowseDrive_Click"
+                                  Padding="10,2"
+                                  ToolTipService.ToolTip="Open this drive in the folder browser" />
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Grid ColumnSpacing="8">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                      </Grid.ColumnDefinitions>
+                      <Button Content="Up"
+                              Click="BrowseUp_Click"
+                              IsEnabled="{Binding CanFolderBrowserGoUp}"
+                              VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="1"
+                                 Text="{Binding FolderBrowserPath}"
+                                 FontFamily="Consolas"
+                                 VerticalAlignment="Center"
+                                 TextTrimming="CharacterEllipsis"
+                                 IsTextSelectionEnabled="True" />
+                      <Button Grid.Column="2"
+                              Content="Open in Explorer"
+                              Click="OpenPath_Click"
+                              Tag="{Binding FolderBrowserPath}"
+                              VerticalAlignment="Center" />
+                    </Grid>
+                    <TextBlock Text="{Binding FolderBrowserSummary}"
+                               TextWrapping="WrapWholeWords"
+                               FontSize="12"
+                               Opacity="0.72" />
+                    <ScrollViewer MaxHeight="420"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                      <ItemsControl ItemsSource="{Binding FolderBrowserRows}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="vm:FolderBrowserRow">
+                            <Grid ColumnSpacing="10"
+                                  Margin="0,0,0,4">
+                              <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="140" />
+                                <ColumnDefinition Width="90" />
+                              </Grid.ColumnDefinitions>
+                              <StackPanel>
+                                <HyperlinkButton Content="{Binding Name}"
+                                                 Tag="{Binding Path}"
+                                                 IsEnabled="{Binding CanOpen}"
+                                                 Click="BrowseFolder_Click"
+                                                 Padding="0"
+                                                 FontSize="13"
+                                                 ToolTipService.ToolTip="{Binding Path}" />
+                                <TextBlock Text="{Binding DetailText}"
+                                           FontFamily="Consolas"
+                                           FontSize="11"
+                                           Opacity="0.66" />
+                              </StackPanel>
+                              <ProgressBar Grid.Column="1"
+                                           Value="{Binding SharePercent}"
+                                           Maximum="100"
+                                           VerticalAlignment="Center" />
+                              <TextBlock Grid.Column="2"
+                                         Text="{Binding SizeText}"
+                                         FontWeight="SemiBold"
+                                         HorizontalAlignment="Right"
+                                         VerticalAlignment="Center" />
+                            </Grid>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </ScrollViewer>
+                  </StackPanel>
+                </Border>
+
+                <ItemsControl ItemsSource="{Binding DiskUsageSections}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="models:DiskUsageSection">
+                      <Expander Header="{Binding Title}"
+                                HorizontalAlignment="Stretch"
+                                IsExpanded="{Binding IsExpanded, Mode=TwoWay}">
+                        <Border Padding="10"
+                                Margin="0,0,0,8"
+                                CornerRadius="14"
+                                HorizontalAlignment="Stretch"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1">
+                          <StackPanel Spacing="8">
+                            <TextBlock Text="{Binding Summary}"
+                                       TextWrapping="WrapWholeWords"
+                                       Opacity="0.76"
+                                       FontSize="12" />
+
+                            <ItemsControl ItemsSource="{Binding Entries}">
+                              <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="models:DiskUsageEntry">
+                                  <StackPanel Margin="0,0,0,6">
+                                    <Grid ColumnSpacing="10"
+                                          HorizontalAlignment="Stretch">
+                                      <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                      </Grid.ColumnDefinitions>
+
+                                      <Button Grid.Column="0"
+                                              Content="{Binding ExpandGlyph}"
+                                              Click="ToggleDiskEntry_Click"
+                                              Tag="{Binding}"
+                                              MinWidth="32"
+                                              Padding="8,2"
+                                              FontFamily="Consolas"
+                                              FontWeight="SemiBold"
+                                              VerticalAlignment="Top"
+                                              Visibility="{Binding CanExpand, Converter={StaticResource BoolToVisibilityConverter}}"
+                                              ToolTipService.ToolTip="Expand or collapse the largest children" />
+
+                                      <StackPanel Grid.Column="1">
+                                        <HyperlinkButton Content="{Binding DisplayName}"
+                                                         Click="OpenPath_Click"
+                                                         Tag="{Binding Path}"
+                                                         HorizontalAlignment="Left"
+                                                         FontSize="13" />
+                                        <TextBlock Text="{Binding Note}"
+                                                   FontFamily="Consolas"
+                                                   FontSize="11"
+                                                   Opacity="0.66"
+                                                   TextWrapping="WrapWholeWords" />
+                                      </StackPanel>
+
+                                      <TextBlock Grid.Column="2"
+                                                 Text="{Binding Usage}"
+                                                 VerticalAlignment="Top"
+                                                 FontWeight="SemiBold"
+                                                 Margin="10,0,0,0" />
+                                      <Button Grid.Column="3"
+                                              Content="Clear Folder"
+                                              Click="ClearFolder_Click"
+                                              Tag="{Binding Path}"
+                                              IsEnabled="{Binding CanClear}"
+                                              Margin="10,0,0,0"
+                                              VerticalAlignment="Top" />
+                                    </Grid>
+
+                                    <ItemsControl ItemsSource="{Binding Children}"
+                                                  Margin="42,4,0,0"
+                                                  Visibility="{Binding IsExpanded, Converter={StaticResource BoolToVisibilityConverter}}">
+                                      <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="models:DiskUsageEntry">
+                                          <Grid ColumnSpacing="10"
+                                                HorizontalAlignment="Stretch"
+                                                Margin="0,0,0,4">
+                                            <Grid.ColumnDefinitions>
+                                              <ColumnDefinition Width="*" />
+                                              <ColumnDefinition Width="Auto" />
+                                              <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+
+                                            <StackPanel>
+                                              <HyperlinkButton Content="{Binding DisplayName}"
+                                                               Click="OpenPath_Click"
+                                                               Tag="{Binding Path}"
+                                                               HorizontalAlignment="Left"
+                                                               FontSize="12" />
+                                              <TextBlock Text="{Binding Note}"
+                                                         FontFamily="Consolas"
+                                                         FontSize="10"
+                                                         Opacity="0.6"
+                                                         TextWrapping="WrapWholeWords" />
+                                            </StackPanel>
+
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{Binding Usage}"
+                                                       VerticalAlignment="Top"
+                                                       FontWeight="SemiBold"
+                                                       FontSize="12"
+                                                       Margin="10,0,0,0" />
+                                            <Button Grid.Column="2"
+                                                    Content="Clear Folder"
+                                                    Click="ClearFolder_Click"
+                                                    Tag="{Binding Path}"
+                                                    IsEnabled="{Binding CanClear}"
+                                                    Margin="10,0,0,0"
+                                                    VerticalAlignment="Top" />
+                                          </Grid>
+                                        </DataTemplate>
+                                      </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                  </StackPanel>
+                                </DataTemplate>
+                              </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                          </StackPanel>
+                        </Border>
+                      </Expander>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
                 <Border Padding="12"
                         CornerRadius="14"
                         HorizontalAlignment="Stretch"
@@ -837,26 +1175,6 @@
                                TextWrapping="WrapWholeWords"
                                Opacity="0.72"
                                FontSize="12" />
-
-                    <Border Padding="10,8"
-                            CornerRadius="10"
-                            Background="{ThemeResource AccentFillColorSecondaryBrush}"
-                            Visibility="{Binding ShowElevationHint, Converter={StaticResource BoolToVisibilityConverter}}">
-                      <Grid ColumnSpacing="10">
-                        <Grid.ColumnDefinitions>
-                          <ColumnDefinition Width="*" />
-                          <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Text="Not running as administrator — scans use the slower fallback engine. Restart as admin for the fast NTFS scan."
-                                   TextWrapping="WrapWholeWords"
-                                   VerticalAlignment="Center"
-                                   FontSize="12" />
-                        <Button Grid.Column="1"
-                                Content="Restart as Admin"
-                                Click="RestartAsAdmin_Click"
-                                VerticalAlignment="Center" />
-                      </Grid>
-                    </Border>
 
                     <Grid ColumnSpacing="8">
                       <Grid.ColumnDefinitions>
@@ -988,135 +1306,6 @@
                   </StackPanel>
                 </Border>
 
-                <TextBlock Text="{Binding DiskUsageAnalysis}"
-                           TextWrapping="WrapWholeWords"
-                           Opacity="0.82" />
-
-                <ItemsControl ItemsSource="{Binding DiskUsageSections}">
-                  <ItemsControl.ItemTemplate>
-                    <DataTemplate x:DataType="models:DiskUsageSection">
-                      <Expander Header="{Binding Title}"
-                                HorizontalAlignment="Stretch"
-                                IsExpanded="{Binding IsExpanded, Mode=TwoWay}">
-                        <Border Padding="10"
-                                Margin="0,0,0,8"
-                                CornerRadius="14"
-                                HorizontalAlignment="Stretch"
-                                Background="{ThemeResource LayerFillColorDefaultBrush}"
-                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                                BorderThickness="1">
-                          <StackPanel Spacing="8">
-                            <TextBlock Text="{Binding Summary}"
-                                       TextWrapping="WrapWholeWords"
-                                       Opacity="0.76"
-                                       FontSize="12" />
-
-                            <ItemsControl ItemsSource="{Binding Entries}">
-                              <ItemsControl.ItemTemplate>
-                                <DataTemplate x:DataType="models:DiskUsageEntry">
-                                  <StackPanel Margin="0,0,0,6">
-                                    <Grid ColumnSpacing="10"
-                                          HorizontalAlignment="Stretch">
-                                      <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="Auto" />
-                                      </Grid.ColumnDefinitions>
-
-                                      <Button Grid.Column="0"
-                                              Content="{Binding ExpandGlyph}"
-                                              Click="ToggleDiskEntry_Click"
-                                              Tag="{Binding}"
-                                              MinWidth="32"
-                                              Padding="8,2"
-                                              FontFamily="Consolas"
-                                              FontWeight="SemiBold"
-                                              VerticalAlignment="Top"
-                                              Visibility="{Binding HasChildren, Converter={StaticResource BoolToVisibilityConverter}}"
-                                              ToolTipService.ToolTip="Expand or collapse the largest children" />
-
-                                      <StackPanel Grid.Column="1">
-                                        <HyperlinkButton Content="{Binding DisplayName}"
-                                                         Click="OpenPath_Click"
-                                                         Tag="{Binding Path}"
-                                                         HorizontalAlignment="Left"
-                                                         FontSize="13" />
-                                        <TextBlock Text="{Binding Note}"
-                                                   FontFamily="Consolas"
-                                                   FontSize="11"
-                                                   Opacity="0.66"
-                                                   TextWrapping="WrapWholeWords" />
-                                      </StackPanel>
-
-                                      <TextBlock Grid.Column="2"
-                                                 Text="{Binding Usage}"
-                                                 VerticalAlignment="Top"
-                                                 FontWeight="SemiBold"
-                                                 Margin="10,0,0,0" />
-                                      <Button Grid.Column="3"
-                                              Content="Clear Folder"
-                                              Click="ClearFolder_Click"
-                                              Tag="{Binding Path}"
-                                              IsEnabled="{Binding CanClear}"
-                                              Margin="10,0,0,0"
-                                              VerticalAlignment="Top" />
-                                    </Grid>
-
-                                    <ItemsControl ItemsSource="{Binding Children}"
-                                                  Margin="42,4,0,0"
-                                                  Visibility="{Binding IsExpanded, Converter={StaticResource BoolToVisibilityConverter}}">
-                                      <ItemsControl.ItemTemplate>
-                                        <DataTemplate x:DataType="models:DiskUsageEntry">
-                                          <Grid ColumnSpacing="10"
-                                                HorizontalAlignment="Stretch"
-                                                Margin="0,0,0,4">
-                                            <Grid.ColumnDefinitions>
-                                              <ColumnDefinition Width="*" />
-                                              <ColumnDefinition Width="Auto" />
-                                              <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-
-                                            <StackPanel>
-                                              <HyperlinkButton Content="{Binding DisplayName}"
-                                                               Click="OpenPath_Click"
-                                                               Tag="{Binding Path}"
-                                                               HorizontalAlignment="Left"
-                                                               FontSize="12" />
-                                              <TextBlock Text="{Binding Note}"
-                                                         FontFamily="Consolas"
-                                                         FontSize="10"
-                                                         Opacity="0.6"
-                                                         TextWrapping="WrapWholeWords" />
-                                            </StackPanel>
-
-                                            <TextBlock Grid.Column="1"
-                                                       Text="{Binding Usage}"
-                                                       VerticalAlignment="Top"
-                                                       FontWeight="SemiBold"
-                                                       FontSize="12"
-                                                       Margin="10,0,0,0" />
-                                            <Button Grid.Column="2"
-                                                    Content="Clear Folder"
-                                                    Click="ClearFolder_Click"
-                                                    Tag="{Binding Path}"
-                                                    IsEnabled="{Binding CanClear}"
-                                                    Margin="10,0,0,0"
-                                                    VerticalAlignment="Top" />
-                                          </Grid>
-                                        </DataTemplate>
-                                      </ItemsControl.ItemTemplate>
-                                    </ItemsControl>
-                                  </StackPanel>
-                                </DataTemplate>
-                              </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                          </StackPanel>
-                        </Border>
-                      </Expander>
-                    </DataTemplate>
-                  </ItemsControl.ItemTemplate>
-                </ItemsControl>
               </StackPanel>
             </ScrollViewer>
           </Grid>

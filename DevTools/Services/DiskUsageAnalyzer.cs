@@ -1,27 +1,234 @@
-using System.Diagnostics;
-using System.Text.Json;
 using DevTools.Infrastructure;
 using DevTools.Models;
+using DevTools.Services.FolderSizes;
 
 namespace DevTools.Services;
 
+/// <summary>
+/// Disk usage for every fixed drive. Each drive is sized ONCE by <see cref="DriveUsageService"/>
+/// (Everything, the NTFS MFT or a folder walk), and every section, expansion and folder listing
+/// is then read from that in-memory tree, so nothing is measured twice and no section waits on
+/// a separate slow scan. All heavy work runs off the UI thread.
+/// </summary>
 public sealed class DiskUsageAnalyzer
 {
-    private const int DefaultTopCount = 10;
-    private const int MaxVisibleMeasuringEntries = 3;
-    private const int GduWorkerLimit = 2;
-    private const int GduCoreLimitPerScan = 2;
-    private static readonly Lazy<string?> GduExecutablePath = new(ResolveGduExecutablePath);
-    private static readonly Lazy<string?> DustExecutablePath = new(ResolveDustExecutablePath);
-    private readonly Dictionary<string, Task<DustNode?>> _dustCache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, RootBreakdownResult> _rootBreakdownCache = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Title prefix of the per-drive largest-folders sections.</summary>
+    public const string LargestFoldersSectionTitle = "Largest Folders";
 
-    public async Task<DiskUsageSnapshot> CaptureAsync(IProgress<DiskUsageProgress>? progress, CancellationToken cancellationToken)
+    private const int DefaultTopCount = 10;
+    private const int LargestFolderCount = 25;
+    private const int LargestFolderChildren = 15;
+
+    private readonly DriveUsageService _driveUsage = new();
+    private readonly object _treesLock = new();
+    private readonly Dictionary<string, FolderTree> _trees = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The folder trees from the last scan, system drive first.</summary>
+    public IReadOnlyList<FolderTree> Trees
     {
-        _dustCache.Clear();
-        _rootBreakdownCache.Clear();
+        get
+        {
+            lock (_treesLock)
+            {
+                return _trees.Values.ToList();
+            }
+        }
+    }
+
+    public static string LargestFoldersTitleFor(string driveRoot) => $"{LargestFoldersSectionTitle} - {driveRoot}";
+
+    public Task<DiskUsageSnapshot> CaptureAsync(IProgress<DiskUsageProgress>? progress, CancellationToken cancellationToken)
+    {
+        // Task.Run: drive enumeration, process starts and tree building must never touch the UI
+        // thread. The 2026-10 "hangs on load" bug was the MFT read running on the dispatcher.
+        return Task.Run(() => CaptureCoreAsync(progress, cancellationToken), cancellationToken);
+    }
+
+    private async Task<DiskUsageSnapshot> CaptureCoreAsync(IProgress<DiskUsageProgress>? progress, CancellationToken cancellationToken)
+    {
         var capturedAt = DateTimeOffset.Now;
-        var systemDriveRoot = Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\";
+        var drives = DriveUsageService.GetFixedDrives();
+        var headline = BuildHeadline(drives, capturedAt);
+        var systemRoot = FolderTree.NormalizeRoot(Environment.SystemDirectory);
+
+        var sections = new List<DiskUsageSection>();
+        foreach (var drive in drives)
+        {
+            sections.Add(CreatePendingSection(LargestFoldersTitleFor(drive.RootPath), $"Waiting to size every folder on {drive.RootPath}."));
+        }
+
+        var derivedTitles = new[] { "User Profile", "AppData", "Repositories", "Installed Software", "Temp Hotspots", "Docker" };
+        foreach (var title in derivedTitles)
+        {
+            sections.Add(CreatePendingSection(title, $"Filled in from the {systemRoot} scan."));
+        }
+
+        sections.Add(BuildDriveSummarySection(drives, new Dictionary<string, DriveScanResult>(StringComparer.OrdinalIgnoreCase)));
+        progress?.Report(new DiskUsageProgress(headline, $"Found {drives.Count} fixed drive(s). Sizing every folder...", "Sizing folders. Results appear per drive as soon as each drive is done.", sections.ToList(), false));
+
+        var results = new Dictionary<string, DriveScanResult>(StringComparer.OrdinalIgnoreCase);
+        var currentAnalysis = BuildAnalysis([]);
+        for (var driveIndex = 0; driveIndex < drives.Count; driveIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var drive = drives[driveIndex];
+            var sectionIndex = driveIndex;
+            var title = LargestFoldersTitleFor(drive.RootPath);
+            var lastStatus = DateTime.MinValue;
+            var driveProgress = new InlineProgress<FolderScanProgress>(update =>
+            {
+                // Throttle: the UI only needs a few updates a second.
+                if ((DateTime.UtcNow - lastStatus).TotalMilliseconds < 400)
+                {
+                    return;
+                }
+
+                lastStatus = DateTime.UtcNow;
+                var elapsed = update.Elapsed > TimeSpan.Zero ? $" ({update.Elapsed.TotalSeconds:F0}s)" : string.Empty;
+                sections[sectionIndex] = CreatePendingSection(title, $"{update.EngineName}: {update.Message}{elapsed}");
+                progress?.Report(new DiskUsageProgress(headline, $"Drive {sectionIndex + 1} of {drives.Count} ({drive.RootPath}): {update.Message}", currentAnalysis, sections.ToList(), false));
+            });
+
+            DriveScanResult result;
+            try
+            {
+                result = await _driveUsage.ScanDriveAsync(drive, driveProgress, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error($"Sizing {drive.RootPath} failed.", ex);
+                result = new DriveScanResult(drive, null, "None", ex.Message);
+            }
+
+            results[drive.RootPath] = result;
+            if (result.Tree is not null)
+            {
+                lock (_treesLock)
+                {
+                    _trees[drive.RootPath] = result.Tree;
+                }
+            }
+
+            sections[sectionIndex] = BuildDriveSection(result);
+            if (string.Equals(drive.RootPath, systemRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                var derived = BuildDerivedSections(result.Tree);
+                for (var i = 0; i < derived.Count; i++)
+                {
+                    sections[drives.Count + i] = derived[i];
+                }
+            }
+
+            sections[^1] = BuildDriveSummarySection(drives, results);
+            currentAnalysis = BuildAnalysis(results.Values);
+            progress?.Report(new DiskUsageProgress(headline, $"Sized {results.Count} of {drives.Count} drive(s).", currentAnalysis, sections.ToList(), false));
+        }
+
+        if (!results.ContainsKey(systemRoot))
+        {
+            // No system drive among the fixed drives (unusual): drop the derived placeholders.
+            sections.RemoveAll(section => derivedTitles.Contains(section.Title));
+        }
+
+        var analysis = BuildAnalysis(results.Values);
+        progress?.Report(new DiskUsageProgress(headline, $"Last disk refresh: {capturedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}", analysis, sections.ToList(), true));
+        return new DiskUsageSnapshot(capturedAt, headline, analysis, sections);
+    }
+
+    /// <summary>
+    /// Children of a folder for the "+" button: read from the drive tree when the folder is in
+    /// it (instant), otherwise measured with a low-priority walk of just that folder.
+    /// </summary>
+    public async Task<IReadOnlyList<DiskUsageEntry>> ExpandEntryAsync(DiskUsageEntry entry, CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(entry.Path))
+        {
+            return [];
+        }
+
+        if (TryFindNode(entry.Path, out var tree, out var node))
+        {
+            return BuildChildEntries(tree!, node, LargestFolderChildren, includeGrandchildren: false);
+        }
+
+        var walked = await _driveUsage.WalkFolderAsync(entry.Path, cancellationToken).ConfigureAwait(false);
+        var walkedNode = walked.Find(entry.Path);
+        return walkedNode < 0 ? [] : BuildChildEntries(walked, walkedNode, LargestFolderChildren, includeGrandchildren: false);
+    }
+
+    /// <summary>Finds the tree and node for a folder path from the last scan.</summary>
+    public bool TryFindNode(string path, out FolderTree? tree, out int node)
+    {
+        tree = null;
+        node = -1;
+        if (string.IsNullOrWhiteSpace(path) || path.Length < 2 || path[1] != ':')
+        {
+            return false;
+        }
+
+        var root = char.ToUpperInvariant(path[0]) + @":\";
+        lock (_treesLock)
+        {
+            if (!_trees.TryGetValue(root, out var found))
+            {
+                return false;
+            }
+
+            tree = found;
+        }
+
+        node = tree.Find(path);
+        return node >= 0;
+    }
+
+    private static string BuildHeadline(IReadOnlyList<DriveDescriptor> drives, DateTimeOffset capturedAt)
+    {
+        if (drives.Count == 0)
+        {
+            return $"No fixed drives were found ({capturedAt:yyyy-MM-dd HH:mm:ss}).";
+        }
+
+        var parts = drives.Select(drive =>
+        {
+            var percent = drive.TotalBytes <= 0 ? 0 : (double)drive.UsedBytes / drive.TotalBytes * 100d;
+            return $"{drive.RootPath} {FormatBytes(drive.UsedBytes)} used of {FormatBytes(drive.TotalBytes)} ({percent:0.0}%), {FormatBytes(drive.FreeBytes)} free";
+        });
+        return $"Snapshot {capturedAt:yyyy-MM-dd HH:mm:ss}. " + string.Join(". ", parts) + ".";
+    }
+
+    private static DiskUsageSection BuildDriveSection(DriveScanResult result)
+    {
+        var title = LargestFoldersTitleFor(result.Drive.RootPath);
+        if (result.Tree is null)
+        {
+            return new DiskUsageSection(title, $"Could not size the folders on {result.Drive.RootPath}. {result.Note}",
+                [DiskUsageEntry.CreateCompleted(result.Drive.RootPath, true, null, "Unavailable", result.Note)]);
+        }
+
+        var tree = result.Tree;
+        var entries = BuildChildEntries(tree, 0, LargestFolderCount, includeGrandchildren: true);
+        var rootFiles = tree.GetDirectFileBytes(0);
+        if (rootFiles > 0)
+        {
+            entries.Add(DiskUsageEntry.CreateCompleted(tree.RootPath, true, rootFiles, FormatBytes(rootFiles), "Files directly in the drive root.", $"Files in {tree.RootPath}"));
+        }
+
+        var hidden = result.Drive.UsedBytes - tree.TotalBytes;
+        var hiddenText = hidden > 1024L * 1024 * 1024
+            ? $" {FormatBytes(hidden)} of used space is not in any readable folder (system files such as pagefile/hiberfil, restore points, or folders without access)."
+            : string.Empty;
+        var summary =
+            $"{tree.EngineName} sized {tree.FolderCount:N0} folders and {tree.TotalFiles:N0} files ({FormatBytes(tree.TotalBytes)}) on {tree.RootPath} in {tree.Elapsed.TotalSeconds:F1}s. " +
+            $"Use + to see subfolders, or the folder browser to go deeper.{hiddenText}";
+        return new DiskUsageSection(title, summary, entries);
+    }
+
+    private List<DiskUsageSection> BuildDerivedSections(FolderTree? tree)
+    {
         var userProfilePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var localAppDataPath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var roamingAppDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
@@ -30,728 +237,140 @@ public sealed class DiskUsageAnalyzer
         var programFilesPath = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         var programFilesX86Path = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
         var programDataPath = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-        var windowsPath = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-        var tempPath = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var tempPath = Path.TrimEndingDirectorySeparator(Path.GetTempPath());
         var dockerPath = Path.Combine(localAppDataPath, "Docker");
-        var drive = new DriveInfo(systemDriveRoot);
-        var percentUsed = drive.TotalSize <= 0 ? 0 : (double)(drive.TotalSize - drive.AvailableFreeSpace) / drive.TotalSize * 100d;
-        var preferredTool = ResolvePreferredToolName();
-        var headline =
-            $"{drive.Name} snapshot captured on {capturedAt:yyyy-MM-dd HH:mm:ss}. " +
-            $"Used {FormatBytes(drive.TotalSize - drive.AvailableFreeSpace)} of {FormatBytes(drive.TotalSize)} " +
-            $"({percentUsed:0.00}%), leaving {FormatBytes(drive.AvailableFreeSpace)} free. Analyzer: {preferredTool}.";
 
-        var sectionBuilders = new List<(string Title, Func<Action<DiskUsageSection, string>, CancellationToken, Task<DiskUsageSection>> Build)>
+        DiskUsageSection Children(string title, string summary, string path, int top)
         {
-            ("Docker", (reportSection, token) => BuildDockerSectionAsync(dockerPath, reportSection, token)),
-            ("User Profile", (reportSection, token) => BuildLargestChildrenSectionAsync("User Profile", "Largest direct children under the current user profile.", userProfilePath, DefaultTopCount, reportSection, token)),
-            ("AppData", (reportSection, token) => BuildAppDataSectionAsync(localAppDataPath, roamingAppDataPath, localLowPath, reportSection, token)),
-            ($"{devRootPath} Repositories", (reportSection, token) => BuildLargestChildrenSectionAsync($"{devRootPath} Repositories", $"Largest direct children under {devRootPath}.", devRootPath, DefaultTopCount, reportSection, token)),
-            ("Installed Software", (reportSection, token) => BuildInstalledSoftwareSectionAsync(programFilesPath, programDataPath, reportSection, token)),
-            ("Temp Hotspots", (reportSection, token) => BuildLargestChildrenSectionAsync("Temp Hotspots", "Largest direct children under the current temp folder.", tempPath, DefaultTopCount, reportSection, token)),
-            ("Drive Summary", (reportSection, token) => BuildDriveSummarySectionAsync(
-                drive,
-                [userProfilePath, programFilesPath, programFilesX86Path, programDataPath, windowsPath, devRootPath],
-                reportSection,
-                token))
-        };
-
-        var sections = sectionBuilders.Select(builder => CreatePendingSection(builder.Title)).ToList();
-        progress?.Report(new DiskUsageProgress(headline, $"Starting disk usage refresh with {preferredTool}...", "Scanning disk usage and streaming results as sections complete.", sections.ToList(), false));
-
-        for (var i = 0; i < sectionBuilders.Count; i++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            progress?.Report(new DiskUsageProgress(headline, $"Scanning section {i + 1} of {sectionBuilders.Count}: {sectionBuilders[i].Title}...", BuildAnalysis(sections.Where(section => !IsPendingSection(section))), sections.ToList(), false));
-            var section = await sectionBuilders[i].Build(
-                (partialSection, statusText) =>
-                {
-                    sections[i] = partialSection;
-                    progress?.Report(new DiskUsageProgress(headline, statusText, BuildAnalysis(sections.Where(candidate => !IsPendingSection(candidate))), sections.ToList(), false));
-                },
-                cancellationToken);
-            sections[i] = section;
-            progress?.Report(new DiskUsageProgress(headline, $"Loaded {sections.Count} of {sectionBuilders.Count} sections.", BuildAnalysis(sections.Where(candidate => !IsPendingSection(candidate))), sections.ToList(), false));
+            var entries = ChildEntriesFor(tree, path, top);
+            return new DiskUsageSection(title, summary, entries);
         }
 
-        var analysis = BuildAnalysis(sections);
-        progress?.Report(new DiskUsageProgress(headline, $"Last disk refresh: {capturedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}", analysis, sections.ToList(), true));
-        return new DiskUsageSnapshot(capturedAt, headline, analysis, sections);
-    }
+        var appData = new List<DiskUsageEntry>();
+        appData.AddRange(new[] { localAppDataPath, roamingAppDataPath, localLowPath }.Select(path => FolderEntryFor(tree, path)));
+        appData.AddRange(ChildEntriesFor(tree, localAppDataPath, 10));
+        appData.AddRange(ChildEntriesFor(tree, roamingAppDataPath, 8));
 
-    private async Task<DiskUsageSection> BuildDriveSummarySectionAsync(DriveInfo drive, IEnumerable<string> paths, Action<DiskUsageSection, string> reportSection, CancellationToken cancellationToken)
-    {
-        var driveEntry = new DiskUsageEntry(drive.Name, $"{FormatBytes(drive.TotalSize - drive.AvailableFreeSpace)} used / {FormatBytes(drive.TotalSize)} total", $"{FormatBytes(drive.AvailableFreeSpace)} free");
-        var entries = new List<DiskUsageEntry> { driveEntry };
-        var distinctPaths = paths.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var completed = 0;
-        foreach (var currentPath in distinctPaths)
+        var installed = new List<DiskUsageEntry>();
+        installed.AddRange(ChildEntriesFor(tree, programFilesPath, 10));
+        installed.AddRange(ChildEntriesFor(tree, programFilesX86Path, 5));
+        installed.AddRange(ChildEntriesFor(tree, programDataPath, 10));
+
+        var docker = new List<DiskUsageEntry> { FolderEntryFor(tree, dockerPath) };
+        foreach (var file in new[] { Path.Combine(dockerPath, "wsl", "disk", "docker_data.vhdx"), Path.Combine(dockerPath, "wsl", "main", "ext4.vhdx") })
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var breakdown = await MeasureRootBreakdownAsync(currentPath, DefaultTopCount, null, cancellationToken);
-            entries.Add(breakdown.RootEntry);
-            completed++;
-            reportSection(
-                new DiskUsageSection("Drive Summary", $"Rolled up {completed} of {distinctPaths.Count} root paths from prior subtree scans.", entries.ToList()),
-                $"Scanning drive summary: {completed}/{distinctPaths.Count} root paths rolled up. Current: {currentPath}");
-        }
-
-        return new DiskUsageSection("Drive Summary", "Root-level measurements assembled from direct-child scans where possible.", entries);
-    }
-
-    private async Task<DiskUsageSection> BuildAppDataSectionAsync(string localAppDataPath, string roamingAppDataPath, string localLowPath, Action<DiskUsageSection, string> reportSection, CancellationToken cancellationToken)
-    {
-        var localBreakdown = await MeasureRootBreakdownAsync(localAppDataPath, 10, (partialEntries, completed, total, currentPath) =>
-        {
-            reportSection(
-                new DiskUsageSection("AppData", $"Measured {completed} of {total} Local children.", partialEntries),
-                $"Scanning AppData Local: {completed}/{total} children measured. Current: {currentPath}");
-        }, cancellationToken);
-        var localEntries = SortEntriesForDisplay(localBreakdown.ChildEntries, 10);
-
-        var roamingBreakdown = await MeasureRootBreakdownAsync(roamingAppDataPath, 8, (partialEntries, completed, total, currentPath) =>
-        {
-            reportSection(
-                new DiskUsageSection("AppData", $"Measured {completed} of {total} Roaming children.", BuildAppDataEntries(localBreakdown.RootEntry, null, null, localEntries, partialEntries)),
-                $"Scanning AppData Roaming: {completed}/{total} children measured. Current: {currentPath}");
-        }, cancellationToken);
-        var roamingEntries = SortEntriesForDisplay(roamingBreakdown.ChildEntries, 8);
-
-        var localLowMeasurement = await MeasurePathAsync(localLowPath, cancellationToken);
-        var localLowEntry = CreateStaticMeasuredEntry(localLowPath, localLowMeasurement);
-        var entries = BuildAppDataEntries(localBreakdown.RootEntry, roamingBreakdown.RootEntry, localLowEntry, localEntries, roamingEntries);
-        return new DiskUsageSection("AppData", "Current AppData footprint, including the largest Local and Roaming subfolders.", entries);
-    }
-
-    private static List<DiskUsageEntry> BuildAppDataEntries(
-        DiskUsageEntry? localRootEntry,
-        DiskUsageEntry? roamingRootEntry,
-        DiskUsageEntry? localLowEntry,
-        IEnumerable<DiskUsageEntry> localEntries,
-        IEnumerable<DiskUsageEntry> roamingEntries)
-    {
-        var entries = new List<DiskUsageEntry>();
-        if (localRootEntry is not null)
-        {
-            entries.Add(localRootEntry);
-        }
-
-        if (roamingRootEntry is not null)
-        {
-            entries.Add(roamingRootEntry);
-        }
-
-        if (localLowEntry is not null)
-        {
-            entries.Add(localLowEntry);
-        }
-
-        entries.AddRange(localEntries);
-        entries.AddRange(roamingEntries);
-        return entries;
-    }
-
-    private async Task<DiskUsageSection> BuildInstalledSoftwareSectionAsync(string programFilesPath, string programDataPath, Action<DiskUsageSection, string> reportSection, CancellationToken cancellationToken)
-    {
-        var entries = new List<DiskUsageEntry>();
-        var programFilesBreakdown = await MeasureRootBreakdownAsync(programFilesPath, 10, (partialEntries, completed, total, currentPath) =>
-        {
-            reportSection(new DiskUsageSection("Installed Software", $"Measured {completed} of {total} Program Files children.", partialEntries), $"Scanning Program Files: {completed}/{total} children measured. Current: {currentPath}");
-        }, cancellationToken);
-        var programFilesEntries = SortEntriesForDisplay(programFilesBreakdown.ChildEntries, 10);
-        entries.AddRange(programFilesEntries);
-
-        var programDataBreakdown = await MeasureRootBreakdownAsync(programDataPath, 10, (partialEntries, completed, total, currentPath) =>
-        {
-            reportSection(new DiskUsageSection("Installed Software", $"Measured {completed} of {total} ProgramData children.", entries.Concat(partialEntries).ToList()), $"Scanning ProgramData: {completed}/{total} children measured. Current: {currentPath}");
-        }, cancellationToken);
-        var programDataEntries = SortEntriesForDisplay(programDataBreakdown.ChildEntries, 10);
-        entries.AddRange(programDataEntries);
-        return new DiskUsageSection("Installed Software", "Largest direct children under Program Files and ProgramData.", entries);
-    }
-
-    private async Task<DiskUsageSection> BuildDockerSectionAsync(string dockerPath, Action<DiskUsageSection, string> reportSection, CancellationToken cancellationToken)
-    {
-        var candidatePaths = new[]
-        {
-            dockerPath,
-            Path.Combine(dockerPath, "wsl"),
-            Path.Combine(dockerPath, "wsl", "disk", "docker_data.vhdx"),
-            Path.Combine(dockerPath, "wsl", "main", "ext4.vhdx"),
-            Path.Combine(dockerPath, "log")
-        };
-        var measuredEntries = await MeasureEntriesAsync(candidatePaths, candidatePaths.Length, (partialEntries, completed, total, currentPath) =>
-        {
-            reportSection(new DiskUsageSection("Docker", $"Measured {completed} of {total} Docker storage paths.", partialEntries), $"Scanning Docker storage: {completed}/{total} paths measured. Current: {currentPath}");
-        }, cancellationToken);
-        var existingEntries = measuredEntries.Where(entry => entry.ExistsOnDisk).ToList();
-        if (existingEntries.Count == 0)
-        {
-            existingEntries.Add(new DiskUsageEntry(dockerPath, "Not found", "Docker Desktop storage was not found under Local AppData."));
-        }
-
-        return new DiskUsageSection("Docker", "Current Docker Desktop storage paths under Local AppData.", existingEntries);
-    }
-
-    private async Task<DiskUsageSection> BuildLargestChildrenSectionAsync(string title, string summary, string rootPath, int topCount, Action<DiskUsageSection, string> reportSection, CancellationToken cancellationToken)
-    {
-        var breakdown = await MeasureRootBreakdownAsync(rootPath, topCount, (partialEntries, completed, total, currentPath) =>
-        {
-            reportSection(new DiskUsageSection(title, $"Measured {completed} of {total} direct children.", partialEntries), $"Scanning {title}: {completed}/{total} children measured. Current: {currentPath}");
-        }, cancellationToken);
-        var entries = SortEntriesForDisplay(breakdown.ChildEntries, topCount);
-
-        if (entries.Count == 0)
-        {
-            entries = [breakdown.RootEntry];
-        }
-
-        return new DiskUsageSection(title, summary, entries);
-    }
-
-    private async Task<RootBreakdownResult> MeasureRootBreakdownAsync(string rootPath, int visibleCount, Action<List<DiskUsageEntry>, int, int, string>? reportPartialEntries, CancellationToken cancellationToken)
-    {
-        if (_rootBreakdownCache.TryGetValue(rootPath, out var cachedBreakdown))
-        {
-            return cachedBreakdown;
-        }
-
-        RootBreakdownResult breakdown;
-        if (!Directory.Exists(rootPath))
-        {
-            breakdown = new RootBreakdownResult(
-                DiskUsageEntry.CreateCompleted(rootPath, false, null, "Not found", "The path does not exist on this machine."),
-                []);
-        }
-        else
-        {
-            List<string> childPaths;
             try
             {
-                childPaths = EnumerateChildPaths(rootPath);
+                if (File.Exists(file))
+                {
+                    var length = new FileInfo(file).Length;
+                    docker.Add(DiskUsageEntry.CreateCompleted(file, true, length, FormatBytes(length), "Docker virtual disk."));
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                breakdown = new RootBreakdownResult(
-                    DiskUsageEntry.CreateCompleted(rootPath, true, null, "Unavailable", ex.Message),
-                    []);
-                _rootBreakdownCache[rootPath] = breakdown;
-                return breakdown;
-            }
-
-            if (childPaths.Count == 0)
-            {
-                var measurement = await MeasurePathAsync(rootPath, cancellationToken);
-                var rootEntry = CreateStaticMeasuredEntry(rootPath, measurement);
-                breakdown = new RootBreakdownResult(rootEntry, [rootEntry]);
-            }
-            else
-            {
-                var childEntries = await MeasureEntriesAsync(childPaths, visibleCount, reportPartialEntries, cancellationToken);
-                breakdown = new RootBreakdownResult(CreateAggregateRootEntry(rootPath, childEntries), childEntries);
             }
         }
 
-        _rootBreakdownCache[rootPath] = breakdown;
-        return breakdown;
+        return
+        [
+            Children("User Profile", "Largest folders under the current user profile.", userProfilePath, DefaultTopCount),
+            new DiskUsageSection("AppData", "AppData Local, Roaming and LocalLow, plus their largest subfolders.", appData),
+            Children("Repositories", $"Largest folders under {devRootPath}.", devRootPath, DefaultTopCount),
+            new DiskUsageSection("Installed Software", "Largest folders under Program Files and ProgramData.", installed),
+            Children("Temp Hotspots", "Largest folders under the current temp folder.", tempPath, DefaultTopCount),
+            new DiskUsageSection("Docker", "Docker Desktop storage under Local AppData.", docker)
+        ];
     }
 
-    private async Task<List<DiskUsageEntry>> MeasureLargestChildrenAsync(string rootPath, int topCount, Action<List<DiskUsageEntry>, int, int, string>? reportPartialEntries, CancellationToken cancellationToken)
+    private static DiskUsageSection BuildDriveSummarySection(IReadOnlyList<DriveDescriptor> drives, IReadOnlyDictionary<string, DriveScanResult> results)
     {
-        if (!Directory.Exists(rootPath))
+        var entries = new List<DiskUsageEntry>();
+        foreach (var drive in drives)
         {
-            return [new DiskUsageEntry(rootPath, "Not found", "The path does not exist on this machine.")];
+            var label = string.IsNullOrWhiteSpace(drive.Label) ? drive.FileSystem : $"{drive.Label}, {drive.FileSystem}";
+            var note = results.TryGetValue(drive.RootPath, out var result) && result.Tree is not null
+                ? $"{FormatBytes(drive.FreeBytes)} free of {FormatBytes(drive.TotalBytes)}. Folders hold {FormatBytes(result.Tree.TotalBytes)} (sized by {result.EngineName} in {result.Tree.Elapsed.TotalSeconds:F1}s)."
+                : $"{FormatBytes(drive.FreeBytes)} free of {FormatBytes(drive.TotalBytes)}. {(result is null ? "Folder scan pending." : result.Note)}";
+            entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, true, drive.UsedBytes, $"{FormatBytes(drive.UsedBytes)} used", note, $"{drive.RootPath} ({label})"));
         }
 
-        List<string> childPaths;
-        try
-        {
-            childPaths = EnumerateChildPaths(rootPath);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return [new DiskUsageEntry(rootPath, "Unavailable", ex.Message)];
-        }
-
-        if (childPaths.Count == 0)
-        {
-            var measurement = await MeasurePathAsync(rootPath, cancellationToken);
-            return [CreateMeasuredEntry(rootPath, measurement, TimeSpan.Zero)];
-        }
-
-        var entries = await MeasureEntriesAsync(childPaths, topCount, reportPartialEntries, cancellationToken);
-        return SortEntriesForDisplay(entries, topCount);
+        return new DiskUsageSection("Drive Summary", "Used and free space for every fixed drive.", entries);
     }
 
-    private async Task<List<DiskUsageEntry>> MeasureEntriesAsync(IReadOnlyList<string> paths, int visibleCount, Action<List<DiskUsageEntry>, int, int, string>? reportPartialEntries, CancellationToken cancellationToken)
+    private static List<DiskUsageEntry> ChildEntriesFor(FolderTree? tree, string path, int top)
     {
-        if (paths.Count == 0)
+        if (tree is null || string.IsNullOrWhiteSpace(path))
         {
             return [];
         }
 
-        var entries = paths.Distinct(StringComparer.OrdinalIgnoreCase).Select(path => DiskUsageEntry.CreateQueued(path)).ToList();
-        var totalCount = entries.Count;
-        var completedCount = 0;
-        reportPartialEntries?.Invoke(BuildVisibleEntries(entries, visibleCount), completedCount, totalCount, entries[0].Path);
-
-        using var gate = new SemaphoreSlim(ResolveWorkerLimit());
-        var tasks = entries.Select(async entry =>
+        var node = tree.Find(path);
+        if (node < 0)
         {
-            await gate.WaitAsync(cancellationToken);
-            var stopwatch = Stopwatch.StartNew();
-            try
-            {
-                entry.StartMeasurement("Calculating size.");
-                reportPartialEntries?.Invoke(BuildVisibleEntries(entries, visibleCount), Volatile.Read(ref completedCount), totalCount, entry.Path);
-                var measurement = await MeasurePathAsync(entry.Path, cancellationToken);
-                stopwatch.Stop();
-                entry.CompleteMeasurement(measurement.Exists, measurement.SizeBytes, measurement.DisplayValue, measurement.Note, stopwatch.Elapsed);
-            }
-            catch (OperationCanceledException)
-            {
-                stopwatch.Stop();
-                throw;
-            }
-            catch (Exception ex)
-            {
-                stopwatch.Stop();
-                AppLog.Error($"Disk measurement failed for {entry.Path}.", ex);
-                entry.CompleteMeasurement(true, null, "Unavailable", ex.Message, stopwatch.Elapsed);
-            }
-            finally
-            {
-                var completed = Interlocked.Increment(ref completedCount);
-                reportPartialEntries?.Invoke(BuildVisibleEntries(entries, visibleCount), completed, totalCount, entry.Path);
-                gate.Release();
-            }
-        });
-        await Task.WhenAll(tasks);
-        return entries;
+            return [DiskUsageEntry.CreateCompleted(path, Directory.Exists(path), null, "Not found", "This folder was not found in the drive scan.")];
+        }
+
+        var entries = BuildChildEntries(tree, node, top, includeGrandchildren: true);
+        return entries.Count == 0 ? [CreateFolderEntry(tree, node, includeGrandchildren: false)] : entries;
     }
 
-    private async Task<PathMeasurement> MeasurePathAsync(string path, CancellationToken cancellationToken)
+    private static DiskUsageEntry FolderEntryFor(FolderTree? tree, string path)
     {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return new PathMeasurement(false, null, "Unavailable", "No path was provided.");
-        }
-
-        if (!File.Exists(path) && !Directory.Exists(path))
-        {
-            return new PathMeasurement(false, null, "Not found", "The path does not exist on this machine.");
-        }
-
-        if (Directory.Exists(path))
-        {
-            var gduMeasurement = await TryMeasurePathWithGduAsync(path, cancellationToken);
-            if (gduMeasurement is not null)
-            {
-                return gduMeasurement.Value;
-            }
-
-            var dustMeasurement = await TryMeasurePathWithDustAsync(path, cancellationToken);
-            if (dustMeasurement is not null)
-            {
-                return dustMeasurement.Value;
-            }
-        }
-
-        try
-        {
-            var sizeBytes = await Task.Run(() => MeasurePathSize(path, cancellationToken), cancellationToken);
-            var note = File.Exists(path)
-                ? "Measured directly from file metadata."
-                : "Measured with the managed fallback scanner.";
-            return new PathMeasurement(true, sizeBytes, FormatBytes(sizeBytes), note);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException)
-        {
-            return new PathMeasurement(true, null, "Unavailable", ex.Message);
-        }
+        var node = tree?.Find(path) ?? -1;
+        return node < 0
+            ? DiskUsageEntry.CreateCompleted(path, Directory.Exists(path), null, "Not found", "This folder was not found in the drive scan.")
+            : CreateFolderEntry(tree!, node, includeGrandchildren: true);
     }
 
-    private async Task<PathMeasurement?> TryMeasurePathWithGduAsync(string path, CancellationToken cancellationToken)
+    private static List<DiskUsageEntry> BuildChildEntries(FolderTree tree, int node, int top, bool includeGrandchildren)
     {
-        var gduExecutablePath = GduExecutablePath.Value;
-        if (string.IsNullOrWhiteSpace(gduExecutablePath))
-        {
-            return null;
-        }
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = gduExecutablePath,
-            Arguments = $"-n -c -p -s --no-prefix --max-cores {GduCoreLimitPerScan} \"{path}\"",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var process = Process.Start(startInfo);
-        if (process is null)
-        {
-            return null;
-        }
-
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
-
-        var output = await outputTask;
-        var error = await errorTask;
-        if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
-        {
-            AppLog.Info($"gdu scan skipped for {path}. ExitCode={process.ExitCode}. Error={error}");
-            return null;
-        }
-
-        var firstLine = output
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(firstLine))
-        {
-            return null;
-        }
-
-        var parts = firstLine.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (parts.Length == 0 || !long.TryParse(parts[0], out var sizeBytes))
-        {
-            return null;
-        }
-
-        return new PathMeasurement(true, sizeBytes, FormatBytes(sizeBytes), "Measured with gdu.");
+        return tree.GetChildren(node, top)
+            .Where(child => tree.GetTotalBytes(child) > 0)
+            .Select(child => CreateFolderEntry(tree, child, includeGrandchildren))
+            .ToList();
     }
 
-    private async Task<PathMeasurement?> TryMeasurePathWithDustAsync(string path, CancellationToken cancellationToken)
+    private static DiskUsageEntry CreateFolderEntry(FolderTree tree, int node, bool includeGrandchildren)
     {
-        var dustRoot = await RunDustAsync(path, 1, cancellationToken);
-        if (dustRoot is null || string.IsNullOrWhiteSpace(dustRoot.Size))
+        var path = tree.GetPath(node);
+        var size = tree.GetTotalBytes(node);
+        var entry = DiskUsageEntry.CreateCompleted(
+            path,
+            true,
+            size,
+            FormatBytes(size),
+            $"{tree.GetFileCount(node):N0} files",
+            ResolveFolderDisplayName(path));
+        if (includeGrandchildren && tree.HasChildFolders(node))
         {
-            return null;
+            entry.SetChildren(BuildChildEntries(tree, node, LargestFolderChildren, includeGrandchildren: false));
         }
 
-        var sizeBytes = ParseDustSizeToBytes(dustRoot.Size);
-        return sizeBytes is null
-            ? null
-            : new PathMeasurement(true, sizeBytes.Value, FormatBytes(sizeBytes.Value), "Measured with dust.");
+        entry.SetExpandable(tree.HasChildFolders(node));
+        return entry;
     }
 
-    private static long MeasurePathSize(string path, CancellationToken cancellationToken)
+    private static string? ResolveFolderDisplayName(string path)
     {
-        if (File.Exists(path))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return new FileInfo(path).Length;
-        }
-
-        var totalBytes = 0L;
-        var pendingDirectories = new Stack<string>();
-        pendingDirectories.Push(path);
-
-        while (pendingDirectories.Count > 0)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var currentDirectory = pendingDirectories.Pop();
-
-            IEnumerable<string> filePaths = [];
-            try
-            {
-                filePaths = Directory.EnumerateFiles(currentDirectory);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
-            {
-            }
-
-            foreach (var filePath in filePaths)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                try
-                {
-                    totalBytes += new FileInfo(filePath).Length;
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException or PathTooLongException)
-                {
-                }
-            }
-
-            IEnumerable<string> subdirectories = [];
-            try
-            {
-                subdirectories = Directory.EnumerateDirectories(currentDirectory);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
-            {
-            }
-
-            foreach (var subdirectory in subdirectories)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                try
-                {
-                    if ((File.GetAttributes(subdirectory) & System.IO.FileAttributes.ReparsePoint) != 0)
-                    {
-                        continue;
-                    }
-
-                    pendingDirectories.Push(subdirectory);
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
-                {
-                }
-            }
-        }
-
-        return totalBytes;
+        var name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return string.IsNullOrWhiteSpace(name) ? null : name;
     }
 
-    private static string BuildAnalysis(IEnumerable<DiskUsageSection> sections)
+    private static string BuildAnalysis(IEnumerable<DriveScanResult> results)
     {
-        var heaviestEntries = sections
-            .SelectMany(section => section.Entries)
-            .Select(entry => new { Entry = entry, SizeBytes = entry.SizeBytes ?? TryParseSize(entry.Usage) })
-            .Where(item => item.SizeBytes.HasValue)
-            .OrderByDescending(item => item.SizeBytes)
+        var top = results
+            .Where(result => result.Tree is not null)
+            .SelectMany(result => result.Tree!.GetChildren(0, 3).Select(node => (Tree: result.Tree!, Node: node)))
+            .OrderByDescending(item => item.Tree.GetTotalBytes(item.Node))
             .Take(3)
             .ToList();
-
-        if (heaviestEntries.Count == 0)
+        if (top.Count == 0)
         {
-            return "Refresh in progress. Completed sections will update here as measurements finish.";
+            return "Sizing folders. Results appear per drive as soon as each drive is done.";
         }
 
-        return "Current largest measured paths: " +
-               string.Join(", ", heaviestEntries.Select(item => $"{item.Entry.DisplayName} ({item.Entry.Usage})")) +
-               ".";
-    }
-
-    private static long? TryParseSize(string usage)
-    {
-        if (string.IsNullOrWhiteSpace(usage))
-        {
-            return null;
-        }
-
-        var parts = usage.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (parts.Length < 2 || !double.TryParse(parts[0], out var value))
-        {
-            return null;
-        }
-
-        return parts[1].ToUpperInvariant() switch
-        {
-            "B" => (long)value,
-            "KB" => (long)(value * 1024),
-            "MB" => (long)(value * 1024 * 1024),
-            "GB" => (long)(value * 1024 * 1024 * 1024),
-            "TB" => (long)(value * 1024 * 1024 * 1024 * 1024),
-            _ => null
-        };
-    }
-
-    private static string FormatBytes(long bytes) => ByteFormatter.Format(bytes);
-
-    private sealed class DustNode
-    {
-        public string? Size { get; set; }
-
-        public string? Name { get; set; }
-
-        public List<DustNode> Children { get; set; } = [];
-    }
-
-    private static DiskUsageSection CreatePendingSection(string title)
-    {
-        return new DiskUsageSection(title, "Scanning this section now.", [new DiskUsageEntry("Working...", "In progress", "Results appear here as soon as this section finishes.")]);
-    }
-
-    private static bool IsPendingSection(DiskUsageSection section)
-    {
-        return section.Entries.Count == 1 &&
-               string.Equals(section.Entries[0].Path, "Working...", StringComparison.Ordinal) &&
-               string.Equals(section.Entries[0].Usage, "In progress", StringComparison.Ordinal);
-    }
-
-    private async Task<DustNode?> RunDustAsync(string path, int depth, CancellationToken cancellationToken)
-    {
-        var cacheKey = $"{depth}|{Path.GetFullPath(path)}";
-        if (_dustCache.TryGetValue(cacheKey, out var cachedTask))
-        {
-            return await cachedTask;
-        }
-
-        var task = RunDustCoreAsync(path, depth, cancellationToken);
-        _dustCache[cacheKey] = task;
-        return await task;
-    }
-
-    private static async Task<DustNode?> RunDustCoreAsync(string path, int depth, CancellationToken cancellationToken)
-    {
-        var dustExecutablePath = DustExecutablePath.Value;
-        if (string.IsNullOrWhiteSpace(dustExecutablePath))
-        {
-            return null;
-        }
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = dustExecutablePath,
-            Arguments = $"-D -p -d {depth} -n 200 -j \"{path}\"",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var process = Process.Start(startInfo);
-        if (process is null)
-        {
-            return null;
-        }
-
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
-        var output = await outputTask;
-        var error = await errorTask;
-        if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
-        {
-            AppLog.Info($"dust scan skipped for {path}. ExitCode={process.ExitCode}. Error={error}");
-            return null;
-        }
-
-        try
-        {
-            return JsonSerializer.Deserialize<DustNode>(output, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static string? ResolveGduExecutablePath()
-    {
-        var baseDirectory = AppContext.BaseDirectory;
-        var candidates = new[]
-        {
-            Path.Combine(baseDirectory, "gdu.exe"),
-            Path.GetFullPath(Path.Combine(baseDirectory, @"..\..\..\..\.tools\gdu\gdu_windows_amd64.exe")),
-            Path.GetFullPath(Path.Combine(baseDirectory, @"..\..\..\..\.tools\gdu\gdu.exe")),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "chocolatey", "bin", "gdu.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "gdu", "gdu.exe")
-        };
-
-        foreach (var candidate in candidates.Where(File.Exists))
-        {
-            return candidate;
-        }
-
-        return ResolveExecutableFromWhere("gdu");
-    }
-
-    private static string? ResolveDustExecutablePath()
-    {
-        var baseDirectory = AppContext.BaseDirectory;
-        var candidates = new[]
-        {
-            Path.Combine(baseDirectory, "dust.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "chocolatey", "bin", "dust.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dust", "dust.exe")
-        };
-
-        foreach (var candidate in candidates.Where(File.Exists))
-        {
-            return candidate;
-        }
-
-        return ResolveExecutableFromWhere("dust");
-    }
-
-    private static string? ResolveExecutableFromWhere(string executableName)
-    {
-        try
-        {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = "where.exe",
-                Arguments = executableName,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using var process = Process.Start(startInfo);
-            if (process is null)
-            {
-                return null;
-            }
-
-            process.WaitForExit(2000);
-            return process.StandardOutput.ReadToEnd()
-                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .FirstOrDefault(File.Exists);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static long? ParseDustSizeToBytes(string rawSize)
-    {
-        if (string.IsNullOrWhiteSpace(rawSize))
-        {
-            return null;
-        }
-
-        var normalized = rawSize.Trim();
-        var splitIndex = normalized.TakeWhile(ch => char.IsDigit(ch) || ch is '.' or ',').Count();
-        if (splitIndex == 0)
-        {
-            return null;
-        }
-
-        var numberPart = normalized[..splitIndex].Replace(',', '.');
-        var unitPart = normalized[splitIndex..].Trim().ToUpperInvariant();
-        if (!double.TryParse(numberPart, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var value))
-        {
-            return null;
-        }
-
-        return unitPart switch
-        {
-            "B" => (long)value,
-            "K" or "KB" or "KIB" => (long)(value * 1024),
-            "M" or "MB" or "MIB" => (long)(value * 1024 * 1024),
-            "G" or "GB" or "GIB" => (long)(value * 1024 * 1024 * 1024),
-            "T" or "TB" or "TIB" => (long)(value * 1024 * 1024 * 1024 * 1024),
-            _ => null
-        };
-    }
-
-    private static int ResolveWorkerLimit()
-    {
-        return !string.IsNullOrWhiteSpace(GduExecutablePath.Value)
-            ? GduWorkerLimit
-            : Math.Clamp(Environment.ProcessorCount / 2, 1, 3);
-    }
-
-    private static string ResolvePreferredToolName()
-    {
-        if (!string.IsNullOrWhiteSpace(GduExecutablePath.Value))
-        {
-            return "gdu";
-        }
-
-        if (!string.IsNullOrWhiteSpace(DustExecutablePath.Value))
-        {
-            return "dust";
-        }
-
-        return "managed fallback";
+        return "Largest folders: " + string.Join(", ", top.Select(item => $"{item.Tree.GetPath(item.Node)} ({FormatBytes(item.Tree.GetTotalBytes(item.Node))})")) + ".";
     }
 
     private static string ResolveRepositoryRootPath()
@@ -762,75 +381,22 @@ public sealed class DiskUsageAnalyzer
             return configuredPath;
         }
 
-        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "source", "repos");
+        var sourceRepos = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "source", "repos");
+        return Directory.Exists(sourceRepos) || !Directory.Exists(@"C:\dev") ? sourceRepos : @"C:\dev";
     }
 
-    private static List<string> EnumerateChildPaths(string rootPath)
+    private static DiskUsageSection CreatePendingSection(string title, string summary)
     {
-        var childPaths = new List<string>();
-        childPaths.AddRange(Directory.EnumerateDirectories(rootPath));
-        childPaths.AddRange(Directory.EnumerateFiles(rootPath));
-        return childPaths.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToList();
+        return new DiskUsageSection(title, summary, [new DiskUsageEntry("Working...", "In progress", summary)]);
     }
 
-    private static List<DiskUsageEntry> BuildVisibleEntries(IReadOnlyList<DiskUsageEntry> entries, int maxCount)
+    private static string FormatBytes(long bytes) => ByteFormatter.Format(bytes);
+
+    /// <summary>Progress that calls straight through (no synchronization context capture).</summary>
+    private sealed class InlineProgress<T>(Action<T> handler) : IProgress<T>
     {
-        if (entries.Count <= maxCount)
-        {
-            return entries.ToList();
-        }
-
-        var visibleEntries = new List<DiskUsageEntry>(maxCount);
-        var reserveForMeasuring = entries.Any(entry => entry.IsMeasuring) ? Math.Min(MaxVisibleMeasuringEntries, maxCount) : 0;
-        var completedLimit = Math.Max(0, maxCount - reserveForMeasuring);
-        visibleEntries.AddRange(entries.Where(entry => !entry.IsMeasuring && entry.SizeBytes.HasValue).OrderByDescending(entry => entry.SizeBytes).ThenBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase).Take(completedLimit));
-        visibleEntries.AddRange(entries.Where(entry => entry.IsMeasuring).OrderBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase).Take(maxCount - visibleEntries.Count));
-        if (visibleEntries.Count < maxCount)
-        {
-            visibleEntries.AddRange(entries.Where(entry => !visibleEntries.Contains(entry)).OrderBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase).Take(maxCount - visibleEntries.Count));
-        }
-
-        return visibleEntries;
+        public void Report(T value) => handler(value);
     }
-
-    private static List<DiskUsageEntry> SortEntriesForDisplay(IEnumerable<DiskUsageEntry> entries, int topCount)
-    {
-        return entries.OrderByDescending(entry => entry.SizeBytes ?? -1).ThenBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase).Take(topCount).ToList();
-    }
-
-    private static DiskUsageEntry CreateAggregateRootEntry(string rootPath, IReadOnlyList<DiskUsageEntry> childEntries)
-    {
-        var measuredEntries = childEntries.Where(entry => entry.SizeBytes.HasValue).ToList();
-        if (measuredEntries.Count == 0)
-        {
-            return DiskUsageEntry.CreateCompleted(rootPath, true, null, "Unavailable", "None of the direct children could be measured.");
-        }
-
-        var totalSizeBytes = measuredEntries.Sum(entry => entry.SizeBytes!.Value);
-        var unavailableCount = childEntries.Count - measuredEntries.Count;
-        var note = unavailableCount == 0
-            ? $"Calculated from {measuredEntries.Count} direct children."
-            : $"Calculated from {measuredEntries.Count} of {childEntries.Count} direct children; {unavailableCount} entries were unavailable.";
-        var rootEntry = DiskUsageEntry.CreateCompleted(rootPath, true, totalSizeBytes, FormatBytes(totalSizeBytes), note);
-        rootEntry.SetChildren(childEntries);
-        return rootEntry;
-    }
-
-    private static DiskUsageEntry CreateStaticMeasuredEntry(string path, PathMeasurement measurement)
-    {
-        return DiskUsageEntry.CreateCompleted(path, measurement.Exists, measurement.SizeBytes, measurement.DisplayValue, measurement.Note);
-    }
-
-    private static DiskUsageEntry CreateMeasuredEntry(string path, PathMeasurement measurement, TimeSpan elapsed)
-    {
-        var entry = new DiskUsageEntry(path, measurement.DisplayValue);
-        entry.CompleteMeasurement(measurement.Exists, measurement.SizeBytes, measurement.DisplayValue, measurement.Note, elapsed);
-        return entry;
-    }
-
-    private sealed record RootBreakdownResult(DiskUsageEntry RootEntry, IReadOnlyList<DiskUsageEntry> ChildEntries);
-
-    private readonly record struct PathMeasurement(bool Exists, long? SizeBytes, string DisplayValue, string Note);
 }
 
 public sealed record DiskUsageSnapshot(DateTimeOffset CapturedAt, string Headline, string Analysis, IReadOnlyList<DiskUsageSection> Sections);

@@ -4,6 +4,7 @@ using DevTools.Models;
 using DevTools.Infrastructure;
 using DevTools.ViewModels;
 using DevTools.Services;
+using DevTools.Services.DiskCleanup;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
@@ -67,7 +68,7 @@ public sealed partial class MainPage : Page
 
     private async void RefreshTimer_Tick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
     {
-        await ViewModel.RefreshAsync(CancellationToken.None);
+        await ViewModel.RefreshOnTimerAsync(CancellationToken.None);
     }
 
     private void LiveRunTimer_Tick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
@@ -88,7 +89,7 @@ public sealed partial class MainPage : Page
         try
         {
             await ViewModel.InitializeAsync(cts.Token);
-            // Tab data loads run unbounded — the 8s startup token is only for the auth/run check,
+            // Tab data loads run unbounded - the 8s startup token is only for the auth/run check,
             // and cancelling a disk scan mid-flight leaves the tab stuck on "Canceled".
             if (ViewModel.IsKillProcessesVisible)
             {
@@ -495,14 +496,40 @@ public sealed partial class MainPage : Page
         ViewModel.ToggleProcessSection(section);
     }
 
-    private void ToggleDiskEntry_Click(object sender, RoutedEventArgs e)
+    private async void ToggleDiskEntry_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement element || element.Tag is not DiskUsageEntry entry)
         {
             return;
         }
 
+        if (!entry.IsExpanded && entry.CanExpand && !entry.HasLoadedChildren)
+        {
+            await ViewModel.EnsureDiskUsageChildrenLoadedAsync(entry, CancellationToken.None);
+        }
+
         entry.ToggleExpanded();
+    }
+
+    private void BrowseDrive_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string root })
+        {
+            ViewModel.BrowseFolder(root);
+        }
+    }
+
+    private void BrowseFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string path })
+        {
+            ViewModel.BrowseFolder(path);
+        }
+    }
+
+    private void BrowseUp_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.BrowseFolderUp();
     }
 
     private void CopyProcessInfo_Click(object sender, RoutedEventArgs e)
@@ -650,6 +677,89 @@ public sealed partial class MainPage : Page
     private void CancelBiggestFilesScan_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.CancelBiggestFilesScan();
+    }
+
+    /// <summary>
+    /// Bulk Cleanup measures first, shows what would go, and only deletes after the user
+    /// confirms. The measured pass deletes nothing.
+    /// </summary>
+    private async void BulkCleanup_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.IsBulkCleanupRunning)
+        {
+            ViewModel.StatusMessage = "A bulk cleanup is already running.";
+            return;
+        }
+
+        if (!ViewModel.IsBulkCleanupAvailable)
+        {
+            ViewModel.StatusMessage = ViewModel.BulkCleanupAvailabilityText;
+            return;
+        }
+
+        var preview = await ViewModel.PreviewBulkCleanupAsync();
+        if (!preview.Started)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = preview.Succeeded ? "Run the cleanup for real?" : "Cleanup preview failed",
+            Content = BuildBulkCleanupDialogText(preview),
+            PrimaryButtonText = preview.Succeeded ? "Clean Up Now" : null,
+            CloseButtonText = preview.Succeeded ? "Cancel" : "Close",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot
+        };
+
+        if (!preview.Succeeded)
+        {
+            await dialog.ShowAsync();
+            return;
+        }
+
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            ViewModel.StatusMessage = "Bulk cleanup canceled. Nothing was deleted.";
+            return;
+        }
+
+        await ViewModel.RunBulkCleanupAsync();
+    }
+
+    private void CancelBulkCleanup_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.CancelBulkCleanup();
+    }
+
+    private static string BuildBulkCleanupDialogText(DiskCleanupResult preview)
+    {
+        if (!preview.Succeeded)
+        {
+            return $"{preview.Message}\n\nOpen the Cleanup report in the Storage pane for the full output.";
+        }
+
+        var lines = new List<string>
+        {
+            "A dry run already measured this machine. These lanes would be deleted:",
+            string.Empty
+        };
+
+        foreach (var lane in preview.Report.Lanes)
+        {
+            var items = lane.ItemCount is null ? string.Empty : $" ({lane.ItemCount} items)";
+            lines.Add($"  {DiskCleanupService.FormatSize(lane.Bytes),10}  {lane.Lane}{items}");
+        }
+
+        lines.Add(string.Empty);
+        lines.Add($"Total reclaimable: {DiskCleanupService.FormatSize(preview.Report.TotalReclaimableBytes)}");
+        lines.Add(string.Empty);
+        lines.Add("Kept: every video master, the release folder, episode.json, and the top-level files of a published episode.");
+        lines.Add("Deleted: package caches, build output in stale checkouts, and the intermediate folders of already-published video episodes (work, runs, node_modules, video, captures, audio, slides, review, edit, ledgers, prompts, scripts, transcript, verification, toolkit, vps-setup, shorts).");
+        lines.Add(string.Empty);
+        lines.Add("This cannot be undone. Caches and build output come back on the next install or build.");
+        return string.Join(Environment.NewLine, lines);
     }
 
     private void SetBiggestFilesRootSystem_Click(object sender, RoutedEventArgs e)

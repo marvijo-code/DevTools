@@ -15,6 +15,14 @@ $outputRoot = Join-Path $root "DevTools\bin\$Configuration"
 $runningApp = Get-Process DevTools -ErrorAction SilentlyContinue |
     Where-Object { $_.StartTime -and $_.Path }
 
+# Stop the running copy BEFORE the build: the apphost (DevTools.exe) is file-locked while it runs,
+# so building first fails with MSB3027/MSB3021 on a rebuild.
+if ($runningApp) {
+    Write-Host "Stopping running app..."
+    $runningApp | Stop-Process -Force
+    Start-Sleep -Milliseconds 750
+}
+
 Write-Host "Building DevTools ($Configuration)..."
 dotnet build $solution -c $Configuration
 
@@ -29,12 +37,6 @@ $outputExe = Get-ChildItem -Path $outputRoot -Recurse -Filter "DevTools.exe" -Fi
 
 if (-not $outputExe) {
     throw "Build completed, but no DevTools.exe was found under $outputRoot"
-}
-
-if ($runningApp) {
-    Write-Host "Stopping running app..."
-    $runningApp | Stop-Process -Force
-    Start-Sleep -Milliseconds 750
 }
 
 Write-Host "Launching:"

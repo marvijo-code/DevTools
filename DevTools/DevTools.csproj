@@ -39,6 +39,8 @@
 
   <ItemGroup>
     <PackageReference Include="System.Management" />
+    <!-- Reads open TargetProcess tickets from the read-only Adam mirror. -->
+    <PackageReference Include="Microsoft.Data.SqlClient" />
   </ItemGroup>
 
 </Project>

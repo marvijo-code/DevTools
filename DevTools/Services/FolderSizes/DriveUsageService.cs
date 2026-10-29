@@ -15,20 +15,16 @@ public sealed record DriveScanResult(DriveDescriptor Drive, FolderTree? Tree, st
 /// <summary>
 /// Sizes every folder on every fixed drive with the fastest engine that works, in this order:
 /// <list type="number">
-/// <item>Everything with folder sizes indexed (one short list of folders, no disk reads).</item>
 /// <item>NTFS Master File Table when DevTools runs as administrator (measured 48 s for C:).</item>
-/// <item>Everything without folder sizes (every file from the index: 81 s for C: with free RAM, 309 s when RAM was nearly full).</item>
 /// <item>A low-priority folder walk (slowest: gdu, dua and diskus each took over 15 minutes for C:).</item>
 /// </list>
 /// Each engine has a time limit; a failed or timed-out engine falls through to the next one.
+/// No external indexer is read: the scan either reads the volume's own MFT or walks the folders.
 /// </summary>
 public sealed class DriveUsageService
 {
-    private static readonly TimeSpan EverythingFoldersTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan MftTimeout = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan EverythingFilesTimeout = TimeSpan.FromMinutes(10);
 
-    private readonly EverythingFolderScanner _everything = new();
     private readonly MftFolderSizeScanner _mft = new();
     private readonly ParallelFolderWalker _walker = new();
 
@@ -76,31 +72,6 @@ public sealed class DriveUsageService
         void Report(string engine, string message) =>
             progress?.Report(new FolderScanProgress(root, engine, message, 0, TimeSpan.Zero));
 
-        Report(EverythingFolderScanner.EngineName, $"Checking Everything for {root}...");
-        EverythingProbe probe;
-        try
-        {
-            probe = await _everything.ProbeAsync(root, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            probe = new EverythingProbe(false, false, false, null, $"Everything check failed: {ex.Message}");
-        }
-
-        AppLog.Info($"Drive {root}: {probe.Reason}");
-        notes.Add(probe.Reason);
-
-        if (probe.IndexesDrive && probe.HasFolderSizes)
-        {
-            var tree = await TryEngineAsync(
-                () => _everything.ScanAsync(root, probe, progress, EverythingFoldersTimeout, cancellationToken),
-                EverythingFolderScanner.EngineName, root, notes, cancellationToken).ConfigureAwait(false);
-            if (tree is not null)
-            {
-                return Done(drive, tree, notes);
-            }
-        }
-
         var elevated = ElevationService.IsProcessElevated();
         var ntfs = string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase);
         if (elevated && ntfs)
@@ -123,17 +94,6 @@ public sealed class DriveUsageService
             notes.Add("Not running as administrator, so the NTFS Master File Table fast path is off.");
         }
 
-        if (probe.IndexesDrive && !probe.HasFolderSizes)
-        {
-            var tree = await TryEngineAsync(
-                () => _everything.ScanAsync(root, probe, progress, EverythingFilesTimeout, cancellationToken),
-                EverythingFolderScanner.EngineName, root, notes, cancellationToken).ConfigureAwait(false);
-            if (tree is not null)
-            {
-                return Done(drive, tree, notes);
-            }
-        }
-
         Report(ParallelFolderWalker.EngineName, $"Walking every folder on {root} (slow path)...");
         var walked = await TryEngineAsync(
             () => _walker.ScanAsync(root, progress, cancellationToken),
@@ -143,10 +103,16 @@ public sealed class DriveUsageService
             : new DriveScanResult(drive, null, "None", string.Join(" ", notes));
     }
 
-    /// <summary>Measures one folder subtree (used when a folder is not in any drive tree).</summary>
-    public Task<FolderTree> WalkFolderAsync(string path, CancellationToken cancellationToken)
+    /// <summary>
+    /// Measures one folder subtree the user asked for (a click). It runs at full speed while the
+    /// background all-drive scans pause, so the clicked folder is sized first.
+    /// </summary>
+    public async Task<FolderTree> WalkFolderAsync(string path, CancellationToken cancellationToken)
     {
-        return _walker.ScanAsync(path, null, cancellationToken);
+        using (ScanGate.Pause())
+        {
+            return await _walker.ScanAsync(path, null, cancellationToken, prioritize: true).ConfigureAwait(false);
+        }
     }
 
     private static DriveScanResult Done(DriveDescriptor drive, FolderTree tree, List<string> notes)

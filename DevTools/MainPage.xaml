@@ -289,6 +289,12 @@
             <Button Content="Runs"
                     x:Name="RunsNavigationButton" Style="{StaticResource NavigationButtonStyle}"
                     Click="NavigateToRuns_Click" />
+            <Button Content="Open Work"
+                    x:Name="OpenWorkNavigationButton" Style="{StaticResource NavigationButtonStyle}"
+                    Click="NavigateToOpenWork_Click" />
+            <Button Content="Worktrees"
+                    x:Name="WorktreesNavigationButton" Style="{StaticResource NavigationButtonStyle}"
+                    Click="NavigateToWorktrees_Click" />
             <Button Content="Storage"
                     x:Name="StorageNavigationButton" Style="{StaticResource NavigationButtonStyle}"
                     Click="NavigateToDisk_Click" />
@@ -626,6 +632,64 @@
                              Text="{Binding RepoInput, Mode=TwoWay}" />
                   </Grid>
 
+                  <TextBlock Text="TargetProcess (Open Work tab)"
+                             FontWeight="SemiBold"
+                             Margin="0,4,0,0" />
+                  <TextBlock Text="Stored in this machine's local app settings, base64 encoded. That is obfuscation, not encryption, so use an account with read-only access to the mirror."
+                             TextWrapping="WrapWholeWords"
+                             Opacity="0.68"
+                             FontSize="12" />
+
+                  <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*" />
+                      <ColumnDefinition Width="Auto" />
+                      <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBox x:Name="TargetProcessConnectionBox"
+                             Grid.Column="0"
+                             Header="TargetProcess Connection String"
+                             PlaceholderText="Server=&lt;host&gt;;Database=&lt;db&gt;;User ID=&lt;user&gt;;Password=your-password;Encrypt=True;TrustServerCertificate=True" />
+                    <Button Grid.Column="1"
+                            Content="Use Connection"
+                            Click="UseTargetProcessConnection_Click"
+                            VerticalAlignment="Bottom"
+                            Margin="0,0,0,1" />
+                    <Button Grid.Column="2"
+                            Content="Clear"
+                            Click="ClearTargetProcessConnection_Click"
+                            VerticalAlignment="Bottom"
+                            Margin="0,0,0,1" />
+                  </Grid>
+
+                  <TextBox Header="TargetProcess Portal URL"
+                           PlaceholderText="https://your-company.tpondemand.com (used for Open Ticket links)"
+                           Text="{Binding TargetProcessPortalUrl, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+
+                  <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*" />
+                      <ColumnDefinition Width="Auto" />
+                      <ColumnDefinition Width="140" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBox Grid.Column="0"
+                             Header="Your TargetProcess Name"
+                             PlaceholderText="First and last name"
+                             Text="{Binding TargetProcessUserSearch, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <Button Grid.Column="1"
+                            Content="Resolve"
+                            Click="ResolveTargetProcessUser_Click"
+                            VerticalAlignment="Bottom"
+                            Margin="0,0,0,1" />
+                    <TextBox Grid.Column="2"
+                             x:Name="TargetProcessUserIdBox"
+                             Header="User Id"
+                             InputScope="Number"
+                             Text="{Binding TargetProcessUserIdText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                  </Grid>
+
                   <ListView ItemsSource="{Binding Repositories}"
                             HorizontalAlignment="Stretch"
                             HorizontalContentAlignment="Stretch"
@@ -824,6 +888,110 @@
                           VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled">
               <StackPanel Spacing="10">
+                <Border x:Name="CleanupOptionsCard"
+                        Padding="12"
+                        CornerRadius="10"
+                        HorizontalAlignment="Stretch"
+                        Background="{ThemeResource LayerFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1">
+                  <StackPanel Spacing="10">
+                    <Grid ColumnSpacing="10">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                      </Grid.ColumnDefinitions>
+
+                      <StackPanel Spacing="2">
+                        <StackPanel Orientation="Horizontal"
+                                    Spacing="8">
+                          <TextBlock Text="Cleanup options"
+                                     FontSize="16"
+                                     FontWeight="SemiBold" />
+                          <ProgressRing Width="14"
+                                        Height="14"
+                                        IsActive="{Binding IsCleanupRefreshing}"
+                                        VerticalAlignment="Center" />
+                        </StackPanel>
+                        <TextBlock Text="{Binding CleanupSummary}"
+                                   TextWrapping="WrapWholeWords"
+                                   FontSize="12"
+                                   Opacity="0.76" />
+                      </StackPanel>
+
+                      <Button Grid.Column="1"
+                              Content="Check again"
+                              Click="RefreshCleanupOptions_Click"
+                              IsEnabled="{Binding CanRefreshCleanupOptions}"
+                              VerticalAlignment="Top" />
+                    </Grid>
+
+                    <ItemsControl ItemsSource="{Binding CleanupOptions}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="models:CleanupOption">
+                          <Border Padding="10"
+                                  Margin="0,0,0,8"
+                                  CornerRadius="10"
+                                  HorizontalAlignment="Stretch"
+                                  Background="{Binding VerdictBackgroundBrush}"
+                                  BorderBrush="{Binding VerdictBorderBrush}"
+                                  BorderThickness="1">
+                            <Grid ColumnSpacing="12">
+                              <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                              </Grid.ColumnDefinitions>
+
+                              <Border Padding="8,3"
+                                      MinWidth="76"
+                                      CornerRadius="6"
+                                      VerticalAlignment="Top"
+                                      Background="{Binding VerdictAccentBrush}">
+                                <TextBlock Text="{Binding VerdictText}"
+                                           Foreground="{Binding VerdictBadgeForegroundBrush}"
+                                           HorizontalAlignment="Center"
+                                           FontSize="12"
+                                           FontWeight="SemiBold" />
+                              </Border>
+
+                              <StackPanel Grid.Column="1"
+                                          Spacing="3">
+                                <TextBlock Text="{Binding Title}"
+                                           FontSize="14"
+                                           FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding Reason}"
+                                           FontSize="12"
+                                           Opacity="0.82"
+                                           TextWrapping="WrapWholeWords" />
+                                <TextBlock Text="{Binding ResultText}"
+                                           FontSize="12"
+                                           FontWeight="SemiBold"
+                                           TextWrapping="WrapWholeWords" />
+                              </StackPanel>
+
+                              <TextBlock Grid.Column="2"
+                                         Text="{Binding SizeText}"
+                                         FontFamily="Consolas"
+                                         FontWeight="SemiBold"
+                                         VerticalAlignment="Top" />
+
+                              <Button Grid.Column="3"
+                                      Content="{Binding ActionText}"
+                                      Click="RunCleanupOption_Click"
+                                      Tag="{Binding}"
+                                      IsEnabled="{Binding CanRun}"
+                                      MinWidth="130"
+                                      VerticalAlignment="Top" />
+                            </Grid>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </StackPanel>
+                </Border>
+
                 <Border Padding="10,8"
                         CornerRadius="10"
                         Background="{ThemeResource AccentFillColorSecondaryBrush}"
@@ -833,7 +1001,7 @@
                       <ColumnDefinition Width="*" />
                       <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="Not running as administrator. Folder sizes come from Everything when it is running, otherwise from a slow folder walk. Restart as admin to read the NTFS Master File Table directly."
+                    <TextBlock Text="Not running as administrator. Folder sizes come from a low-priority folder walk. Restart as admin to read the NTFS Master File Table directly."
                                TextWrapping="WrapWholeWords"
                                VerticalAlignment="Center"
                                FontSize="12" />
@@ -1005,19 +1173,38 @@
                                 <ColumnDefinition Width="140" />
                                 <ColumnDefinition Width="90" />
                               </Grid.ColumnDefinitions>
-                              <StackPanel>
-                                <HyperlinkButton Content="{Binding Name}"
-                                                 Tag="{Binding Path}"
-                                                 IsEnabled="{Binding CanOpen}"
-                                                 Click="BrowseFolder_Click"
-                                                 Padding="0"
-                                                 FontSize="13"
-                                                 ToolTipService.ToolTip="{Binding Path}" />
-                                <TextBlock Text="{Binding DetailText}"
-                                           FontFamily="Consolas"
-                                           FontSize="11"
-                                           Opacity="0.66" />
-                              </StackPanel>
+                              <Grid Margin="{Binding Indent}"
+                                    ColumnSpacing="4">
+                                <Grid.ColumnDefinitions>
+                                  <ColumnDefinition Width="24" />
+                                  <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Button Tag="{Binding Path}"
+                                        Click="ToggleFolderRow_Click"
+                                        Visibility="{Binding ExpandVisibility}"
+                                        Padding="0"
+                                        Width="24"
+                                        Height="24"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        ToolTipService.ToolTip="Expand or collapse this folder">
+                                  <FontIcon Glyph="{Binding ExpandGlyph}"
+                                            FontSize="11" />
+                                </Button>
+                                <StackPanel Grid.Column="1">
+                                  <HyperlinkButton Content="{Binding Name}"
+                                                   Tag="{Binding Path}"
+                                                   IsEnabled="{Binding CanOpen}"
+                                                   Click="BrowseFolder_Click"
+                                                   Padding="0"
+                                                   FontSize="13"
+                                                   ToolTipService.ToolTip="{Binding Path}" />
+                                  <TextBlock Text="{Binding DetailText}"
+                                             FontFamily="Consolas"
+                                             FontSize="11"
+                                             Opacity="0.66" />
+                                </StackPanel>
+                              </Grid>
                               <ProgressBar Grid.Column="1"
                                            Value="{Binding SharePercent}"
                                            Maximum="100"
@@ -1106,21 +1293,40 @@
                                               VerticalAlignment="Top" />
                                     </Grid>
 
-                                    <ItemsControl ItemsSource="{Binding Children}"
+                                    <ItemsControl ItemsSource="{Binding FlatChildren}"
                                                   Margin="42,4,0,0"
                                                   Visibility="{Binding IsExpanded, Converter={StaticResource BoolToVisibilityConverter}}">
                                       <ItemsControl.ItemTemplate>
                                         <DataTemplate x:DataType="models:DiskUsageEntry">
-                                          <Grid ColumnSpacing="10"
-                                                HorizontalAlignment="Stretch"
+                                          <Grid HorizontalAlignment="Stretch"
                                                 Margin="0,0,0,4">
+                                           <Grid.ColumnDefinitions>
+                                             <ColumnDefinition Width="Auto" />
+                                             <ColumnDefinition Width="*" />
+                                           </Grid.ColumnDefinitions>
+                                           <Border Width="{Binding IndentPixels}" />
+                                          <Grid Grid.Column="1"
+                                                ColumnSpacing="10"
+                                                HorizontalAlignment="Stretch">
                                             <Grid.ColumnDefinitions>
+                                              <ColumnDefinition Width="32" />
                                               <ColumnDefinition Width="*" />
                                               <ColumnDefinition Width="Auto" />
                                               <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
 
-                                            <StackPanel>
+                                            <Button Content="{Binding ExpandGlyph}"
+                                                    Click="ToggleDiskEntry_Click"
+                                                    Tag="{Binding}"
+                                                    MinWidth="28"
+                                                    Padding="6,0"
+                                                    FontFamily="Consolas"
+                                                    FontWeight="SemiBold"
+                                                    VerticalAlignment="Top"
+                                                    Visibility="{Binding CanExpand, Converter={StaticResource BoolToVisibilityConverter}}"
+                                                    ToolTipService.ToolTip="Expand or collapse this folder" />
+
+                                            <StackPanel Grid.Column="1">
                                               <HyperlinkButton Content="{Binding DisplayName}"
                                                                Click="OpenPath_Click"
                                                                Tag="{Binding Path}"
@@ -1133,19 +1339,20 @@
                                                          TextWrapping="WrapWholeWords" />
                                             </StackPanel>
 
-                                            <TextBlock Grid.Column="1"
+                                            <TextBlock Grid.Column="2"
                                                        Text="{Binding Usage}"
                                                        VerticalAlignment="Top"
                                                        FontWeight="SemiBold"
                                                        FontSize="12"
                                                        Margin="10,0,0,0" />
-                                            <Button Grid.Column="2"
+                                            <Button Grid.Column="3"
                                                     Content="Clear Folder"
                                                     Click="ClearFolder_Click"
                                                     Tag="{Binding Path}"
                                                     IsEnabled="{Binding CanClear}"
                                                     Margin="10,0,0,0"
                                                     VerticalAlignment="Top" />
+                                          </Grid>
                                           </Grid>
                                         </DataTemplate>
                                       </ItemsControl.ItemTemplate>
@@ -1757,6 +1964,567 @@
                 </Border>
               </StackPanel>
             </ScrollViewer>
+          </Grid>
+
+          <Grid x:Name="OpenWorkContentPane"
+                RowSpacing="10"
+                Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid ColumnSpacing="10">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+
+              <StackPanel>
+                <TextBlock Text="Open Work"
+                           FontSize="20"
+                           FontWeight="SemiBold"
+                           Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                <TextBlock Text="Your open pull requests and open TargetProcess tickets. Approved PRs first, then oldest first."
+                           TextWrapping="WrapWholeWords"
+                           Opacity="0.7" />
+                <StackPanel Orientation="Horizontal"
+                            Spacing="8">
+                  <ProgressRing Width="16"
+                                Height="16"
+                                IsActive="{Binding IsOpenWorkRefreshing}"
+                                VerticalAlignment="Center" />
+                  <TextBlock Text="{Binding OpenWorkStatusText}"
+                             VerticalAlignment="Center"
+                             FontSize="12"
+                             Opacity="0.62" />
+                </StackPanel>
+              </StackPanel>
+
+              <Button Grid.Column="1"
+                      Content="Refresh Open Work"
+                      Click="RefreshOpenWork_Click"
+                      VerticalAlignment="Top" />
+            </Grid>
+
+            <ScrollViewer x:Name="OpenWorkScroll"
+                          Grid.Row="1"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+              <StackPanel Spacing="14">
+                <StackPanel Spacing="6">
+                  <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*" />
+                      <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Text="Pull Requests"
+                               FontSize="16"
+                               FontWeight="SemiBold"
+                               VerticalAlignment="Center" />
+                    <Border Grid.Column="1"
+                            Padding="8,3"
+                            CornerRadius="6"
+                            Background="{ThemeResource AccentFillColorSecondaryBrush}">
+                      <TextBlock Text="{Binding OpenWorkPullRequestSummary}"
+                                 FontSize="12"
+                                 FontWeight="SemiBold" />
+                    </Border>
+                  </Grid>
+
+                  <TextBlock Text="Review state comes from each reviewer's latest review, so a PR with a human approval and no open change request counts as approved even when branch protection still wants another sign-off. Bot reviews are ignored."
+                             TextWrapping="WrapWholeWords"
+                             Opacity="0.62"
+                             FontSize="12" />
+
+                  <ItemsControl ItemsSource="{Binding OpenPullRequests}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="models:OpenPullRequestItem">
+                        <Border Padding="12"
+                                Margin="0,0,0,8"
+                                CornerRadius="14"
+                                HorizontalAlignment="Stretch"
+                                Background="{Binding ReviewBackgroundBrush}"
+                                BorderBrush="{Binding ReviewBorderBrush}"
+                                BorderThickness="1">
+                          <StackPanel Spacing="6">
+                            <Grid ColumnSpacing="10">
+                              <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                              </Grid.ColumnDefinitions>
+
+                              <Border Padding="7,3"
+                                      CornerRadius="6"
+                                      VerticalAlignment="Center"
+                                      Background="{Binding ReviewAccentBrush}">
+                                <TextBlock Text="{Binding AgeDisplay}"
+                                           Foreground="{Binding ReviewBadgeForegroundBrush}"
+                                           FontFamily="Consolas"
+                                           FontSize="12"
+                                           FontWeight="SemiBold" />
+                              </Border>
+
+                              <TextBlock Grid.Column="1"
+                                         Text="{Binding Reference}"
+                                         FontFamily="Consolas"
+                                         FontSize="12"
+                                         Opacity="0.78"
+                                         VerticalAlignment="Center" />
+
+                              <Border Grid.Column="2"
+                                      Padding="8,3"
+                                      CornerRadius="6"
+                                      Background="{Binding ReviewAccentBrush}">
+                                <TextBlock Text="{Binding ReviewBadgeText}"
+                                           Foreground="{Binding ReviewBadgeForegroundBrush}"
+                                           FontSize="12"
+                                           FontWeight="SemiBold" />
+                              </Border>
+                            </Grid>
+
+                            <TextBlock Text="{Binding Title}"
+                                       FontSize="15"
+                                       FontWeight="SemiBold"
+                                       MaxLines="2"
+                                       TextWrapping="WrapWholeWords"
+                                       TextTrimming="CharacterEllipsis" />
+
+                            <TextBlock Text="{Binding OpenedSummary}"
+                                       Opacity="0.72"
+                                       FontSize="12" />
+
+                            <TextBlock Text="{Binding ReviewerSummary}"
+                                       Opacity="0.72"
+                                       FontSize="12"
+                                       TextWrapping="WrapWholeWords" />
+
+                            <Grid ColumnSpacing="8">
+                              <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                              </Grid.ColumnDefinitions>
+
+                              <TextBlock Text="{Binding TargetProcessDisplay}"
+                                         FontFamily="Consolas"
+                                         FontSize="12"
+                                         Opacity="0.68"
+                                         VerticalAlignment="Center" />
+                              <HyperlinkButton Grid.Column="1"
+                                               Content="Open Ticket"
+                                               Click="OpenLink_Click"
+                                               Tag="{Binding TargetProcessUrl}"
+                                               IsEnabled="{Binding HasTargetProcessUrl}" />
+                              <Button Grid.Column="2"
+                                      Content="Open PR"
+                                      Click="OpenLink_Click"
+                                      Tag="{Binding HtmlUrl}" />
+                            </Grid>
+                          </StackPanel>
+                        </Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+
+                <StackPanel Spacing="6">
+                  <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*" />
+                      <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Text="TargetProcess Tickets"
+                               FontSize="16"
+                               FontWeight="SemiBold"
+                               VerticalAlignment="Center" />
+                    <Border Grid.Column="1"
+                            Padding="8,3"
+                            CornerRadius="6"
+                            Background="{ThemeResource AccentFillColorSecondaryBrush}">
+                      <TextBlock Text="{Binding OpenWorkTicketSummary}"
+                                 FontSize="12"
+                                 FontWeight="SemiBold" />
+                    </Border>
+                  </Grid>
+
+                  <TextBlock Text="Assigned to you as Developer, excluding Developer Assistance and Closed, Done, and Ready for Deployment states. Oldest touched first."
+                             TextWrapping="WrapWholeWords"
+                             Opacity="0.62"
+                             FontSize="12" />
+
+                  <ItemsControl ItemsSource="{Binding OpenTickets}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="models:TargetProcessTicketItem">
+                        <Border Padding="12"
+                                Margin="0,0,0,8"
+                                CornerRadius="14"
+                                HorizontalAlignment="Stretch"
+                                Background="{Binding StateBackgroundBrush}"
+                                BorderBrush="{Binding StateBorderBrush}"
+                                BorderThickness="1">
+                          <StackPanel Spacing="6">
+                            <Grid ColumnSpacing="10">
+                              <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                              </Grid.ColumnDefinitions>
+
+                              <Border Padding="7,3"
+                                      CornerRadius="6"
+                                      VerticalAlignment="Center"
+                                      Background="{Binding StateAccentBrush}">
+                                <TextBlock Text="{Binding AgeDisplay}"
+                                           Foreground="{Binding StateBadgeForegroundBrush}"
+                                           FontFamily="Consolas"
+                                           FontSize="12"
+                                           FontWeight="SemiBold" />
+                              </Border>
+
+                              <TextBlock Grid.Column="1"
+                                         Text="{Binding Reference}"
+                                         FontFamily="Consolas"
+                                         FontSize="12"
+                                         Opacity="0.78"
+                                         VerticalAlignment="Center" />
+
+                              <Border Grid.Column="2"
+                                      Padding="8,3"
+                                      CornerRadius="6"
+                                      Background="{Binding StateAccentBrush}">
+                                <TextBlock Text="{Binding StateDisplay}"
+                                           Foreground="{Binding StateBadgeForegroundBrush}"
+                                           FontSize="12"
+                                           FontWeight="SemiBold" />
+                              </Border>
+                            </Grid>
+
+                            <TextBlock Text="{Binding Name}"
+                                       FontSize="15"
+                                       FontWeight="SemiBold"
+                                       MaxLines="2"
+                                       TextWrapping="WrapWholeWords"
+                                       TextTrimming="CharacterEllipsis" />
+
+                            <TextBlock Text="{Binding LastTouchedSummary}"
+                                       Opacity="0.72"
+                                       FontSize="12" />
+
+                            <Grid ColumnSpacing="8">
+                              <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                              </Grid.ColumnDefinitions>
+
+                              <TextBlock Text="{Binding LinkedPullRequestSummary}"
+                                         FontFamily="Consolas"
+                                         FontSize="12"
+                                         Opacity="0.68"
+                                         VerticalAlignment="Center"
+                                         TextWrapping="WrapWholeWords" />
+                              <Button Grid.Column="1"
+                                      Content="Open Ticket"
+                                      Click="OpenLink_Click"
+                                      Tag="{Binding Url}"
+                                      IsEnabled="{Binding HasUrl}" />
+                            </Grid>
+                          </StackPanel>
+                        </Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+
+                <StackPanel x:Name="RecurringTrackersSection"
+                            Spacing="6"
+                            Visibility="{Binding HasRecurringTrackers, Converter={StaticResource BoolToVisibilityConverter}}">
+                  <TextBlock Text="Recurring Trackers"
+                             FontSize="16"
+                             FontWeight="SemiBold" />
+                  <TextBlock Text="{Binding RecurringTrackerSummary}"
+                             Opacity="0.62"
+                             FontSize="12" />
+                  <TextBlock Text="Year-long buckets for leave, meetings, and deployment logs. They stay open all year and never carry a PR, so they are listed apart rather than burying the work above."
+                             TextWrapping="WrapWholeWords"
+                             Opacity="0.62"
+                             FontSize="12" />
+
+                  <ItemsControl ItemsSource="{Binding RecurringTrackers}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="models:TargetProcessTicketItem">
+                        <Grid ColumnSpacing="10"
+                              Margin="0,0,0,4"
+                              HorizontalAlignment="Stretch">
+                          <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                          </Grid.ColumnDefinitions>
+
+                          <TextBlock Text="{Binding AgeDisplay}"
+                                     FontFamily="Consolas"
+                                     FontSize="12"
+                                     Opacity="0.6"
+                                     VerticalAlignment="Center" />
+                          <TextBlock Grid.Column="1"
+                                     Text="{Binding Name}"
+                                     FontSize="12"
+                                     Opacity="0.78"
+                                     VerticalAlignment="Center"
+                                     TextTrimming="CharacterEllipsis" />
+                          <HyperlinkButton Grid.Column="2"
+                                           Content="{Binding Reference}"
+                                           Click="OpenLink_Click"
+                                           Tag="{Binding Url}"
+                                           IsEnabled="{Binding HasUrl}"
+                                           FontSize="12" />
+                        </Grid>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+              </StackPanel>
+            </ScrollViewer>
+          </Grid>
+
+          <Grid x:Name="WorktreesContentPane"
+                RowSpacing="10"
+                Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid ColumnSpacing="10">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+
+              <StackPanel>
+                <TextBlock Text="Worktrees"
+                           FontSize="20"
+                           FontWeight="SemiBold"
+                           Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                <TextBlock Text="{Binding WorktreeHeadline}"
+                           TextWrapping="WrapWholeWords"
+                           Opacity="0.72" />
+                <Grid ColumnSpacing="8">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <ProgressRing Width="16"
+                                Height="16"
+                                IsActive="{Binding IsWorktreeRefreshing}"
+                                VerticalAlignment="Top" />
+                  <TextBlock Grid.Column="1"
+                             Text="{Binding WorktreeStatusText}"
+                             TextWrapping="WrapWholeWords"
+                             FontSize="12"
+                             Opacity="0.62" />
+                </Grid>
+              </StackPanel>
+
+              <Button Grid.Column="1"
+                      Content="Prune Missing"
+                      Click="PruneWorktrees_Click"
+                      VerticalAlignment="Top" />
+              <Button Grid.Column="2"
+                      Content="Refresh Worktrees"
+                      Click="RefreshWorktrees_Click"
+                      VerticalAlignment="Top" />
+            </Grid>
+
+            <Grid Grid.Row="1"
+                  ColumnSpacing="10">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="200" />
+                <ColumnDefinition Width="230" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+
+              <TextBox Header="Search"
+                       PlaceholderText="&lt;repo&gt;, &lt;branch&gt;, &lt;path&gt;..."
+                       Text="{Binding WorktreeSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+              <ComboBox Grid.Column="1"
+                        Header="Show"
+                        HorizontalAlignment="Stretch"
+                        ItemsSource="{Binding WorktreeFilterOptions}"
+                        SelectedItem="{Binding WorktreeFilter, Mode=TwoWay}" />
+              <ComboBox Grid.Column="2"
+                        Header="Sort by"
+                        HorizontalAlignment="Stretch"
+                        ItemsSource="{Binding WorktreeSortOptions}"
+                        SelectedItem="{Binding WorktreeSort, Mode=TwoWay}" />
+              <Border Grid.Column="3"
+                      Padding="10,5"
+                      CornerRadius="8"
+                      VerticalAlignment="Bottom"
+                      Background="{ThemeResource AccentFillColorSecondaryBrush}">
+                <TextBlock Text="{Binding VisibleWorktreesText}"
+                           FontWeight="SemiBold" />
+              </Border>
+            </Grid>
+
+            <Grid Grid.Row="2"
+                  ColumnSpacing="12">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="250" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+
+              <ScrollViewer VerticalScrollBarVisibility="Auto"
+                            HorizontalScrollBarVisibility="Disabled">
+                <StackPanel Spacing="6">
+                  <TextBlock Text="Repositories"
+                             FontSize="12"
+                             FontWeight="SemiBold"
+                             Opacity="0.72" />
+                  <ItemsControl ItemsSource="{Binding WorktreeRepositories}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="models:WorktreeRepositoryFilter">
+                        <Button Click="WorktreeRepository_Click"
+                                Tag="{Binding}"
+                                Margin="0,0,0,6"
+                                Padding="10,8"
+                                CornerRadius="10"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Left"
+                                Background="{Binding BackgroundBrush}"
+                                BorderBrush="{Binding BorderBrush}"
+                                BorderThickness="1">
+                          <StackPanel Spacing="2">
+                            <TextBlock Text="{Binding Name}"
+                                       FontWeight="SemiBold"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{Binding Summary}"
+                                       FontSize="11"
+                                       Opacity="0.78"
+                                       TextWrapping="WrapWholeWords" />
+                          </StackPanel>
+                        </Button>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+              </ScrollViewer>
+
+              <ScrollViewer x:Name="WorktreesScroll"
+                            Grid.Column="1"
+                            VerticalScrollBarVisibility="Auto"
+                            HorizontalScrollBarVisibility="Disabled">
+                <StackPanel Spacing="6">
+                  <TextBlock Text="Green rows are merged with no uncommitted files, so removing them loses nothing. Removing a worktree deletes its folder only: the branch and its commits always stay. A row with uncommitted files needs Force Remove, and the confirmation says what would be lost."
+                             TextWrapping="WrapWholeWords"
+                             Opacity="0.62"
+                             FontSize="12" />
+
+                  <ItemsControl ItemsSource="{Binding Worktrees}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="models:WorktreeItem">
+                        <Border Padding="12"
+                                Margin="0,0,0,8"
+                                CornerRadius="14"
+                                HorizontalAlignment="Stretch"
+                                Background="{Binding StateBackgroundBrush}"
+                                BorderBrush="{Binding StateBorderBrush}"
+                                BorderThickness="1">
+                          <StackPanel Spacing="6">
+                            <Grid ColumnSpacing="10">
+                              <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                              </Grid.ColumnDefinitions>
+
+                              <Border Padding="7,3"
+                                      CornerRadius="6"
+                                      VerticalAlignment="Center"
+                                      Background="{Binding StateAccentBrush}">
+                                <TextBlock Text="{Binding SizeDisplay}"
+                                           Foreground="{Binding StateBadgeForegroundBrush}"
+                                           FontFamily="Consolas"
+                                           FontSize="12"
+                                           FontWeight="SemiBold" />
+                              </Border>
+
+                              <TextBlock Grid.Column="1"
+                                         Text="{Binding RepositoryName}"
+                                         FontFamily="Consolas"
+                                         FontSize="12"
+                                         Opacity="0.78"
+                                         VerticalAlignment="Center" />
+
+                              <Border Grid.Column="2"
+                                      Padding="8,3"
+                                      CornerRadius="6"
+                                      Background="{Binding StateAccentBrush}">
+                                <TextBlock Text="{Binding StateBadgeText}"
+                                           Foreground="{Binding StateBadgeForegroundBrush}"
+                                           FontSize="12"
+                                           FontWeight="SemiBold" />
+                              </Border>
+                            </Grid>
+
+                            <TextBlock Text="{Binding BranchDisplay}"
+                                       FontSize="15"
+                                       FontWeight="SemiBold"
+                                       MaxLines="1"
+                                       TextTrimming="CharacterEllipsis" />
+
+                            <HyperlinkButton Content="{Binding Path}"
+                                             Click="OpenPath_Click"
+                                             Tag="{Binding Path}"
+                                             HorizontalAlignment="Left"
+                                             Padding="0"
+                                             FontFamily="Consolas"
+                                             FontSize="12" />
+
+                            <TextBlock Text="{Binding Reason}"
+                                       FontSize="12"
+                                       Opacity="0.82"
+                                       TextWrapping="WrapWholeWords" />
+
+                            <Grid ColumnSpacing="8">
+                              <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                              </Grid.ColumnDefinitions>
+
+                              <TextBlock Text="{Binding DetailSummary}"
+                                         FontSize="12"
+                                         Opacity="0.68"
+                                         VerticalAlignment="Center"
+                                         TextWrapping="WrapWholeWords" />
+                              <HyperlinkButton Grid.Column="1"
+                                               Content="{Binding PullRequestButtonText}"
+                                               Click="OpenLink_Click"
+                                               Tag="{Binding PullRequestUrl}"
+                                               IsEnabled="{Binding HasPullRequest}" />
+                              <Button Grid.Column="2"
+                                      Content="{Binding RemoveButtonText}"
+                                      Click="RemoveWorktree_Click"
+                                      Tag="{Binding}"
+                                      IsEnabled="{Binding CanRemove}"
+                                      MinWidth="110" />
+                            </Grid>
+                          </StackPanel>
+                        </Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+              </ScrollViewer>
+            </Grid>
           </Grid>
         </Grid>
       </Border>

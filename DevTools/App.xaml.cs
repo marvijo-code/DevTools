@@ -77,6 +77,13 @@ public partial class App : Application
             return;
         }
 
+        // Maximize first so the window is laid out once at full size, then give it focus.
+        try
+        {
+            const int SwMaximize = 3;
+            ShowWindow(WinRT.Interop.WindowNative.GetWindowHandle(MainWindow), SwMaximize);
+        }
+        catch (Exception ex) { AppLog.Error("Maximizing the window failed.", ex); }
         MainWindow.Activate();
         AppLog.Info("Main window activated.");
     }

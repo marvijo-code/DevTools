@@ -196,7 +196,7 @@ public sealed class FolderTree
 
 /// <summary>
 /// Builds a <see cref="FolderTree"/> from absolute paths. Files add their size to every folder
-/// above them; folders with a known total (Everything with folder sizes) can be added directly.
+/// above them; folders with a known total (for example from the raw MFT reader) can be added directly.
 /// Not thread safe: feed it from one thread.
 /// </summary>
 public sealed class FolderTreeBuilder

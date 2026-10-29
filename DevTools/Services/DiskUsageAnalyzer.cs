@@ -6,7 +6,7 @@ namespace DevTools.Services;
 
 /// <summary>
 /// Disk usage for every fixed drive. Each drive is sized ONCE by <see cref="DriveUsageService"/>
-/// (Everything, the NTFS MFT or a folder walk), and every section, expansion and folder listing
+/// (the NTFS MFT or a folder walk), and every section, expansion and folder listing
 /// is then read from that in-memory tree, so nothing is measured twice and no section waits on
 /// a separate slow scan. All heavy work runs off the UI thread.
 /// </summary>
@@ -22,6 +22,7 @@ public sealed class DiskUsageAnalyzer
     private readonly DriveUsageService _driveUsage = new();
     private readonly object _treesLock = new();
     private readonly Dictionary<string, FolderTree> _trees = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, FolderTree> _overlayTrees = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The folder trees from the last scan, system drive first.</summary>
     public IReadOnlyList<FolderTree> Trees
@@ -173,16 +174,116 @@ public sealed class DiskUsageAnalyzer
         var root = char.ToUpperInvariant(path[0]) + @":\";
         lock (_treesLock)
         {
-            if (!_trees.TryGetValue(root, out var found))
+            if (_trees.TryGetValue(root, out var found))
             {
-                return false;
+                var foundNode = found.Find(path);
+                if (foundNode >= 0)
+                {
+                    tree = found;
+                    node = foundNode;
+                    return true;
+                }
             }
 
-            tree = found;
+            // Not in a drive tree (yet): use a folder the user clicked that was sized on demand.
+            var trimmed = Path.TrimEndingDirectorySeparator(path.Trim());
+            foreach (var (folder, overlay) in _overlayTrees)
+            {
+                var underOverlay = trimmed.Equals(folder, StringComparison.OrdinalIgnoreCase)
+                    || (trimmed.Length > folder.Length
+                        && trimmed.StartsWith(folder, StringComparison.OrdinalIgnoreCase)
+                        && trimmed[folder.Length] == Path.DirectorySeparatorChar);
+                if (!underOverlay)
+                {
+                    continue;
+                }
+
+                var overlayNode = overlay.Find(path);
+                if (overlayNode >= 0)
+                {
+                    tree = overlay;
+                    node = overlayNode;
+                    return true;
+                }
+            }
         }
 
-        node = tree.Find(path);
-        return node >= 0;
+        return false;
+    }
+
+    /// <summary>
+    /// Sizes a folder the user just clicked, ahead of the all-drive scan, unless it is already known.
+    /// The background scans pause while this runs. Returns false when the folder does not exist.
+    /// </summary>
+    public async Task<bool> SizeFolderNowAsync(string path, CancellationToken cancellationToken)
+    {
+        if (TryFindNode(path, out _, out _))
+        {
+            return true;
+        }
+
+        if (!Directory.Exists(path))
+        {
+            return false;
+        }
+
+        var tree = await _driveUsage.WalkFolderAsync(path, cancellationToken).ConfigureAwait(false);
+        lock (_treesLock)
+        {
+            _overlayTrees[Path.TrimEndingDirectorySeparator(Path.GetFullPath(path))] = tree;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Size of one folder (or file) in bytes, or null when it could not be measured. A folder that is already
+    /// in the last drive scan is read from that tree for free; anything else is walked on its own.
+    /// </summary>
+    public async Task<long?> MeasureDirectoryBytesAsync(string path, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            if (File.Exists(path))
+            {
+                return new FileInfo(path).Length;
+            }
+
+            if (!Directory.Exists(path))
+            {
+                return null;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PathTooLongException)
+        {
+            AppLog.Info($"Could not inspect {path}: {ex.Message}");
+            return null;
+        }
+
+        if (TryFindNode(path, out var tree, out var node))
+        {
+            return tree!.GetTotalBytes(node);
+        }
+
+        try
+        {
+            var walked = await _driveUsage.WalkFolderAsync(path, cancellationToken).ConfigureAwait(false);
+            return walked.TotalBytes;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error($"Measuring {path} failed.", ex);
+            return null;
+        }
     }
 
     private static string BuildHeadline(IReadOnlyList<DriveDescriptor> drives, DateTimeOffset capturedAt)
@@ -375,14 +476,7 @@ public sealed class DiskUsageAnalyzer
 
     private static string ResolveRepositoryRootPath()
     {
-        var configuredPath = Environment.GetEnvironmentVariable("REPOS_ROOT");
-        if (!string.IsNullOrWhiteSpace(configuredPath))
-        {
-            return configuredPath;
-        }
-
-        var sourceRepos = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "source", "repos");
-        return Directory.Exists(sourceRepos) || !Directory.Exists(@"C:\dev") ? sourceRepos : @"C:\dev";
+        return RepositoryRootLocator.Resolve();
     }
 
     private static DiskUsageSection CreatePendingSection(string title, string summary)

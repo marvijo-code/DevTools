@@ -13,7 +13,6 @@ namespace DevTools.ViewModels;
 
 public sealed partial class MainViewModel : ObservableObject
 {
-    private static readonly RepositoryDefinition DefaultRepository = new("example-owner", "example-repo");
     private static readonly string SettingsDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "DevTools");
@@ -68,8 +67,8 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly SemaphoreSlim _bulkCleanupGate = new(1, 1);
     private CancellationTokenSource? _bulkCleanupCts;
 
-    private string _ownerInput = "example-owner";
-    private string _repoInput = "example-repo";
+    private string _ownerInput = string.Empty;
+    private string _repoInput = string.Empty;
     private string _runFilterText = string.Empty;
     private string _statusMessage = "Ready.";
     private string _authMessage = "Checking GitHub auth...";
@@ -115,6 +114,8 @@ public sealed partial class MainViewModel : ObservableObject
 
     public MainViewModel()
     {
+        _worktreeAnalyzer = new WorktreeAnalyzer(_gitHubApiClient, _diskUsageAnalyzer);
+        _cleanupAdvisor = new CleanupAdvisor(_diskUsageAnalyzer);
         Repositories = [];
         Runs = [];
         LoadSettings();
@@ -550,6 +551,12 @@ public sealed partial class MainViewModel : ObservableObject
             RaiseDiskUsageProperties();
             StatusMessage = "Refreshing disk usage snapshot...";
 
+            // The cleanup options are quick to check, so they fill in while the slower full scan runs.
+            var cleanupTask = RefreshCleanupOptionsAsync(cancellationToken);
+
+            // Show the drives and open the system drive at once; sizing it on demand beats waiting for the scan.
+            RefreshFolderBrowserDrives();
+
             var progress = new Progress<DiskUsageProgress>(update =>
             {
                 _diskUsageHeadline = update.Headline;
@@ -558,7 +565,7 @@ public sealed partial class MainViewModel : ObservableObject
                 _hasDiskUsageSnapshot = update.Sections.Count > 0 || update.IsCompleted;
                 SetDiskUsageStatus(update.StatusText);
                 RaiseDiskUsageProperties();
-                if (_diskUsageAnalyzer.Trees.Count != _folderBrowserDrives.Count)
+                if (_diskUsageAnalyzer.Trees.Count != _folderBrowserTreeCount)
                 {
                     RefreshFolderBrowserDrives();
                 }
@@ -573,6 +580,7 @@ public sealed partial class MainViewModel : ObservableObject
             SetDiskUsageActivityText("Snapshot ready");
             RaiseDiskUsageProperties();
             RefreshFolderBrowserDrives();
+            await cleanupTask;
 
             StatusMessage = "Disk usage snapshot refreshed.";
             AppLog.Info("RefreshDiskUsageAsync completed.");
@@ -1462,6 +1470,8 @@ public sealed partial class MainViewModel : ObservableObject
             RaisePropertyChanged(nameof(IsWorkflowExplorerVisible));
             RaisePropertyChanged(nameof(IsDiskUsageVisible));
             RaisePropertyChanged(nameof(IsResourcesVisible));
+            RaisePropertyChanged(nameof(IsOpenWorkVisible));
+            RaisePropertyChanged(nameof(IsWorktreesVisible));
             RaisePropertyChanged(nameof(ContextPaneTitle));
             RaisePropertyChanged(nameof(ContextPaneSubtitle));
         }
@@ -1685,6 +1695,10 @@ public sealed partial class MainViewModel : ObservableObject
             _refreshIntervalSeconds = NormalizeRefreshInterval(settings.RefreshIntervalSeconds);
             _activeTab = ResolveActiveTab(settings);
             _encryptedPersonalAccessToken = settings.EncryptedPersonalAccessToken;
+            _encryptedTargetProcessConnectionString = settings.EncryptedTargetProcessConnectionString;
+            _targetProcessPortalUrl = settings.TargetProcessPortalUrl?.Trim().TrimEnd('/') ?? string.Empty;
+            _targetProcessClient.SetPortalBaseUrl(_targetProcessPortalUrl);
+            _targetProcessUserId = settings.TargetProcessUserId < 0 ? 0 : settings.TargetProcessUserId;
             _processViewState = settings.ProcessView ?? new();
             _processViewState.Normalize();
             _processFilterText = _processViewState.FilterText;
@@ -1705,6 +1719,12 @@ public sealed partial class MainViewModel : ObservableObject
             if (!string.IsNullOrWhiteSpace(persistedPat))
             {
                 _gitHubApiClient.SetPersonalAccessToken(persistedPat);
+            }
+
+            var persistedConnectionString = UnprotectSecret(_encryptedTargetProcessConnectionString);
+            if (!string.IsNullOrWhiteSpace(persistedConnectionString))
+            {
+                _targetProcessClient.SetConnectionString(persistedConnectionString);
             }
         }
         catch (Exception ex)
@@ -1739,6 +1759,9 @@ public sealed partial class MainViewModel : ObservableObject
                         ActiveTab = _activeTab.ToString(),
                         ProcessView = _processViewState,
                         EncryptedPersonalAccessToken = _encryptedPersonalAccessToken,
+                        EncryptedTargetProcessConnectionString = _encryptedTargetProcessConnectionString,
+                        TargetProcessPortalUrl = _targetProcessPortalUrl,
+                        TargetProcessUserId = _targetProcessUserId,
                         BiggestFilesScanRoot = _biggestFilesScanRoot,
                         BiggestFilesTopCount = _biggestFilesTopCount,
                         ResourceMonitoringEnabled = _resourceMonitoringEnabled,
@@ -1857,15 +1880,15 @@ public sealed partial class MainViewModel : ObservableObject
             _repositoriesLoaded = true;
         }
 
-        if (Repositories.Count != 0)
+        // No repository is pre-configured. The Runs and Open Work tabs stay empty until one is added, so
+        // the app never assumes a particular owner or project.
+        if (Repositories.Count == 0)
         {
-            return;
+            StatusMessage = "No repository configured yet. Add one under Auth, Refresh, and Repository Setup.";
+            AppLog.Info("No repositories configured; waiting for one to be added.");
         }
 
-        Repositories.Add(DefaultRepository);
-        SaveRepositories();
         RaisePropertyChanged(nameof(RepositorySummaryText));
-        AppLog.Info($"Default repository added: {DefaultRepository.FullName}");
     }
 
     private void SaveRepositories()
@@ -1930,6 +1953,12 @@ public sealed partial class MainViewModel : ObservableObject
         public bool IsDiskUsageVisible { get; set; }
 
         public string? EncryptedPersonalAccessToken { get; set; }
+
+        public string? EncryptedTargetProcessConnectionString { get; set; }
+
+        public string? TargetProcessPortalUrl { get; set; }
+
+        public int TargetProcessUserId { get; set; }
 
         public string? BiggestFilesScanRoot { get; set; }
 

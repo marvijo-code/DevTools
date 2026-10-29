@@ -6,7 +6,7 @@ namespace DevTools.Services.FolderSizes;
 
 /// <summary>
 /// Last-resort engine: walks the folders with a few low-priority threads and builds the same
-/// <see cref="FolderTree"/> as the MFT and Everything engines. It is the slow path (it reads
+/// <see cref="FolderTree"/> as the MFT engine. It is the slow path (it reads
 /// every directory), so it keeps CPU use low and can be cancelled at any time.
 /// Junctions and symbolic links are not followed.
 /// </summary>
@@ -18,12 +18,17 @@ public sealed class ParallelFolderWalker
         string rootPath,
         IProgress<FolderScanProgress>? progress,
         CancellationToken cancellationToken,
-        int? workerCount = null)
+        int? workerCount = null,
+        bool prioritize = false)
     {
-        return Task.Run(() => Scan(rootPath, progress, cancellationToken, workerCount), cancellationToken);
+        return Task.Run(() => Scan(rootPath, progress, cancellationToken, workerCount, prioritize), cancellationToken);
     }
 
-    private static FolderTree Scan(string rootPath, IProgress<FolderScanProgress>? progress, CancellationToken cancellationToken, int? workerCount)
+    /// <param name="prioritize">
+    /// True for a folder the user just clicked: normal thread priority, many threads, and it never waits
+    /// on <see cref="ScanGate"/>. Background scans wait while one of these runs.
+    /// </param>
+    private static FolderTree Scan(string rootPath, IProgress<FolderScanProgress>? progress, CancellationToken cancellationToken, int? workerCount, bool prioritize)
     {
         var fullRoot = Path.GetFullPath(rootPath);
         var driveRoot = FolderTree.NormalizeRoot(fullRoot);
@@ -41,7 +46,9 @@ public sealed class ParallelFolderWalker
         long filesSeen = 0;
         queue.Add((startNode, fullRoot), cancellationToken);
 
-        var workers = Math.Clamp(workerCount ?? Environment.ProcessorCount / 4, 1, 4);
+        var workers = prioritize
+            ? Math.Clamp(workerCount ?? Environment.ProcessorCount, 4, 16)
+            : Math.Clamp(workerCount ?? Environment.ProcessorCount / 2, 2, 8);
         var threads = new List<Thread>(workers);
         Exception? failure = null;
         var options = new EnumerationOptions
@@ -60,14 +67,20 @@ public sealed class ParallelFolderWalker
                 {
                     foreach (var (node, path) in queue.GetConsumingEnumerable(cancellationToken))
                     {
+                        if (!prioritize)
+                        {
+                            ScanGate.Wait(cancellationToken);
+                        }
+
                         long bytes = 0;
                         long files = 0;
                         var subfolders = new List<string>();
                         try
                         {
-                            var entries = new FileSystemEnumerable<(string Name, bool IsDirectory, long Length, System.IO.FileAttributes Attributes)>(
+                            // A name string is only needed for folders; files just add their length.
+                            var entries = new FileSystemEnumerable<(string? Name, bool IsDirectory, long Length, System.IO.FileAttributes Attributes)>(
                                 path,
-                                (ref FileSystemEntry entry) => (entry.FileName.ToString(), entry.IsDirectory, entry.Length, entry.Attributes),
+                                (ref FileSystemEntry entry) => (entry.IsDirectory ? entry.FileName.ToString() : null, entry.IsDirectory, entry.Length, entry.Attributes),
                                 options);
                             foreach (var entry in entries)
                             {
@@ -75,7 +88,7 @@ public sealed class ParallelFolderWalker
                                 {
                                     if ((entry.Attributes & System.IO.FileAttributes.ReparsePoint) == 0)
                                     {
-                                        subfolders.Add(entry.Name);
+                                        subfolders.Add(entry.Name!);
                                     }
                                 }
                                 else
@@ -123,7 +136,7 @@ public sealed class ParallelFolderWalker
             })
             {
                 IsBackground = true,
-                Priority = ThreadPriority.BelowNormal,
+                Priority = prioritize ? ThreadPriority.Normal : ThreadPriority.BelowNormal,
                 Name = $"FolderWalker-{w}"
             };
             threads.Add(thread);

@@ -31,38 +31,19 @@ public sealed class FolderTreeTests
     [Fact]
     public void Builder_FromFolderTotals_UsesKnownSizesWithoutDoubleCounting()
     {
-        // Everything with folder sizes lists every folder with its full total.
+        // A folder-total listing (for example the raw MFT reader) reports every folder with its full total.
         var builder = new FolderTreeBuilder(@"G:\");
         builder.AddFolder(@"G:\Photos", 900);
         builder.AddFolder(@"G:\Photos\2025", 600);
         builder.AddFolder(@"G:\Photos\2026", 250);
         builder.AddFolder(@"G:\Docs", 40);
 
-        var tree = builder.Build("Everything", TimeSpan.Zero);
+        var tree = builder.Build("NTFS MFT", TimeSpan.Zero);
 
         Assert.Equal(940, tree.TotalBytes);
         Assert.Equal(900, tree.GetTotalBytes(tree.Find(@"G:\Photos")));
         Assert.Equal(50, tree.GetDirectFileBytes(tree.Find(@"G:\Photos")));
         Assert.Equal(@"G:\Photos\2025", tree.GetPath(tree.GetChildren(tree.Find(@"G:\Photos"))[0]));
-    }
-
-    [Theory]
-    [InlineData("        196608 C:\\ProgramData\\My SQL\\#ib.dblwr", 196608, "C:\\ProgramData\\My SQL\\#ib.dblwr")]
-    [InlineData("3 C:\\a\\caf\u00e9-\u4e2d.txt\r", 3, "C:\\a\\caf\u00e9-\u4e2d.txt")]
-    public void Everything_ParsesSizeAndPathLines(string line, long expectedSize, string expectedPath)
-    {
-        Assert.True(EverythingFolderScanner.TryParseLine(line, out var size, out var path));
-        Assert.Equal(expectedSize, size);
-        Assert.Equal(expectedPath, path);
-    }
-
-    [Theory]
-    [InlineData("<DIR>          C:\\Windows")]
-    [InlineData("")]
-    [InlineData("Error 8: Everything IPC window not found.")]
-    public void Everything_RejectsLinesWithoutASize(string line)
-    {
-        Assert.False(EverythingFolderScanner.TryParseLine(line, out _, out _));
     }
 
     [Fact]

@@ -452,6 +452,7 @@ internal static class MftTableLoader
                 while (clustersRemaining > 0 && startRecordIndex < recordCount)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    DevTools.Services.FolderSizes.ScanGate.Wait(cancellationToken);
                     if (parserCompletion.IsCompleted)
                     {
                         // Parsers died (fault/cancel): stop writing or the bounded channel deadlocks.

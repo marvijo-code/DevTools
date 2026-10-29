@@ -12,7 +12,6 @@ namespace DevTools.ViewModels;
 
 public sealed partial class MainViewModel : ObservableObject
 {
-    private static readonly RepositoryDefinition DefaultRepository = new("example-owner", "example-repo");
     private static readonly string SettingsDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "DevTools");
@@ -61,8 +60,8 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly ObservableCollection<BiggestFileEntry> _biggestFiles = [];
     private readonly List<BiggestFileEntry> _allBiggestFiles = [];
 
-    private string _ownerInput = "example-owner";
-    private string _repoInput = "example-repo";
+    private string _ownerInput = string.Empty;
+    private string _repoInput = string.Empty;
     private string _runFilterText = string.Empty;
     private string _statusMessage = "Ready.";
     private string _authMessage = "Checking GitHub auth...";
@@ -536,6 +535,12 @@ public sealed partial class MainViewModel : ObservableObject
     {
         AppLog.Info("RefreshAsync started.");
         EnsureRepositoriesLoaded();
+
+        if (Repositories.Count == 0)
+        {
+            StatusMessage = "No repositories yet. Add an owner and repository to see workflow runs.";
+            return;
+        }
 
         if (!await _refreshGate.WaitAsync(0, cancellationToken))
         {
@@ -1627,16 +1632,6 @@ public sealed partial class MainViewModel : ObservableObject
             LoadRepositories();
             _repositoriesLoaded = true;
         }
-
-        if (Repositories.Count != 0)
-        {
-            return;
-        }
-
-        Repositories.Add(DefaultRepository);
-        SaveRepositories();
-        RaisePropertyChanged(nameof(RepositorySummaryText));
-        AppLog.Info($"Default repository added: {DefaultRepository.FullName}");
     }
 
     private void SaveRepositories()

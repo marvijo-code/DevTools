@@ -9,7 +9,6 @@ public static partial class ProcessDisplayNameResolver
     private static readonly Regex UtilitySubTypeRegex = UtilitySubTypePattern();
     private static readonly Regex RendererClientIdRegex = RendererClientIdPattern();
     private static readonly Regex AppServerListenRegex = AppServerListenPattern();
-    private static readonly Regex FirefoxProcessTypeRegex = FirefoxProcessTypePattern();
 
     public static string Resolve(
         string? commandLine,
@@ -400,9 +399,6 @@ public static partial class ProcessDisplayNameResolver
                 .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(word => char.ToUpperInvariant(word[0]) + word[1..]));
     }
-
-    [GeneratedRegex("-processType=(?<type>[a-zA-Z0-9_-]+)", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
-    private static partial Regex FirefoxProcessTypePattern();
 
     [GeneratedRegex("^\"(?<path>(?:\\\\|[^\"])+)\"", RegexOptions.CultureInvariant)]
     private static partial Regex ExecutablePathPattern();

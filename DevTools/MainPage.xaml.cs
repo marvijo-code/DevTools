@@ -480,11 +480,6 @@ public sealed partial class MainPage : Page
         menu.ShowAt(anchor);
     }
 
-    private void ProcessRow_Tapped(object sender, TappedRoutedEventArgs e)
-    {
-        if (sender is FrameworkElement { DataContext: ProcessKillEntry entry }) ViewModel.SelectedProcess = entry;
-    }
-
     private void ToggleProcessSection_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement element || element.Tag is not ProcessKillSection section)

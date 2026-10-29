@@ -256,33 +256,6 @@ public sealed class DiskUsageAnalyzer
         return breakdown;
     }
 
-    private async Task<List<DiskUsageEntry>> MeasureLargestChildrenAsync(string rootPath, int topCount, Action<List<DiskUsageEntry>, int, int, string>? reportPartialEntries, CancellationToken cancellationToken)
-    {
-        if (!Directory.Exists(rootPath))
-        {
-            return [new DiskUsageEntry(rootPath, "Not found", "The path does not exist on this machine.")];
-        }
-
-        List<string> childPaths;
-        try
-        {
-            childPaths = EnumerateChildPaths(rootPath);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return [new DiskUsageEntry(rootPath, "Unavailable", ex.Message)];
-        }
-
-        if (childPaths.Count == 0)
-        {
-            var measurement = await MeasurePathAsync(rootPath, cancellationToken);
-            return [CreateMeasuredEntry(rootPath, measurement, TimeSpan.Zero)];
-        }
-
-        var entries = await MeasureEntriesAsync(childPaths, topCount, reportPartialEntries, cancellationToken);
-        return SortEntriesForDisplay(entries, topCount);
-    }
-
     private async Task<List<DiskUsageEntry>> MeasureEntriesAsync(IReadOnlyList<string> paths, int visibleCount, Action<List<DiskUsageEntry>, int, int, string>? reportPartialEntries, CancellationToken cancellationToken)
     {
         if (paths.Count == 0)

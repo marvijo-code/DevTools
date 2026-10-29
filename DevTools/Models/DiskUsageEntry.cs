@@ -107,14 +107,6 @@ public sealed class DiskUsageEntry : ObservableObject
         return entry;
     }
 
-    public void SetDisplayName(string? displayName)
-    {
-        if (SetProperty(ref _displayName, displayName))
-        {
-            RaisePropertyChanged(nameof(DisplayName));
-            RaisePropertyChanged(nameof(HasDistinctDisplayName));
-        }
-    }
 
     public void UpdateFrom(DiskUsageEntry source)
     {

@@ -30,23 +30,6 @@ public sealed class CodexSessionCatalog
         return catalog;
     }
 
-    public string? TryGetThreadTitle(string? threadId)
-    {
-        if (string.IsNullOrWhiteSpace(threadId))
-        {
-            return null;
-        }
-
-        return _sessionsById.TryGetValue(threadId, out var record) ? record.ThreadName : null;
-    }
-
-    public string? GetMostRecentThreadTitle()
-    {
-        return _sessionsById.Values
-            .OrderByDescending(record => record.UpdatedAt)
-            .Select(record => record.ThreadName)
-            .FirstOrDefault(title => !string.IsNullOrWhiteSpace(title));
-    }
 
     public IReadOnlyList<DevTools.Models.AppActivityEntry> RecentThreads(int count = 30) => _sessionsById
         .OrderByDescending(pair => pair.Value.UpdatedAt).Take(count)

@@ -1,0 +1,13 @@
+title = "DevTools secret scan"
+
+# Used by the Secret scan workflow. The .githooks/pre-commit hook is the
+# offline equivalent and needs no configuration.
+
+[allowlist]
+description = "Documented placeholders and test fixtures"
+regexes = [
+  '''github_pat_\.\.\.''',
+  '''placeholder''',
+  '''example-token''',
+  '''dummy-token''',
+]

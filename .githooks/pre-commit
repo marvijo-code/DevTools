@@ -1,0 +1,113 @@
+#!/bin/sh
+# Pre-commit secret scan.
+#
+# Blocks staged files that look like credential stores, and blocks well-known
+# token and private-key formats inside staged text files. Runs on Windows
+# (Git Bash) and Linux.
+#
+# Install once per clone:
+#   git config core.hooksPath .githooks
+#
+# A reviewed false positive can be allowed by adding this marker to the line:
+#   pragma: allowlist secret
+set -u
+
+blocked=0
+
+block() {
+    printf '\n[pre-commit] BLOCKED: %s\n' "$1"
+    blocked=1
+}
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+if [ -z "$staged" ]; then
+    exit 0
+fi
+
+# 1. File names that must never be published.
+for file in $staged; do
+    base=$(basename "$file")
+    case "$base" in
+        .env|.env.local|.env.*.local|*.env|secrets.*|credentials.*|*.secrets|*.kdbx|*.p12|*.pfx|*.jks|*.keystore|*.snk|*.pem|*.key|*.ppk|id_rsa*|id_ed25519*|id_ecdsa*|.npmrc|.pypirc|nuget.config|NuGet.Config|*.kubeconfig)
+            block "$file looks like a credential file."
+            continue
+            ;;
+    esac
+done
+
+# 2. Content patterns for staged text files.
+scan_file() {
+    file="$1"
+    tmp="$2"
+
+    while IFS= read -r pattern; do
+        [ -z "$pattern" ] && continue
+        hits=$(grep -nEI -- "$pattern" "$tmp" 2>/dev/null | grep -v 'allowlist secret' || true)
+        if [ -n "$hits" ]; then
+            printf '\n[pre-commit] BLOCKED: possible secret in %s\n' "$file"
+            printf '%s\n' "$hits" | cut -c1-160
+            return 1
+        fi
+    done <<PATTERNS
+-----BEGIN [A-Z ]*PRIVATE KEY-----
+AKIA[0-9A-Z]{16}
+ASIA[0-9A-Z]{16}
+gh[pousr]_[A-Za-z0-9]{30,}
+github_pat_[A-Za-z0-9_]{30,}
+glpat-[A-Za-z0-9_-]{20,}
+sk-ant-[A-Za-z0-9_-]{20,}
+sk-[A-Za-z0-9]{32,}
+xox[abprs]-[A-Za-z0-9-]{10,}
+AIza[0-9A-Za-z_-]{35}
+https://hooks\.slack\.com/services/[A-Za-z0-9/]+
+[0-9]{8,10}:AA[A-Za-z0-9_-]{33}
+AccountKey=[A-Za-z0-9+/=]{20,}
+(Password|Pwd)[[:space:]]*=[[:space:]]*[^;" ]{8,}
+PATTERNS
+
+    return 0
+}
+
+workdir=$(mktemp -d 2>/dev/null || echo "/tmp/devtools-precommit.$$")
+mkdir -p "$workdir" 2>/dev/null || true
+
+for file in $staged; do
+    case "$file" in
+        */bin/*|*/obj/*|*.png|*.jpg|*.jpeg|*.gif|*.ico|*.zip|*.nupkg|*.dll|*.exe|*.pdb|*.snk|*.svg)
+            continue
+            ;;
+    esac
+
+    size=$(git cat-file -s ":$file" 2>/dev/null || echo 0)
+    if [ "$size" -gt 1048576 ]; then
+        continue
+    fi
+
+    tmp="$workdir/payload"
+    if ! git show ":$file" >"$tmp" 2>/dev/null; then
+        continue
+    fi
+
+    # Only scan files that look like text.
+    if ! grep -I -q . "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        continue
+    fi
+
+    if ! scan_file "$file" "$tmp"; then
+        blocked=1
+    fi
+done
+
+rm -rf "$workdir" 2>/dev/null || true
+
+if [ "$blocked" -ne 0 ]; then
+    cat <<'EOF'
+
+Remove the secret from the staged change, or keep it in a local file that is
+not committed. If the match is a reviewed false positive, add this marker to
+the line: pragma: allowlist secret
+EOF
+    exit 1
+fi
+
+exit 0

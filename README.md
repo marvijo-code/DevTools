@@ -2,6 +2,45 @@
 
 Windows desktop utility for processes, resource history, agent sessions, GitHub workflow runs and disk usage.
 
+Windows 11 x64 only. This is a WinUI desktop app targeting `net10.0-windows`; it does not build or run on Linux or macOS.
+
+## Requirements
+
+| Task | Needs |
+| --- | --- |
+| Running a release | Windows 11 x64, PowerShell 7 |
+| Building from source | Windows 11 x64, .NET 10 SDK, PowerShell 7, Git |
+| Contributing | The above, plus the repository git hooks (see below) |
+
+## Build from source
+
+```powershell
+git clone https://github.com/marvijo-code/DevTools.git
+cd DevTools
+pwsh -NoProfile -File .\scripts\Install-GitHooks.ps1
+pwsh -NoProfile -File .\build-and-run.ps1
+```
+
+`build-and-run.ps1` stops a running DevTools instance, builds the solution in Debug, and launches `bin\DevTools.exe`. Pass `-Configuration Release` for a release build.
+
+## Repository safety
+
+The repository is public, so no credentials may be committed. Two guards enforce that:
+
+1. **Pre-commit hook** (`.githooks/pre-commit`). It scans the staged changes and rejects credential files and common token or private-key formats. Install it once per clone:
+
+   ```powershell
+   pwsh -NoProfile -File .\scripts\Install-GitHooks.ps1
+   ```
+
+   On Linux or macOS: `git config core.hooksPath .githooks`.
+
+   A reviewed false positive can be allowed by adding `pragma: allowlist secret` to the matching line.
+
+2. **Secret scan workflow** (`.github/workflows/secret-scan.yml`). It runs gitleaks over the full history on every push and pull request, using the allowlist in `.gitleaks.toml`.
+
+Keep personal configuration, `.env` files, publish profiles with credentials, and any employer or customer data out of the repository.
+
 ## Install and automatic updates
 
 Download `DevTools-win-x64.zip` from [the latest release](https://github.com/marvijo-code/DevTools/releases/latest), extract it, then run:
@@ -10,7 +49,7 @@ Download `DevTools-win-x64.zip` from [the latest release](https://github.com/mar
 pwsh -NoProfile -File .\Install-DevTools.ps1
 ```
 
-Windows 11 x64 and PowerShell 7 are required. The package includes the .NET and Windows App SDK runtimes. The repository is private, so GitHub CLI must be installed and `gh auth login` must already authorize access to `marvijo-code/DevTools`.
+Windows 11 x64 and PowerShell 7 are required. The package includes the .NET and Windows App SDK runtimes. GitHub CLI is optional and only needed if you use its release download helper.
 
 Open **DevTools** from the Start menu. The launcher checks GitHub automatically in the background on startup, at most once per six hours. A verified newer release is used on the next launch. It never closes the running app. Launching `DevTools.exe` directly bypasses these update checks.
 

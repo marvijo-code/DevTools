@@ -49,7 +49,7 @@ Download `DevTools-win-x64.zip` from [the latest release](https://github.com/mar
 pwsh -NoProfile -File .\Install-DevTools.ps1
 ```
 
-Windows 11 x64 and PowerShell 7 are required. The package includes the .NET and Windows App SDK runtimes. GitHub CLI is optional and only needed if you use its release download helper.
+Windows 11 x64 and PowerShell 7 are required. The package includes the .NET and Windows App SDK runtimes. GitHub CLI is needed only for automatic update checks; without it the app still starts and runs, but it does not update itself.
 
 Open **DevTools** from the Start menu. The launcher checks GitHub automatically in the background on startup, at most once per six hours. A verified newer release is used on the next launch. It never closes the running app. Launching `DevTools.exe` directly bypasses these update checks.
 

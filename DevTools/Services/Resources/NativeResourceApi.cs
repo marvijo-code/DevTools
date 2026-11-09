@@ -34,7 +34,7 @@ internal readonly record struct RawProcessCounters(
     long HardFaultCount);
 
 /// <summary>
-/// Thin P/Invoke layer for the resource monitor. Everything here is deliberately allocation-light and
+/// Thin P/Invoke layer for the resource monitor. All of it is deliberately allocation-light and
 /// syscall-light: the monitor samples once a second, so it must never become the thing it is measuring.
 /// Per-process data comes from a single <c>NtQuerySystemInformation</c> call rather than opening a handle
 /// per process, which would cost hundreds of syscalls per tick and fail on protected processes.

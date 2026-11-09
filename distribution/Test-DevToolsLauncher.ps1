@@ -28,7 +28,8 @@ foreach ($version in @('v1.0.0', 'v1.0.1')) {
     Copy-Item -LiteralPath $probe -Destination (Join-Path $directory 'DevTools.exe')
     'param([string]$InstallRoot)' | Set-Content -LiteralPath (Join-Path $directory 'Update-DevTools.ps1')
     @{version=$version; directory=$directory} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'current.json')
-    $child = Start-Process -FilePath $launcher -WindowStyle Hidden -PassThru
+    # --no-admin keeps this test headless: the default is to elevate through a UAC prompt.
+    $child = Start-Process -FilePath $launcher -ArgumentList '--no-admin' -WindowStyle Hidden -PassThru
     if (-not $child.WaitForExit(30000) -or $child.ExitCode -ne 0) { throw "Launcher failed for $version" }
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     while (-not (Test-Path -LiteralPath (Join-Path $directory 'launched.txt')) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }

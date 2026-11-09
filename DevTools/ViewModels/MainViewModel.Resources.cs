@@ -119,6 +119,8 @@ public sealed partial class MainViewModel
         MainContentTab.Resources => ResourceCountsText,
         MainContentTab.WorkflowExplorer => SelectedRun?.Repository.FullName ?? "Select a workflow run to see its details.",
         MainContentTab.KillProcesses => SelectedActivity?.Subtitle ?? SelectedProcess?.Note ?? "Select a thread, tab or process to see its details.",
+        MainContentTab.OpenWork => OpenWorkStatusText,
+        MainContentTab.Worktrees => WorktreeStatusText,
         _ => "Disk usage and scan information for this machine."
     };
 

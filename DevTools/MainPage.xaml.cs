@@ -4,6 +4,7 @@ using DevTools.Models;
 using DevTools.Infrastructure;
 using DevTools.ViewModels;
 using DevTools.Services;
+using DevTools.Services.DiskCleanup;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
@@ -19,6 +20,7 @@ public sealed partial class MainPage : Page
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _resourceTimer;
     private readonly WindowZoomController _windowZoomController;
     private CancellationTokenSource? _selectionCts;
+    private bool _isConfirmationDialogOpen;
 
     public MainViewModel ViewModel { get; } = new();
 
@@ -67,7 +69,7 @@ public sealed partial class MainPage : Page
 
     private async void RefreshTimer_Tick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
     {
-        await ViewModel.RefreshAsync(CancellationToken.None);
+        await ViewModel.RefreshOnTimerAsync(CancellationToken.None);
     }
 
     private void LiveRunTimer_Tick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
@@ -87,8 +89,9 @@ public sealed partial class MainPage : Page
 
         try
         {
-            await ViewModel.InitializeAsync(cts.Token);
-            // Tab data loads run unbounded — the 8s startup token is only for the auth/run check,
+            // The GitHub auth check runs alongside the tab load instead of in front of it.
+            var initialization = ViewModel.InitializeAsync(cts.Token);
+            // Tab data loads run unbounded - the 8s startup token is only for the auth/run check,
             // and cancelling a disk scan mid-flight leaves the tab stuck on "Canceled".
             if (ViewModel.IsKillProcessesVisible)
             {
@@ -98,7 +101,16 @@ public sealed partial class MainPage : Page
             {
                 await ViewModel.EnsureDiskUsageLoadedAsync(CancellationToken.None);
             }
+            else if (ViewModel.IsOpenWorkVisible)
+            {
+                await ViewModel.EnsureOpenWorkLoadedAsync(CancellationToken.None);
+            }
+            else if (ViewModel.IsWorktreesVisible)
+            {
+                await ViewModel.EnsureWorktreesLoadedAsync(CancellationToken.None);
+            }
 
+            await initialization;
             ApplyRefreshTimerSettings();
             ApplyActivePaneState();
             AppLog.Info("InitializePageAsync completed.");
@@ -128,6 +140,14 @@ public sealed partial class MainPage : Page
         else if (ViewModel.IsDiskUsageVisible)
         {
             await ViewModel.RefreshDiskUsageAsync(CancellationToken.None);
+        }
+        else if (ViewModel.IsOpenWorkVisible)
+        {
+            await ViewModel.RefreshOpenWorkAsync(CancellationToken.None);
+        }
+        else if (ViewModel.IsWorktreesVisible)
+        {
+            await ViewModel.RefreshWorktreesAsync(CancellationToken.None);
         }
     }
 
@@ -318,6 +338,163 @@ public sealed partial class MainPage : Page
         await ViewModel.EnsureDiskUsageLoadedAsync(CancellationToken.None);
     }
 
+    private async void NavigateToOpenWork_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ShowOpenWork();
+        ApplyActivePaneState();
+        OpenWorkScroll.ChangeView(null, 0, null, true);
+        OpenWorkScroll.Focus(FocusState.Programmatic);
+        await ViewModel.EnsureOpenWorkLoadedAsync(CancellationToken.None);
+    }
+
+    private async void NavigateToWorktrees_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ShowWorktrees();
+        ApplyActivePaneState();
+        WorktreesScroll.ChangeView(null, 0, null, true);
+        WorktreesScroll.Focus(FocusState.Programmatic);
+        await ViewModel.EnsureWorktreesLoadedAsync(CancellationToken.None);
+    }
+
+    private async void RefreshOpenWork_Click(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.RefreshOpenWorkAsync(CancellationToken.None);
+    }
+
+    private async void RefreshCleanupOptions_Click(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.RefreshCleanupOptionsAsync(CancellationToken.None);
+    }
+
+    private async void RunCleanupOption_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.Tag is not CleanupOption option || !option.CanRun)
+        {
+            return;
+        }
+
+        switch (option.ActionKind)
+        {
+            case CleanupActionKind.Navigate:
+                ViewModel.WorktreeFilter = "Safe to remove";
+                ViewModel.ShowWorktrees();
+                ApplyActivePaneState();
+                WorktreesScroll.ChangeView(null, 0, null, true);
+                await ViewModel.EnsureWorktreesLoadedAsync(CancellationToken.None);
+                return;
+
+            case CleanupActionKind.OpenFolder:
+                if (option.TargetPath is { } folder && Directory.Exists(folder))
+                {
+                    Process.Start(new ProcessStartInfo { FileName = folder, UseShellExecute = true });
+                }
+
+                return;
+        }
+
+        // Every delete is confirmed, with the verdict and exactly what will happen, even for safe options.
+        var result = await ShowConfirmationDialogAsync(() => new ContentDialog
+        {
+            Title = $"{option.Title}?",
+            Content = $"{option.WhatHappens}\n\nVerdict: {option.VerdictText}. {option.Reason}\n\nExpected: {option.SizeText}",
+            PrimaryButtonText = option.ActionText,
+            CloseButtonText = "Cancel",
+            DefaultButton = option.Verdict == CleanupVerdict.Safe ? ContentDialogButton.Primary : ContentDialogButton.Close,
+            XamlRoot = XamlRoot
+        });
+
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        await ViewModel.RunCleanupOptionAsync(option, CancellationToken.None);
+    }
+
+    private async void RefreshWorktrees_Click(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.RefreshWorktreesAsync(CancellationToken.None);
+    }
+
+    private async void PruneWorktrees_Click(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.PruneStaleWorktreesAsync(CancellationToken.None);
+    }
+
+    private void WorktreeRepository_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: WorktreeRepositoryFilter repository })
+        {
+            ViewModel.SelectWorktreeRepository(repository);
+            WorktreesScroll.ChangeView(null, 0, null, true);
+        }
+    }
+
+    private async void RemoveWorktree_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.Tag is not WorktreeItem item || !item.CanRemove)
+        {
+            return;
+        }
+
+        // The default button is always Cancel, and a row with uncommitted files names the loss on its own button,
+        // so a stray Enter can never delete work.
+        var result = await ShowConfirmationDialogAsync(() => new ContentDialog
+        {
+            Title = item.IsMissing ? "Prune Worktree Record?" : item.IsDirty ? "Force Remove Worktree?" : "Remove Worktree?",
+            Content = new ScrollViewer
+            {
+                Content = new TextBlock
+                {
+                    Text = item.BuildRemovalWarning(),
+                    TextWrapping = TextWrapping.Wrap,
+                    IsTextSelectionEnabled = true
+                }
+            },
+            PrimaryButtonText = item.IsDirty ? "Discard Changes and Remove" : item.RemoveButtonText,
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot
+        });
+
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        AppLog.Info($"Remove worktree confirmed: {item.Path}");
+        await ViewModel.RemoveWorktreeAsync(item, CancellationToken.None);
+    }
+
+    private async Task<ContentDialogResult> ShowConfirmationDialogAsync(Func<ContentDialog> createDialog)
+    {
+        // WinUI throws if another dialog is open, including a second click on the same row.
+        // All cleanup confirmations share this guard until the active dialog has closed.
+        if (_isConfirmationDialogOpen)
+        {
+            AppLog.Info("Confirmation skipped because a dialog is already open.");
+            return ContentDialogResult.None;
+        }
+
+        _isConfirmationDialogOpen = true;
+        try
+        {
+            var dialog = createDialog();
+            AppLog.Info($"Opening confirmation: {dialog.Title}");
+            return await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Confirmation dialog failed.", ex);
+            ViewModel.StatusMessage = $"Could not open confirmation. Nothing was removed. {ex.Message}";
+            return ContentDialogResult.None;
+        }
+        finally
+        {
+            _isConfirmationDialogOpen = false;
+        }
+    }
+
     private async void RefreshKillProcesses_Click(object sender, RoutedEventArgs e)
     {
         await ViewModel.RefreshKillProcessesAsync(CancellationToken.None);
@@ -490,14 +667,48 @@ public sealed partial class MainPage : Page
         ViewModel.ToggleProcessSection(section);
     }
 
-    private void ToggleDiskEntry_Click(object sender, RoutedEventArgs e)
+    private async void ToggleDiskEntry_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement element || element.Tag is not DiskUsageEntry entry)
         {
             return;
         }
 
+        if (!entry.IsExpanded && entry.CanExpand && !entry.HasLoadedChildren)
+        {
+            await ViewModel.EnsureDiskUsageChildrenLoadedAsync(entry, CancellationToken.None);
+        }
+
         entry.ToggleExpanded();
+    }
+
+    private void BrowseDrive_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string root })
+        {
+            _ = ViewModel.BrowseFolderAsync(root);
+        }
+    }
+
+    private void BrowseFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string path })
+        {
+            _ = ViewModel.BrowseFolderAsync(path);
+        }
+    }
+
+    private void ToggleFolderRow_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string path })
+        {
+            ViewModel.ToggleFolderRow(path);
+        }
+    }
+
+    private void BrowseUp_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.BrowseFolderUp();
     }
 
     private void CopyProcessInfo_Click(object sender, RoutedEventArgs e)
@@ -647,6 +858,89 @@ public sealed partial class MainPage : Page
         ViewModel.CancelBiggestFilesScan();
     }
 
+    /// <summary>
+    /// Bulk Cleanup measures first, shows what would go, and only deletes after the user
+    /// confirms. The measured pass deletes nothing.
+    /// </summary>
+    private async void BulkCleanup_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.IsBulkCleanupRunning)
+        {
+            ViewModel.StatusMessage = "A bulk cleanup is already running.";
+            return;
+        }
+
+        if (!ViewModel.IsBulkCleanupAvailable)
+        {
+            ViewModel.StatusMessage = ViewModel.BulkCleanupAvailabilityText;
+            return;
+        }
+
+        var preview = await ViewModel.PreviewBulkCleanupAsync();
+        if (!preview.Started)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = preview.Succeeded ? "Run the cleanup for real?" : "Cleanup preview failed",
+            Content = BuildBulkCleanupDialogText(preview),
+            PrimaryButtonText = preview.Succeeded ? "Clean Up Now" : null,
+            CloseButtonText = preview.Succeeded ? "Cancel" : "Close",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot
+        };
+
+        if (!preview.Succeeded)
+        {
+            await dialog.ShowAsync();
+            return;
+        }
+
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            ViewModel.StatusMessage = "Bulk cleanup canceled. Nothing was deleted.";
+            return;
+        }
+
+        await ViewModel.RunBulkCleanupAsync();
+    }
+
+    private void CancelBulkCleanup_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.CancelBulkCleanup();
+    }
+
+    private static string BuildBulkCleanupDialogText(DiskCleanupResult preview)
+    {
+        if (!preview.Succeeded)
+        {
+            return $"{preview.Message}\n\nOpen the Cleanup report in the Storage pane for the full output.";
+        }
+
+        var lines = new List<string>
+        {
+            "A dry run already measured this machine. These lanes would be deleted:",
+            string.Empty
+        };
+
+        foreach (var lane in preview.Report.Lanes)
+        {
+            var items = lane.ItemCount is null ? string.Empty : $" ({lane.ItemCount} items)";
+            lines.Add($"  {DiskCleanupService.FormatSize(lane.Bytes),10}  {lane.Lane}{items}");
+        }
+
+        lines.Add(string.Empty);
+        lines.Add($"Total reclaimable: {DiskCleanupService.FormatSize(preview.Report.TotalReclaimableBytes)}");
+        lines.Add(string.Empty);
+        lines.Add("Kept: every video master, the release folder, episode.json, and the top-level files of a published episode.");
+        lines.Add("Deleted: package caches, build output in stale checkouts, and the intermediate folders of already-published video episodes (work, runs, node_modules, video, captures, audio, slides, review, edit, ledgers, prompts, scripts, transcript, verification, toolkit, vps-setup, shorts).");
+        lines.Add(string.Empty);
+        lines.Add("This cannot be undone. Caches and build output come back on the next install or build.");
+        return string.Join(Environment.NewLine, lines);
+    }
+
     private void SetBiggestFilesRootSystem_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.BiggestFilesScanRoot = Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\";
@@ -773,6 +1067,8 @@ public sealed partial class MainPage : Page
         if (e.PropertyName is nameof(MainViewModel.IsKillProcessesVisible) or
             nameof(MainViewModel.IsWorkflowExplorerVisible) or
             nameof(MainViewModel.IsDiskUsageVisible) or
+            nameof(MainViewModel.IsOpenWorkVisible) or
+            nameof(MainViewModel.IsWorktreesVisible) or
             nameof(MainViewModel.ActiveTab))
         {
             ApplyActivePaneState();
@@ -826,11 +1122,15 @@ public sealed partial class MainPage : Page
         var isWorkflowVisible = context.ShowRuns;
         var isDiskVisible = context.ShowStorage;
         var isResourcesVisible = context.ShowSystem;
+        var isOpenWorkVisible = context.ShowOpenWork;
+        var isWorktreesVisible = context.ShowWorktrees;
 
         KillProcessesContentPane.Visibility = isKillVisible ? Visibility.Visible : Visibility.Collapsed;
         WorkflowContentPane.Visibility = isWorkflowVisible ? Visibility.Visible : Visibility.Collapsed;
         DiskContentPane.Visibility = isDiskVisible ? Visibility.Visible : Visibility.Collapsed;
         ResourcesContentPane.Visibility = isResourcesVisible ? Visibility.Visible : Visibility.Collapsed;
+        OpenWorkContentPane.Visibility = isOpenWorkVisible ? Visibility.Visible : Visibility.Collapsed;
+        WorktreesContentPane.Visibility = isWorktreesVisible ? Visibility.Visible : Visibility.Collapsed;
 
         RunDetailsBorder.Visibility = Visibility.Visible;
         Grid.SetColumnSpan(MainContentBorder, 1);
@@ -844,6 +1144,8 @@ public sealed partial class MainPage : Page
         ApplyTabButtonState(ProcessesNavigationButton, isKillVisible);
         ApplyTabButtonState(RunsNavigationButton, isWorkflowVisible);
         ApplyTabButtonState(StorageNavigationButton, isDiskVisible);
+        ApplyTabButtonState(OpenWorkNavigationButton, isOpenWorkVisible);
+        ApplyTabButtonState(WorktreesNavigationButton, isWorktreesVisible);
     }
 
     private static void ApplyTabButtonState(Button button, bool isActive)

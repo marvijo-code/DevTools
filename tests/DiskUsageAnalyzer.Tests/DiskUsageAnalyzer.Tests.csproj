@@ -39,12 +39,21 @@
     <Compile Include="..\..\DevTools\Services\SystemInformerIntegration.cs" Link="Services\SystemInformerIntegration.cs" />
     <Compile Include="..\..\DevTools\Services\FirefoxTabBridge.cs" Link="Services\FirefoxTabBridge.cs" />
     <Compile Include="..\..\DevTools\Services\DiskUsageAnalyzer.cs" Link="Services\DiskUsageAnalyzer.cs" />
+    <Compile Include="..\..\DevTools\Services\RepositoryRootLocator.cs" Link="Services\RepositoryRootLocator.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\BiggestFilesModels.cs" Link="Services\BiggestFiles\BiggestFilesModels.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\TopNAccumulator.cs" Link="Services\BiggestFiles\TopNAccumulator.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\ElevationService.cs" Link="Services\BiggestFiles\ElevationService.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\ParallelFileScanner.cs" Link="Services\BiggestFiles\ParallelFileScanner.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\MftRecordParser.cs" Link="Services\BiggestFiles\Ntfs\MftRecordParser.cs" />
-    <Compile Include="..\..\DevTools\Models\ResourceSample.cs" Link="Models\ResourceSample.cs" />
+    <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\MftTable.cs" Link="Services\BiggestFiles\Ntfs\MftTable.cs" />
+    <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\NativeMethods.cs" Link="Services\BiggestFiles\Ntfs\NativeMethods.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\FolderSizeModels.cs" Link="Services\FolderSizes\FolderSizeModels.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\FolderSizeEngine.cs" Link="Services\FolderSizes\FolderSizeEngine.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\MftFolderSizeScanner.cs" Link="Services\FolderSizes\MftFolderSizeScanner.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\FolderTree.cs" Link="Services\FolderSizes\FolderTree.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\ParallelFolderWalker.cs" Link="Services\FolderSizes\ParallelFolderWalker.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\ScanGate.cs" Link="Services\FolderSizes\ScanGate.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\DriveUsageService.cs" Link="Services\FolderSizes\DriveUsageService.cs" />    <Compile Include="..\..\DevTools\Models\ResourceSample.cs" Link="Models\ResourceSample.cs" />
     <Compile Include="..\..\DevTools\Models\AgentSessionUsage.cs" Link="Models\AgentSessionUsage.cs" />
     <Compile Include="..\..\DevTools\Models\AgentSessionEntry.cs" Link="Models\AgentSessionEntry.cs" />
     <Compile Include="..\..\DevTools\Models\ResourceHistory.cs" Link="Models\ResourceHistory.cs" />
@@ -53,5 +62,9 @@
     <Compile Include="..\..\DevTools\Services\Resources\ProcessDetailsReader.cs" Link="Services\Resources\ProcessDetailsReader.cs" />
     <Compile Include="..\..\DevTools\Services\Resources\ClaudeSessionCatalog.cs" Link="Services\Resources\ClaudeSessionCatalog.cs" />
     <Compile Include="..\..\DevTools\Services\Resources\ResourceAdvisor.cs" Link="Services\Resources\ResourceAdvisor.cs" />
+    <Compile Include="..\..\DevTools\Services\DiskCleanup\DiskCleanupModels.cs" Link="Services\DiskCleanup\DiskCleanupModels.cs" />
+    <Compile Include="..\..\DevTools\Services\DiskCleanup\DiskCleanupService.cs" Link="Services\DiskCleanup\DiskCleanupService.cs" />
+    <Compile Include="..\..\DevTools\Services\CleanupRules.cs" Link="Services\CleanupRules.cs" />
+    <Compile Include="..\..\DevTools\Services\WorktreeGit.cs" Link="Services\WorktreeGit.cs" />
   </ItemGroup>
 </Project>

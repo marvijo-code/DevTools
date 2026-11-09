@@ -7,6 +7,7 @@ using DevTools.Infrastructure;
 using DevTools.Models;
 using DevTools.Services;
 using DevTools.Services.BiggestFiles;
+using DevTools.Services.DiskCleanup;
 
 namespace DevTools.ViewModels;
 
@@ -43,6 +44,8 @@ public sealed partial class MainViewModel : ObservableObject
         nameof(WorkflowRunItem.StatusCategory)
     ];
     private readonly DiskUsageAnalyzer _diskUsageAnalyzer = new();
+    private int _refreshFailureCount;
+    private DateTimeOffset _nextTimedRefreshAt = DateTimeOffset.MinValue;
     private readonly ProcessKillCatalog _processKillCatalog = new();
     private readonly ProcessKiller _processKiller = new();
     private readonly GitHubApiClient _gitHubApiClient = new();
@@ -50,6 +53,7 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly SemaphoreSlim _killProcessesRefreshGate = new(1, 1);
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private readonly Dictionary<string, bool> _diskUsageSectionExpansionStates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _diskUsageExpansionInProgress = new(StringComparer.OrdinalIgnoreCase);
     private ProcessViewState _processViewState = new();
     private Dictionary<string, bool> _killProcessSectionExpansionStates => _processViewState.ExpandedSections;
     private readonly List<WorkflowRunItem> _allRuns = [];
@@ -59,6 +63,9 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly SemaphoreSlim _biggestFilesGate = new(1, 1);
     private readonly ObservableCollection<BiggestFileEntry> _biggestFiles = [];
     private readonly List<BiggestFileEntry> _allBiggestFiles = [];
+    private readonly DiskCleanupService _diskCleanupService = new();
+    private readonly SemaphoreSlim _bulkCleanupGate = new(1, 1);
+    private CancellationTokenSource? _bulkCleanupCts;
 
     private string _ownerInput = string.Empty;
     private string _repoInput = string.Empty;
@@ -95,6 +102,11 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _hasBiggestFilesSnapshot;
     private string _biggestFilesHeadline = "Scan a drive or folder to find the largest files.";
     private string _biggestFilesStatusText = "No scan yet.";
+    private bool _runAsAdministrator = true;
+    private bool _isBulkCleanupRunning;
+    private string _bulkCleanupStatusText = "Not run yet.";
+    private string _bulkCleanupHeadline = "One button cleanup: package caches, stale build output, the intermediates of already-published video episodes, and crashed-git debris with expired agent checkpoints.";
+    private string _bulkCleanupReportText = string.Empty;
     private bool _isLoadingSettings;
     private string _statusFilter = "All";
     private string? _encryptedPersonalAccessToken;
@@ -102,6 +114,8 @@ public sealed partial class MainViewModel : ObservableObject
 
     public MainViewModel()
     {
+        _worktreeAnalyzer = new WorktreeAnalyzer(_gitHubApiClient, _diskUsageAnalyzer);
+        _cleanupAdvisor = new CleanupAdvisor(_diskUsageAnalyzer);
         Repositories = [];
         Runs = [];
         LoadSettings();
@@ -185,6 +199,56 @@ public sealed partial class MainViewModel : ObservableObject
     public bool HasBiggestFilesSnapshot => _hasBiggestFilesSnapshot;
 
     public bool ShowElevationHint => !ElevationService.IsProcessElevated();
+
+    /// <summary>
+    /// Start DevTools with administrator rights. DevTools is elevated by default because the fast
+    /// NTFS Master File Table folder scan needs the raw-volume handle. The launcher reads this from
+    /// settings.json, so the choice applies to the next launch.
+    /// </summary>
+    public bool RunAsAdministrator
+    {
+        get => _runAsAdministrator;
+        set
+        {
+            if (_runAsAdministrator == value)
+            {
+                return;
+            }
+
+            _runAsAdministrator = value;
+            RaisePropertyChanged();
+            RaisePropertyChanged(nameof(ElevationPreferenceText));
+            SaveSettings();
+            StatusMessage = value
+                ? "DevTools will start as administrator from the next launch."
+                : "DevTools will start without administrator rights from the next launch. Folder scans will be slower.";
+        }
+    }
+
+    public bool IsRunningAsAdministrator => ElevationService.IsProcessElevated();
+
+    public string ElevationPreferenceText => _runAsAdministrator
+        ? "Always start with administrator rights. Folder scans use the fast NTFS engine."
+        : "Start without administrator rights. Folder scans fall back to the slower engine.";
+
+    public bool IsBulkCleanupRunning => _isBulkCleanupRunning;
+
+    public string BulkCleanupStatusText => _bulkCleanupStatusText;
+
+    public string BulkCleanupHeadline => _bulkCleanupHeadline;
+
+    public string BulkCleanupReportText => _bulkCleanupReportText;
+
+    public bool HasBulkCleanupReport => !string.IsNullOrWhiteSpace(_bulkCleanupReportText);
+
+    /// <summary>True when pwsh 7 and the cleanup script are both on this machine.</summary>
+    public bool IsBulkCleanupAvailable => _diskCleanupService.IsAvailable;
+
+    public string BulkCleanupAvailabilityText =>
+        _diskCleanupService.GetUnavailableReason() ??
+        $"Runs {_diskCleanupService.ScriptPath} with the Caches, BuildArtifacts and PublishedVideos lanes.";
+
+    public string BulkCleanupButtonText => IsBulkCleanupRunning ? "Cleaning up..." : "Bulk Cleanup PC";
 
     public string VisibleBiggestFilesText =>
         _allBiggestFiles.Count == _biggestFiles.Count
@@ -487,6 +551,12 @@ public sealed partial class MainViewModel : ObservableObject
             RaiseDiskUsageProperties();
             StatusMessage = "Refreshing disk usage snapshot...";
 
+            // The cleanup options are quick to check, so they fill in while the slower full scan runs.
+            var cleanupTask = RefreshCleanupOptionsAsync(cancellationToken);
+
+            // Show the drives and open the system drive at once; sizing it on demand beats waiting for the scan.
+            RefreshFolderBrowserDrives();
+
             var progress = new Progress<DiskUsageProgress>(update =>
             {
                 _diskUsageHeadline = update.Headline;
@@ -495,6 +565,10 @@ public sealed partial class MainViewModel : ObservableObject
                 _hasDiskUsageSnapshot = update.Sections.Count > 0 || update.IsCompleted;
                 SetDiskUsageStatus(update.StatusText);
                 RaiseDiskUsageProperties();
+                if (_diskUsageAnalyzer.Trees.Count != _folderBrowserTreeCount)
+                {
+                    RefreshFolderBrowserDrives();
+                }
             });
 
             var snapshot = await _diskUsageAnalyzer.CaptureAsync(progress, cancellationToken);
@@ -505,6 +579,8 @@ public sealed partial class MainViewModel : ObservableObject
             SetDiskUsageStatus($"Last disk refresh: {snapshot.CapturedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}");
             SetDiskUsageActivityText("Snapshot ready");
             RaiseDiskUsageProperties();
+            RefreshFolderBrowserDrives();
+            await cleanupTask;
 
             StatusMessage = "Disk usage snapshot refreshed.";
             AppLog.Info("RefreshDiskUsageAsync completed.");
@@ -531,16 +607,44 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Loads the direct children of a folder entry the first time the user expands it with "+".
+    /// </summary>
+    public async Task EnsureDiskUsageChildrenLoadedAsync(DiskUsageEntry entry, CancellationToken cancellationToken)
+    {
+        if (!entry.CanExpand || entry.HasLoadedChildren || entry.IsMeasuring)
+        {
+            return;
+        }
+
+        if (!_diskUsageExpansionInProgress.Add(entry.Path))
+        {
+            return;
+        }
+
+        try
+        {
+            var children = await _diskUsageAnalyzer.ExpandEntryAsync(entry, cancellationToken);
+            entry.SetChildren(children);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error($"Expanding disk usage folder '{entry.Path}' failed.", ex);
+            entry.SetChildren([]);
+        }
+        finally
+        {
+            _diskUsageExpansionInProgress.Remove(entry.Path);
+        }
+    }
+
     public async Task RefreshAsync(CancellationToken cancellationToken)
     {
         AppLog.Info("RefreshAsync started.");
         EnsureRepositoriesLoaded();
-
-        if (Repositories.Count == 0)
-        {
-            StatusMessage = "No repositories yet. Add an owner and repository to see workflow runs.";
-            return;
-        }
 
         if (!await _refreshGate.WaitAsync(0, cancellationToken))
         {
@@ -559,6 +663,8 @@ public sealed partial class MainViewModel : ObservableObject
             AppLog.Info($"Refreshing {Repositories.Count} repositories.");
 
             var results = await Task.WhenAll(fetchTasks);
+            _refreshFailureCount = 0;
+            _nextTimedRefreshAt = DateTimeOffset.MinValue;
             var combined = results
                 .SelectMany(item => item)
                 .OrderByDescending(item => item.CreatedAt)
@@ -602,8 +708,22 @@ public sealed partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            AppLog.Error("RefreshAsync failed.", ex);
-            StatusMessage = ex.Message;
+            // Back off instead of failing the same call (and logging a stack trace) every
+            // 10 seconds: 20 s, 40 s, 80 s ... up to 10 minutes. Refresh Now still runs at once.
+            _refreshFailureCount++;
+            var delay = TimeSpan.FromSeconds(Math.Min(600, 10 * Math.Pow(2, Math.Min(_refreshFailureCount, 6))));
+            _nextTimedRefreshAt = DateTimeOffset.Now + delay;
+            if (_refreshFailureCount == 1)
+            {
+                AppLog.Error("RefreshAsync failed.", ex);
+            }
+            else
+            {
+                AppLog.Info($"RefreshAsync failed again ({_refreshFailureCount}x): {ex.Message}");
+            }
+
+            StatusMessage = $"{ex.Message} Retrying in {delay.TotalSeconds:0} s.";
+            return;
         }
         finally
         {
@@ -611,6 +731,14 @@ public sealed partial class MainViewModel : ObservableObject
             _refreshGate.Release();
             AppLog.Info("RefreshAsync finished.");
         }
+    }
+
+    /// <summary>Timer refresh: skipped while a failed GitHub call is backing off.</summary>
+    public Task RefreshOnTimerAsync(CancellationToken cancellationToken)
+    {
+        return DateTimeOffset.Now < _nextTimedRefreshAt
+            ? Task.CompletedTask
+            : RefreshAsync(cancellationToken);
     }
 
     public async Task ResolveSelectedRunAsync(CancellationToken cancellationToken)
@@ -769,7 +897,7 @@ public sealed partial class MainViewModel : ObservableObject
             _hasBiggestFilesSnapshot = true;
             RaisePropertyChanged(nameof(HasBiggestFilesSnapshot));
             _biggestFilesHeadline =
-                $"Top {result.Top.Count} files under {request.ScanRoot} — scanned {result.FilesSeen:N0} files in {FormatElapsed(result.Elapsed)} ({result.EngineName}).";
+                $"Top {result.Top.Count} files under {request.ScanRoot} - scanned {result.FilesSeen:N0} files in {FormatElapsed(result.Elapsed)} ({result.EngineName}).";
             RaisePropertyChanged(nameof(BiggestFilesHeadline));
             SetBiggestFilesStatus(result.Warning ??
                 $"Done. {result.FilesSeen:N0} files, {ByteFormatter.Format(result.BytesSeen)} scanned in {FormatElapsed(result.Elapsed)}.");
@@ -798,6 +926,104 @@ public sealed partial class MainViewModel : ObservableObject
     public void CancelBiggestFilesScan()
     {
         _biggestFilesCts?.Cancel();
+    }
+
+    /// <summary>Dry run of the bulk cleanup. Reports what would be deleted and deletes nothing.</summary>
+    public Task<DiskCleanupResult> PreviewBulkCleanupAsync()
+    {
+        return RunBulkCleanupCoreAsync(execute: false);
+    }
+
+    /// <summary>Real run of the bulk cleanup. Deletes the three reviewed lanes.</summary>
+    public Task<DiskCleanupResult> RunBulkCleanupAsync()
+    {
+        return RunBulkCleanupCoreAsync(execute: true);
+    }
+
+    public void CancelBulkCleanup()
+    {
+        _bulkCleanupCts?.Cancel();
+    }
+
+    private async Task<DiskCleanupResult> RunBulkCleanupCoreAsync(bool execute)
+    {
+        if (!await _bulkCleanupGate.WaitAsync(0))
+        {
+            StatusMessage = "A bulk cleanup is already running.";
+            return new DiskCleanupResult(false, false, false, -1, "A bulk cleanup is already running.", DiskCleanupReport.Empty, []);
+        }
+
+        var cts = new CancellationTokenSource();
+        _bulkCleanupCts = cts;
+        var lines = new Queue<string>();
+
+        try
+        {
+            _bulkCleanupReportText = string.Empty;
+            RaisePropertyChanged(nameof(BulkCleanupReportText));
+            RaisePropertyChanged(nameof(HasBulkCleanupReport));
+
+            SetBulkCleanupRunning(true);
+            SetBulkCleanupStatus(execute ? "Cleaning up..." : "Measuring what a cleanup would reclaim...");
+            RaisePropertyChanged(nameof(BulkCleanupButtonText));
+            StatusMessage = execute ? "Running the bulk cleanup..." : "Previewing the bulk cleanup...";
+
+            var progress = new Progress<string>(line =>
+            {
+                lines.Enqueue(line);
+                while (lines.Count > 400)
+                {
+                    lines.Dequeue();
+                }
+
+                _bulkCleanupReportText = string.Join(Environment.NewLine, lines);
+                RaisePropertyChanged(nameof(BulkCleanupReportText));
+                RaisePropertyChanged(nameof(HasBulkCleanupReport));
+            });
+
+            var result = await _diskCleanupService.RunAsync(execute, progress, cts.Token);
+
+            SetBulkCleanupStatus(result.Message);
+            StatusMessage = result.Message;
+
+            if (result.Succeeded && execute && IsDiskUsageVisible)
+            {
+                await RefreshDiskUsageAsync(CancellationToken.None);
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("RunBulkCleanupCoreAsync failed.", ex);
+            SetBulkCleanupStatus($"Bulk cleanup failed: {ex.Message}");
+            StatusMessage = ex.Message;
+            return new DiskCleanupResult(false, false, false, -1, ex.Message, DiskCleanupReport.Empty, []);
+        }
+        finally
+        {
+            SetBulkCleanupRunning(false);
+            RaisePropertyChanged(nameof(BulkCleanupButtonText));
+            _bulkCleanupCts = null;
+            cts.Dispose();
+            _bulkCleanupGate.Release();
+        }
+    }
+
+    private void SetBulkCleanupRunning(bool isRunning)
+    {
+        SetProperty(ref _isBulkCleanupRunning, isRunning, nameof(IsBulkCleanupRunning));
+    }
+
+    private void SetBulkCleanupStatus(string statusText)
+    {
+        if (string.Equals(_bulkCleanupStatusText, statusText, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _bulkCleanupStatusText = statusText;
+        RaisePropertyChanged(nameof(BulkCleanupStatusText));
     }
 
     public async Task<bool> DeleteBiggestFileAsync(BiggestFileEntry? entry, CancellationToken cancellationToken)
@@ -1244,6 +1470,8 @@ public sealed partial class MainViewModel : ObservableObject
             RaisePropertyChanged(nameof(IsWorkflowExplorerVisible));
             RaisePropertyChanged(nameof(IsDiskUsageVisible));
             RaisePropertyChanged(nameof(IsResourcesVisible));
+            RaisePropertyChanged(nameof(IsOpenWorkVisible));
+            RaisePropertyChanged(nameof(IsWorktreesVisible));
             RaisePropertyChanged(nameof(ContextPaneTitle));
             RaisePropertyChanged(nameof(ContextPaneSubtitle));
         }
@@ -1393,6 +1621,10 @@ public sealed partial class MainViewModel : ObservableObject
                 {
                     incomingSection.IsExpanded = isExpanded;
                 }
+                else if (incomingSection.Title.StartsWith(DiskUsageAnalyzer.LargestFoldersSectionTitle, StringComparison.OrdinalIgnoreCase))
+                {
+                    incomingSection.IsExpanded = true;
+                }
 
                 _diskUsageSections.Insert(i, incomingSection);
                 continue;
@@ -1477,6 +1709,7 @@ public sealed partial class MainViewModel : ObservableObject
             _resourceIntervalSeconds = ResourceIntervalOptions.Contains(settings.ResourceIntervalSeconds)
                 ? settings.ResourceIntervalSeconds
                 : 1;
+            _runAsAdministrator = settings.RunAsAdministrator;
 
             var persistedPat = UnprotectSecret(_encryptedPersonalAccessToken);
             if (!string.IsNullOrWhiteSpace(persistedPat))
@@ -1519,7 +1752,8 @@ public sealed partial class MainViewModel : ObservableObject
                         BiggestFilesScanRoot = _biggestFilesScanRoot,
                         BiggestFilesTopCount = _biggestFilesTopCount,
                         ResourceMonitoringEnabled = _resourceMonitoringEnabled,
-                        ResourceIntervalSeconds = _resourceIntervalSeconds
+                        ResourceIntervalSeconds = _resourceIntervalSeconds,
+                        RunAsAdministrator = _runAsAdministrator
                     },
                     new JsonSerializerOptions
                     {
@@ -1632,6 +1866,16 @@ public sealed partial class MainViewModel : ObservableObject
             LoadRepositories();
             _repositoriesLoaded = true;
         }
+
+        // No repository is pre-configured. The Runs and Open Work tabs stay empty until one is added, so
+        // the app never assumes a particular owner or project.
+        if (Repositories.Count == 0)
+        {
+            StatusMessage = "No repository configured yet. Add one under Auth, Refresh, and Repository Setup.";
+            AppLog.Info("No repositories configured; waiting for one to be added.");
+        }
+
+        RaisePropertyChanged(nameof(RepositorySummaryText));
     }
 
     private void SaveRepositories()
@@ -1704,5 +1948,8 @@ public sealed partial class MainViewModel : ObservableObject
         public bool ResourceMonitoringEnabled { get; set; } = true;
 
         public int ResourceIntervalSeconds { get; set; } = 1;
+
+        /// <summary>Read by Start-DevTools.ps1: start DevTools with administrator rights.</summary>
+        public bool RunAsAdministrator { get; set; } = true;
     }
 }

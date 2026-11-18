@@ -541,6 +541,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         var refreshCleanup = false;
+        var acceptProgress = true;
         try
         {
             SetDiskUsageRefreshing(true);
@@ -552,24 +553,27 @@ public sealed partial class MainViewModel : ObservableObject
             RaiseDiskUsageProperties();
             StatusMessage = "Refreshing disk usage snapshot...";
 
-            // Select the system drive now and populate its tree when the drive scan finishes.
-            RefreshFolderBrowserDrives();
-
             var progress = new Progress<DiskUsageProgress>(update =>
             {
+                if (!acceptProgress)
+                {
+                    return;
+                }
+
                 _diskUsageHeadline = update.Headline;
                 _diskUsageAnalysis = update.Analysis;
                 SetDiskUsageSections(update.Sections);
                 _hasDiskUsageSnapshot = update.Sections.Count > 0 || update.IsCompleted;
                 SetDiskUsageStatus(update.StatusText);
                 RaiseDiskUsageProperties();
-                if (_diskUsageAnalyzer.Trees.Count != _folderBrowserTreeCount)
+                if (update.BrowseRoots is { } roots)
                 {
-                    RefreshFolderBrowserDrives();
+                    RefreshFolderBrowserDrives(roots, update.CompletedRoot);
                 }
             });
 
             var snapshot = await _diskUsageAnalyzer.CaptureAsync(progress, cancellationToken);
+            acceptProgress = false;
             SetDiskUsageSections(snapshot.Sections);
             _diskUsageHeadline = snapshot.Headline;
             _diskUsageAnalysis = snapshot.Analysis;
@@ -577,7 +581,7 @@ public sealed partial class MainViewModel : ObservableObject
             SetDiskUsageStatus($"Last disk refresh: {snapshot.CapturedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}");
             SetDiskUsageActivityText("Snapshot ready");
             RaiseDiskUsageProperties();
-            RefreshFolderBrowserDrives(scanCompleted: true);
+            RefreshFolderBrowserDrives(snapshot.BrowseRoots, scanCompleted: true);
             refreshCleanup = true;
             StatusMessage = "Disk usage snapshot refreshed.";
             AppLog.Info("RefreshDiskUsageAsync completed.");
@@ -598,6 +602,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
         finally
         {
+            acceptProgress = false;
             SetDiskUsageRefreshing(false);
             _diskUsageRefreshGate.Release();
             AppLog.Info("RefreshDiskUsageAsync finished.");

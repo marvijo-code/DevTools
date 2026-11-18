@@ -1,3 +1,4 @@
+using DiskUsage = DevTools.Services.DiskUsageAnalyzer;
 using DevTools.Services.FolderSizes;
 using Xunit;
 
@@ -17,6 +18,52 @@ public sealed class VolumeSpaceTests
         var systemDrive = Assert.Single(all, drive => drive.RootPath.Equals(path, StringComparison.OrdinalIgnoreCase));
         Assert.True(systemDrive.HasDriveLetter);
         Assert.DoesNotContain(all, drive => drive.RootPath.Equals(identity, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData(true, false, null, true, "Folder scan pending.")]
+    [InlineData(false, false, null, true, "700 used bytes have no folder attribution.")]
+    [InlineData(true, true, null, true, "700 used bytes have no folder attribution.")]
+    [InlineData(true, true, 500L, true, "200 used bytes remain unattributed.")]
+    [InlineData(true, true, 800L, true, "File allocation exceeded reported usage by 100 bytes")]
+    [InlineData(true, true, 500L, false, "Volume-wide usage is unavailable for reconciliation.")]
+    [InlineData(false, false, null, false, "Folder allocation is unavailable.")]
+    public void DriveSummary_DistinguishesPendingAndUnattributedUsage(
+        bool hasDriveLetter, bool scanned, long? allocatedBytes, bool volumeWide, string expectedNote)
+    {
+        var space = new VolumeSpace(1_000, 300, 700, 0, 0, volumeWide);
+        var drive = new DriveDescriptor(@"C:\", "Test", "NTFS", space, hasDriveLetter);
+        var results = new Dictionary<string, DriveScanResult>();
+        if (scanned)
+        {
+            var tree = new FolderTree(drive.RootPath, [-1], [""], [9_000], [2], "Fixture", TimeSpan.Zero,
+                allocatedBytes is long allocated ? [allocated] : null);
+            results.Add(drive.RootPath, new DriveScanResult(drive, tree, "Fixture", ""));
+        }
+
+        var summary = DiskUsage.BuildDriveSummarySection([drive], results);
+        var note = Assert.Single(summary.Entries).Note;
+
+        Assert.Contains(expectedNote, note);
+        if (allocatedBytes.HasValue)
+        {
+            Assert.Contains($"{allocatedBytes:N0} bytes of allocation attributed by the scan.", note);
+        }
+    }
+
+    [Fact]
+    public void DriveSummary_AccountsForUsedBytesWhenTheScanFails()
+    {
+        var drive = new DriveDescriptor(@"C:\", "Test", "NTFS",
+            new VolumeSpace(1_000, 300, 700, 0, 0, IsVolumeWide: true));
+        var results = new Dictionary<string, DriveScanResult>
+        {
+            [drive.RootPath] = new DriveScanResult(drive, null, "None", "Access denied.")
+        };
+
+        var summary = DiskUsage.BuildDriveSummarySection([drive], results);
+
+        Assert.Contains("Access denied. 700 used bytes have no folder attribution.", Assert.Single(summary.Entries).Note);
     }
 
     [Theory]

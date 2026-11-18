@@ -85,7 +85,6 @@ public sealed partial class MainViewModel
     private string _folderBrowserSummary = "The folder browser fills in when the first drive scan finishes.";
     private bool _canFolderBrowserGoUp;
     private int _folderBrowserFileGeneration;
-    private int _folderBrowserTreeCount;
     private CancellationTokenSource? _folderBrowserClickCts;
 
 
@@ -214,12 +213,14 @@ public sealed partial class MainViewModel
         RebuildFolderBrowserRows();
     }
 
-    /// <summary>Called on the UI thread whenever a drive tree is added or replaced.</summary>
-    private void RefreshFolderBrowserDrives(bool scanCompleted = false)
+    private void RefreshFolderBrowserDrives(IReadOnlyList<string> roots, string? completedRoot = null, bool scanCompleted = false)
     {
-        // List each fixed drive before its folder tree is ready.
-        _folderBrowserTreeCount = _diskUsageAnalyzer.Trees.Count;
-        var roots = DriveUsageService.GetFixedDrives().Select(drive => drive.RootPath).ToList();
+        var selectedRoot = Path.GetPathRoot(_folderBrowserPath);
+        if (completedRoot is not null && !string.Equals(selectedRoot, completedRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
         if (!roots.SequenceEqual(_folderBrowserDrives))
         {
             _folderBrowserDrives.Clear();
@@ -229,12 +230,20 @@ public sealed partial class MainViewModel
             }
         }
 
-        var path = string.IsNullOrEmpty(_folderBrowserPath) && roots.Count > 0
-            ? roots[0]
-            : _folderBrowserPath;
-        if (!BrowseFolder(path) && roots.Contains(path, StringComparer.OrdinalIgnoreCase))
+        if (roots.Count == 0)
         {
-            ShowPendingBrowserDrive(path, scanCompleted);
+            ShowPendingBrowserDrive(string.Empty, scanCompleted);
+            return;
+        }
+
+        var path = selectedRoot is not null && roots.Contains(selectedRoot, StringComparer.OrdinalIgnoreCase)
+            ? _folderBrowserPath
+            : roots[0];
+        var rootPath = Path.GetPathRoot(path)!;
+        if (!BrowseFolder(path) &&
+            (string.Equals(path, rootPath, StringComparison.OrdinalIgnoreCase) || !BrowseFolder(rootPath)))
+        {
+            ShowPendingBrowserDrive(rootPath, scanCompleted || completedRoot is not null);
         }
     }
 
@@ -246,9 +255,11 @@ public sealed partial class MainViewModel
         _folderBrowserRows.Clear();
         _folderBrowserPath = path;
         _canFolderBrowserGoUp = false;
-        _folderBrowserSummary = scanCompleted
-            ? $"Folder sizes for {path} are unavailable."
-            : $"Waiting for the drive scan of {path}.";
+        _folderBrowserSummary = string.IsNullOrEmpty(path)
+            ? "No fixed drives with drive letters are available."
+            : scanCompleted
+                ? $"Folder sizes for {path} are unavailable."
+                : $"Waiting for the drive scan of {path}.";
         RaisePropertyChanged(nameof(FolderBrowserPath));
         RaisePropertyChanged(nameof(FolderBrowserSummary));
         RaisePropertyChanged(nameof(CanFolderBrowserGoUp));

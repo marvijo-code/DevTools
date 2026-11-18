@@ -50,6 +50,15 @@ public sealed class DiskUsageAnalyzer
         var capturedAt = DateTimeOffset.Now;
         var drives = DriveUsageService.GetFixedDrives(includeVolumesWithoutDriveLetters: true);
         var scanDrives = drives.Where(drive => drive.HasDriveLetter).ToArray();
+        var browseRoots = scanDrives.Select(drive => drive.RootPath).ToArray();
+        lock (_treesLock)
+        {
+            foreach (var root in _trees.Keys.Where(root => !browseRoots.Contains(root, StringComparer.OrdinalIgnoreCase)).ToArray())
+            {
+                _trees.Remove(root);
+            }
+        }
+
         var headline = BuildHeadline(drives, capturedAt);
         var systemRoot = FolderTree.NormalizeRoot(Environment.SystemDirectory);
 
@@ -66,7 +75,10 @@ public sealed class DiskUsageAnalyzer
         }
 
         sections.Add(BuildDriveSummarySection(drives, new Dictionary<string, DriveScanResult>(StringComparer.OrdinalIgnoreCase)));
-        progress?.Report(new DiskUsageProgress(headline, $"Found {drives.Count} fixed volume(s). Scanning folders on {scanDrives.Length} drive(s)...", "Sizing folders. Results appear per drive as soon as each drive is done.", sections.ToList(), false));
+        progress?.Report(new DiskUsageProgress(headline, $"Found {drives.Count} fixed volume(s). Scanning folders on {scanDrives.Length} drive(s)...", "Sizing folders. Results appear per drive as soon as each drive is done.", sections.ToList(), false)
+        {
+            BrowseRoots = browseRoots
+        });
 
         var results = new Dictionary<string, DriveScanResult>(StringComparer.OrdinalIgnoreCase);
         var currentAnalysis = BuildAnalysis([]);
@@ -107,11 +119,15 @@ public sealed class DiskUsageAnalyzer
             }
 
             results[drive.RootPath] = result;
-            if (result.Tree is not null)
+            lock (_treesLock)
             {
-                lock (_treesLock)
+                if (result.Tree is { } tree)
                 {
-                    _trees[drive.RootPath] = result.Tree;
+                    _trees[drive.RootPath] = tree;
+                }
+                else
+                {
+                    _trees.Remove(drive.RootPath);
                 }
             }
 
@@ -131,7 +147,11 @@ public sealed class DiskUsageAnalyzer
             headline = BuildHeadline(currentDrives, capturedAt);
             sections[^1] = BuildDriveSummarySection(currentDrives, results);
             currentAnalysis = BuildAnalysis(results.Values);
-            progress?.Report(new DiskUsageProgress(headline, $"Sized {results.Count} of {scanDrives.Length} drive(s).", currentAnalysis, sections.ToList(), false));
+            progress?.Report(new DiskUsageProgress(headline, $"Sized {results.Count} of {scanDrives.Length} drive(s).", currentAnalysis, sections.ToList(), false)
+            {
+                BrowseRoots = browseRoots,
+                CompletedRoot = drive.RootPath
+            });
         }
 
         if (!results.ContainsKey(systemRoot))
@@ -142,7 +162,7 @@ public sealed class DiskUsageAnalyzer
 
         var analysis = BuildAnalysis(results.Values);
         progress?.Report(new DiskUsageProgress(headline, $"Last disk refresh: {capturedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}", analysis, sections.ToList(), true));
-        return new DiskUsageSnapshot(capturedAt, headline, analysis, sections);
+        return new DiskUsageSnapshot(capturedAt, headline, analysis, sections) { BrowseRoots = browseRoots };
     }
 
     /// <summary>
@@ -393,7 +413,7 @@ public sealed class DiskUsageAnalyzer
         ];
     }
 
-    private static DiskUsageSection BuildDriveSummarySection(IReadOnlyList<DriveDescriptor> drives, IReadOnlyDictionary<string, DriveScanResult> results)
+    internal static DiskUsageSection BuildDriveSummarySection(IReadOnlyList<DriveDescriptor> drives, IReadOnlyDictionary<string, DriveScanResult> results)
     {
         var entries = new List<DiskUsageEntry>();
         foreach (var drive in drives)
@@ -429,13 +449,26 @@ public sealed class DiskUsageAnalyzer
             var scanNote = result?.Tree is { } tree
                 ? $"Logical file size: {tree.TotalBytes:N0} bytes ({result.EngineName}, {tree.Elapsed.TotalSeconds:F1}s)."
                 : result?.Note ?? (drive.HasDriveLetter ? "Folder scan pending." : "Fixed volume without a drive letter.");
-            if (space.IsVolumeWide && result?.Tree?.GetAllocatedBytes(0) is long allocatedBytes)
+            if (result?.Tree?.GetAllocatedBytes(0) is long allocatedBytes)
             {
-                var remainingUsed = space.UsedBytes - allocatedBytes;
                 scanNote += $" {allocatedBytes:N0} bytes of allocation attributed by the scan.";
-                scanNote += remainingUsed >= 0
-                    ? $" {remainingUsed:N0} used bytes remain unattributed."
-                    : $" File allocation exceeded reported usage by {-remainingUsed:N0} bytes during the scan.";
+                if (space.IsVolumeWide)
+                {
+                    var remainingUsed = space.UsedBytes - allocatedBytes;
+                    scanNote += remainingUsed >= 0
+                        ? $" {remainingUsed:N0} used bytes remain unattributed."
+                        : $" File allocation exceeded reported usage by {-remainingUsed:N0} bytes during the scan.";
+                }
+                else
+                {
+                    scanNote += " Volume-wide usage is unavailable for reconciliation.";
+                }
+            }
+            else if (result is not null || !drive.HasDriveLetter)
+            {
+                scanNote += space.IsVolumeWide
+                    ? $" {space.UsedBytes:N0} used bytes have no folder attribution."
+                    : " Folder allocation is unavailable.";
             }
 
             var note = $"{totals}. {scanNote}";
@@ -542,6 +575,13 @@ public sealed class DiskUsageAnalyzer
     }
 }
 
-public sealed record DiskUsageSnapshot(DateTimeOffset CapturedAt, string Headline, string Analysis, IReadOnlyList<DiskUsageSection> Sections);
+public sealed record DiskUsageSnapshot(DateTimeOffset CapturedAt, string Headline, string Analysis, IReadOnlyList<DiskUsageSection> Sections)
+{
+    public IReadOnlyList<string> BrowseRoots { get; init; } = [];
+}
 
-public sealed record DiskUsageProgress(string Headline, string StatusText, string Analysis, IReadOnlyList<DiskUsageSection> Sections, bool IsCompleted);
+public sealed record DiskUsageProgress(string Headline, string StatusText, string Analysis, IReadOnlyList<DiskUsageSection> Sections, bool IsCompleted)
+{
+    public IReadOnlyList<string>? BrowseRoots { get; init; }
+    public string? CompletedRoot { get; init; }
+}

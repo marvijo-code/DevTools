@@ -73,23 +73,28 @@ public sealed class FolderTree
             var p = parent[i];
             if (p >= 0 && p < count && p != i)
             {
-                _childStart[p + 1]++;
+                _childStart[p]++;
             }
         }
 
+        var childCount = 0;
         for (var i = 0; i < count; i++)
         {
-            _childStart[i + 1] += _childStart[i];
+            childCount += _childStart[i];
+            _childStart[i] = childCount;
         }
 
-        _childIndex = new int[_childStart[count]];
-        var cursor = (int[])_childStart.Clone();
-        for (var i = 1; i < count; i++)
+        _childStart[count] = childCount;
+        _childIndex = new int[childCount];
+
+        // Each offset starts at the end of its group. Filling in reverse leaves the offsets
+        // at the group starts and preserves the original child order without a second array.
+        for (var i = count - 1; i > 0; i--)
         {
             var p = parent[i];
             if (p >= 0 && p < count && p != i)
             {
-                _childIndex[cursor[p]++] = i;
+                _childIndex[--_childStart[p]] = i;
             }
         }
     }

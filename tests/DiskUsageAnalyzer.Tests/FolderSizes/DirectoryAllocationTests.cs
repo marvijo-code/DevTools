@@ -101,6 +101,54 @@ public sealed class DirectoryAllocationTests
     }
 
     [Fact]
+    public async Task Walker_BatchJobsAccountForEveryFolderWithDifferentWorkerCounts()
+    {
+        const int folderCount = 96;
+        const int fileBytes = 8193;
+        var root = Directory.CreateTempSubdirectory("devtools-batched-walk-");
+        try
+        {
+            var files = new string[folderCount];
+            var contents = new byte[fileBytes];
+            for (var index = 0; index < folderCount; index++)
+            {
+                var folder = root.CreateSubdirectory($"folder {index:D2}");
+                files[index] = Path.Combine(folder.FullName, "payload.bin");
+                await File.WriteAllBytesAsync(files[index], contents);
+            }
+
+            Assert.True(CreateHardLink(Path.Combine(Path.GetDirectoryName(files[^1])!, "linked.bin"), files[0], IntPtr.Zero));
+            WriteNamedStream(files[0] + ":extra", contents);
+            Assert.True(ParallelFolderWalker.GetDirectoryBatchSize(folderCount, 4) > 1);
+
+            var walker = new ParallelFolderWalker();
+            var single = await walker.ScanAsync(root.FullName, null, CancellationToken.None, workerCount: 1,
+                prioritize: true, measureAllocation: true);
+            var parallel = await walker.ScanAsync(root.FullName, null, CancellationToken.None, workerCount: 4,
+                prioritize: true, measureAllocation: true);
+            var rootNode = parallel.Find(root.FullName);
+            Assert.True(rootNode >= 0);
+            Assert.Equal(folderCount, parallel.GetChildFolderCount(rootNode));
+            Assert.Equal(folderCount + 1L, parallel.TotalFiles);
+            Assert.Equal((folderCount + 1L) * fileBytes, parallel.TotalBytes);
+            Assert.True(parallel.GetAllocatedBytes(rootNode) > 0);
+            Assert.Equal(single.GetAllocatedBytes(single.Find(root.FullName)), parallel.GetAllocatedBytes(rootNode));
+            Assert.False(parallel.HasIncompleteScan(rootNode));
+            Assert.False(parallel.HasIncompleteAllocation(rootNode));
+            for (var index = 0; index < folderCount; index++)
+            {
+                var node = parallel.Find(Path.GetDirectoryName(files[index])!);
+                Assert.True(node >= 0);
+                Assert.Equal(index == folderCount - 1 ? 2 * fileBytes : fileBytes, parallel.GetTotalBytes(node));
+            }
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PriorityAllocation_UpgradesLogicalFolderWhileBackgroundScansArePaused()
     {
         var root = Directory.CreateTempSubdirectory("devtools-priority-allocation-");

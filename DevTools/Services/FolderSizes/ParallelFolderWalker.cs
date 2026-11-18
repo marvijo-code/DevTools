@@ -14,6 +14,7 @@ namespace DevTools.Services.FolderSizes;
 public sealed class ParallelFolderWalker
 {
     public const string EngineName = "Folder walk";
+    private const int MaximumDirectoriesPerJob = 16;
 
     public Task<FolderTree> ScanAsync(
         string rootPath,
@@ -65,11 +66,11 @@ public sealed class ParallelFolderWalker
 
         using var workerCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var scanToken = workerCancellation.Token;
-        using var queue = new BlockingCollection<(int Node, string? Path, StreamBatch? Streams)>();
+        using var queue = new BlockingCollection<WalkJob>();
         var pending = 1;
         var queuedStreamBatches = 0;
         long filesSeen = 0;
-        queue.Add((startNode, fullRoot, null), scanToken);
+        queue.Add(new WalkJob(startNode, fullRoot), scanToken);
 
         var workers = workerCount is int requested
             ? Math.Clamp(requested, 1, 16)
@@ -114,7 +115,7 @@ public sealed class ParallelFolderWalker
 
                 var batch = new StreamBatch(copy, ids.ToArray());
                 Interlocked.Increment(ref pending);
-                queue.Add((node, null, batch), scanToken);
+                queue.Add(new WalkJob(node, null, Streams: batch), scanToken);
                 queued = true;
                 return true;
             }
@@ -125,6 +126,46 @@ public sealed class ParallelFolderWalker
                     copy?.Dispose();
                     Interlocked.Decrement(ref queuedStreamBatches);
                 }
+            }
+        }
+
+        void QueueChildJobs(int firstNode, string parentPath, List<string> names)
+        {
+            if (names.Count == 0)
+            {
+                return;
+            }
+
+            var batchSize = GetDirectoryBatchSize(names.Count, workers);
+            Interlocked.Add(ref pending, 1 + (names.Count - 1) / batchSize);
+            if (batchSize == 1)
+            {
+                for (var index = 0; index < names.Count; index++)
+                {
+                    queue.Add(new WalkJob(firstNode + index, Path.Combine(parentPath, names[index])), scanToken);
+                }
+
+                return;
+            }
+
+            // All batches share the parent path and the names. Form full paths only as workers open them.
+            var children = names.ToArray();
+            for (var offset = 0; offset < children.Length; offset += batchSize)
+            {
+                var length = Math.Min(batchSize, children.Length - offset);
+                queue.Add(new WalkJob(firstNode + offset, parentPath, children.AsMemory(offset, length)), scanToken);
+            }
+        }
+
+        void WaitForScanSlot()
+        {
+            if (!prioritize)
+            {
+                ScanGate.Wait(scanToken);
+            }
+            else
+            {
+                scanToken.ThrowIfCancellationRequested();
             }
         }
 
@@ -146,16 +187,12 @@ public sealed class ParallelFolderWalker
                         measureAllocation: trackAllocation)
                     : null;
                 var subfolders = new List<string>();
-                foreach (var (node, directory, streams) in queue.GetConsumingEnumerable(scanToken))
+                foreach (var (node, directory, children, streams) in queue.GetConsumingEnumerable(scanToken))
                 {
                     using var hint = streams?.Hint;
-                    if (!prioritize)
-                    {
-                        ScanGate.Wait(scanToken);
-                    }
-
                     if (streams is not null)
                     {
+                        WaitForScanSlot();
                         Interlocked.Decrement(ref queuedStreamBatches);
                         var incompleteStreams = false;
                         var streamBytes = directoryReader!.ReadFileStreams(streams.Hint, streams.FileIds, scanToken, ref incompleteStreams);
@@ -172,7 +209,25 @@ public sealed class ParallelFolderWalker
                         continue;
                     }
 
-                    var path = directory!;
+                    if (children.IsEmpty)
+                    {
+                        ProcessDirectory(node, directory!);
+                    }
+                    else
+                    {
+                        var names = children.Span;
+                        for (var index = 0; index < names.Length; index++)
+                        {
+                            ProcessDirectory(node + index, Path.Combine(directory!, names[index]));
+                        }
+                    }
+
+                    CompleteWork();
+                }
+
+                void ProcessDirectory(int node, string path)
+                {
+                    WaitForScanSlot();
                     long bytes = 0;
                     long files = 0;
                     long allocatedBytes = 0;
@@ -216,14 +271,8 @@ public sealed class ParallelFolderWalker
                         firstChild = builder.AppendEnumeratedChildren(node, subfolders);
                     }
 
-                    Interlocked.Add(ref pending, subfolders.Count);
-                    for (var i = 0; i < subfolders.Count; i++)
-                    {
-                        queue.Add((firstChild + i, Path.Combine(path, subfolders[i]), null), scanToken);
-                    }
-
+                    QueueChildJobs(firstChild, path, subfolders);
                     Interlocked.Add(ref filesSeen, files);
-                    CompleteWork();
                 }
             }
             catch (OperationCanceledException) when (scanToken.IsCancellationRequested)
@@ -361,6 +410,14 @@ public sealed class ParallelFolderWalker
             return (bytes, files, allocatedBytes, true, pathAllocation is not null);
         }
     }
+
+    // Leave multiple jobs per worker on wide folders so a single slow directory cannot own the queue.
+    internal static int GetDirectoryBatchSize(int childCount, int workers) =>
+        childCount < MaximumDirectoriesPerJob ? 1 :
+            Math.Min(MaximumDirectoriesPerJob, 1 + (childCount - 1) / (workers * 2));
+
+    private readonly record struct WalkJob(int Node, string? Path, ReadOnlyMemory<string> Children = default,
+        StreamBatch? Streams = null);
 
     private sealed record StreamBatch(SafeFileHandle Hint, ulong[] FileIds);
 }

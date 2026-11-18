@@ -613,9 +613,12 @@ internal static class MftTableLoader
 
         try
         {
+            // Ignore reserved clusters beyond the initialized records, while keeping reads cluster-aligned.
+            var mftClustersRemaining = (geometry.MftValidDataLength - 1) / clusterBytes + 1;
             foreach (var (lcn, clusterCount) in extents)
             {
-                var clustersRemaining = clusterCount;
+                var clustersRemaining = Math.Min(clusterCount, mftClustersRemaining);
+                mftClustersRemaining -= clustersRemaining;
                 var currentLcn = lcn;
                 while (clustersRemaining > 0 && startRecordIndex < recordCount)
                 {

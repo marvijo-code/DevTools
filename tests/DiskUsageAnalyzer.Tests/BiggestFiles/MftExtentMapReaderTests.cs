@@ -204,6 +204,46 @@ public sealed class MftExtentMapReaderTests
         }
     }
 
+    [Fact]
+    public async Task LoadVolumeAsync_DoesNotReadUninitializedClustersInTheLastMftExtent()
+    {
+        const int clusterBytes = 4096;
+        const int recordBytes = 1024;
+        const int records = 7;
+        const int allocatedClusters = 30;
+        const int mftStart = 10;
+        var geometry = new NtfsVolumeData(clusterBytes, recordBytes, records * recordBytes, mftStart, 200);
+        var directory = Directory.CreateTempSubdirectory("devtools-mft-tail-");
+        var path = Path.Combine(directory.FullName, "image.bin");
+        try
+        {
+            // A truncated fixture makes any read beyond the last initialized cluster fail.
+            var mftOffset = mftStart * clusterBytes;
+            var disk = new byte[mftOffset + 2 * clusterBytes];
+            new MftRecordBuilder().NonResidentData(records * recordBytes, allocatedClusters * clusterBytes,
+                runs: [0x11, allocatedClusters, mftStart, 0], highestVcn: allocatedClusters - 1)
+                .Build().CopyTo(disk, mftOffset);
+            new MftRecordBuilder().Directory(true).FileName(".", (1UL << 48) | 5, 1)
+                .Build().CopyTo(disk, mftOffset + 5 * recordBytes);
+            new MftRecordBuilder().FileName("$Bitmap", (1UL << 48) | 5, 1)
+                .Build().CopyTo(disk, mftOffset + 6 * recordBytes);
+
+            await File.WriteAllBytesAsync(path, disk);
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var table = await MftTableLoader.LoadVolumeAsync(handle, @"C:\", geometry, null,
+                Stopwatch.StartNew(), CancellationToken.None, keepFileNames: false);
+
+            Assert.Equal(records, table.RecordCount);
+            Assert.True(table.IsNamedFile(6));
+            Assert.Equal(allocatedClusters * clusterBytes, table.RecordAllocation![0]);
+        }
+        finally
+        {
+            File.Delete(path);
+            directory.Delete();
+        }
+    }
+
     private static byte[] BuildDisk(bool nonResidentList, ushort firstSequence = 7, ushort firstRecordNumber = 1,
         bool includeOverlappingRun = false)
     {

@@ -1,4 +1,7 @@
+using System.Diagnostics;
 using System.IO.Enumeration;
+using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 using DevTools.Services.BiggestFiles;
 
 namespace DevTools.Services.FolderSizes;
@@ -10,14 +13,96 @@ internal sealed record FolderFileSnapshot(IReadOnlyList<FolderFile> Files, long 
     internal bool Matches(long bytes, long fileCount) => TotalBytes == bytes && FileCount == fileCount;
 }
 
+internal readonly record struct FolderFileRequest(int Node, string Path, long Bytes, long FileCount);
+internal readonly record struct FolderFileResult(FolderFileRequest Folder, FolderFileSnapshot? Listing);
+
 internal static class FolderFileListing
 {
+
+    private static readonly TimeSpan MinimumUpdateInterval = TimeSpan.FromMilliseconds(50);
+
     private static readonly EnumerationOptions ListingOptions = new()
     {
         IgnoreInaccessible = false,
         AttributesToSkip = 0,
         BufferSize = 16 * 1024
     };
+
+    internal static async IAsyncEnumerable<IReadOnlyList<FolderFileResult>> ReadBatchesAsync(
+        IReadOnlyList<FolderFileRequest> folders, Func<string, CancellationToken, FolderFileSnapshot?> read,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        if (folders.Count == 0)
+        {
+            yield break;
+        }
+
+        if (folders.Count == 1)
+        {
+            var folder = folders[0];
+            var listing = await Task.Run(() => read(folder.Path, cancellationToken), cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return [new FolderFileResult(folder, listing)];
+            yield break;
+        }
+
+        using var stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        // The request list is finite. Let its reads finish even when the view is between redraws.
+        var channel = Channel.CreateUnbounded<FolderFileResult>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = true
+        });
+        var producer = Task.Run(() =>
+        {
+            try
+            {
+                foreach (var folder in folders)
+                {
+                    stopped.Token.ThrowIfCancellationRequested();
+                    var listing = read(folder.Path, stopped.Token);
+                    channel.Writer.TryWrite(new FolderFileResult(folder, listing));
+                }
+
+                channel.Writer.Complete();
+            }
+            catch (Exception error)
+            {
+                channel.Writer.TryComplete(error);
+            }
+        });
+
+        try
+        {
+            long lastUpdate = 0;
+            while (await channel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (lastUpdate != 0 && !producer.IsCompleted)
+                {
+                    var delay = MinimumUpdateInterval - Stopwatch.GetElapsedTime(lastUpdate);
+                    if (delay > TimeSpan.Zero)
+                    {
+                        await Task.WhenAny(Task.Delay(delay, cancellationToken), producer).ConfigureAwait(false);
+                    }
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                var ready = new List<FolderFileResult>();
+                while (channel.Reader.TryRead(out var result))
+                {
+                    ready.Add(result);
+                }
+
+                lastUpdate = Stopwatch.GetTimestamp();
+                yield return ready;
+            }
+        }
+        finally
+        {
+            stopped.Cancel();
+            await producer.ConfigureAwait(false);
+        }
+    }
 
     public static FolderFileSnapshot? ReadLargest(string folder, int limit, CancellationToken cancellationToken = default)
     {

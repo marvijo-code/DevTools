@@ -486,39 +486,35 @@ public sealed partial class MainViewModel
 
     private async Task LoadFolderFilesAsync(List<FolderFileRequest> folders, CancellationToken cancellationToken)
     {
-        (FolderFileRequest Folder, FolderFileSnapshot? Listing)[] loaded;
         try
         {
-            loaded = await Task.Run(() => folders.Select(folder =>
-                (folder, FolderFileListing.ReadLargest(folder.Path, FolderBrowserMaxFiles, cancellationToken)))
-                .ToArray(), cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
+            await foreach (var ready in FolderFileListing.ReadBatchesAsync(folders,
+                static (path, token) => FolderFileListing.ReadLargest(path, FolderBrowserMaxFiles, token), cancellationToken))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var (folder, listing) in ready)
+                {
+                    _folderBrowserFilesLoading.Remove(folder.Node);
+                    _folderBrowserFiles[folder.Node] = listing;
+                    if (listing is null || !listing.Matches(folder.Bytes, folder.FileCount))
+                    {
+                        continue;
+                    }
+
+                    // Cache matching listings for later visits within the same scan.
+                    if (_recentFolderBrowserFiles.Count == FolderBrowserRecentListingLimit)
+                    {
+                        _recentFolderBrowserFiles.RemoveAt(0);
+                    }
+
+                    _recentFolderBrowserFiles.Add(folder.Node, listing);
+                }
+
+                RebuildFolderBrowserRows();
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            return;
         }
-
-        foreach (var (folder, listing) in loaded)
-        {
-            _folderBrowserFilesLoading.Remove(folder.Node);
-            _folderBrowserFiles[folder.Node] = listing;
-            if (listing is null || !listing.Matches(folder.Bytes, folder.FileCount))
-            {
-                continue;
-            }
-
-            // Keep every result needed by the open view, and only a bounded history for navigation.
-            if (_recentFolderBrowserFiles.Count == FolderBrowserRecentListingLimit)
-            {
-                _recentFolderBrowserFiles.RemoveAt(0);
-            }
-
-            _recentFolderBrowserFiles.Add(folder.Node, listing);
-        }
-
-        RebuildFolderBrowserRows();
     }
-
-    private readonly record struct FolderFileRequest(int Node, string Path, long Bytes, long FileCount);
 }

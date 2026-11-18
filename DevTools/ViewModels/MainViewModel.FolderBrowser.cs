@@ -122,8 +122,9 @@ public sealed partial class MainViewModel
         var allocation = tree.GetAllocatedBytes(node) is long allocatedBytes
             ? $" {ByteFormatter.Format(allocatedBytes)} of attributed allocation."
             : string.Empty;
+        var coverage = tree.HasIncompleteScan(node) ? " Some folder listings were incomplete." : string.Empty;
         _folderBrowserSummary =
-            $"{ByteFormatter.Format(tree.GetTotalBytes(node))} of logical file size in {tree.GetFileCount(node):N0} files.{allocation} " +
+            $"{ByteFormatter.Format(tree.GetTotalBytes(node))} of logical file size in {tree.GetFileCount(node):N0} files.{allocation}{coverage} " +
             $"Sized by {tree.EngineName} in {tree.Elapsed.TotalSeconds:F1}s. Use the arrows to expand folders or the name to open one.";
         RaisePropertyChanged(nameof(FolderBrowserPath));
         RaisePropertyChanged(nameof(FolderBrowserSummary));
@@ -319,11 +320,12 @@ public sealed partial class MainViewModel
             var childPath = tree.GetPath(child);
             var expanded = _folderBrowserExpanded.Contains(childPath);
             var hasContent = tree.HasChildFolders(child) || tree.GetFileCount(child) > 0;
+            var coverage = tree.HasIncompleteScan(child) ? " - incomplete scan" : string.Empty;
             var row = new FolderBrowserRow(
                 tree.GetName(child),
                 childPath,
                 size,
-                $"{tree.GetFileCount(child):N0} files - {size * 100d / rootTotal:0.0}%",
+                $"{tree.GetFileCount(child):N0} files - {size * 100d / rootTotal:0.0}%{coverage}",
                 size * 100d / rootTotal,
                 depth,
                 canOpen: hasContent,

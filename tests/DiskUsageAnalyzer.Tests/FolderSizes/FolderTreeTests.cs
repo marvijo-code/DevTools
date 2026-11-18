@@ -128,6 +128,26 @@ public sealed class FolderTreeTests
     }
 
     [Fact]
+    public async Task Walker_ReportsAnUnavailableDirectoryAsIncomplete()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-unavailable-folder-");
+        try
+        {
+            var missing = Path.Combine(fixture.FullName, "missing");
+            var tree = await new ParallelFolderWalker().ScanAsync(missing, null, CancellationToken.None, workerCount: 1);
+            var node = tree.Find(missing);
+
+            Assert.Equal(1, tree.IncompleteDirectoryCount);
+            Assert.True(tree.HasIncompleteScan(node));
+            Assert.Equal(0, tree.GetFileCount(node));
+        }
+        finally
+        {
+            fixture.Delete();
+        }
+    }
+
+    [Fact]
     public async Task Walker_SizesNestedFoldersAndSkipsJunctions()
     {
         var root = Path.Combine(Path.GetTempPath(), "devtools-walk-" + Guid.NewGuid().ToString("N"));

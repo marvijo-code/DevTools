@@ -358,7 +358,8 @@ public sealed class DiskUsageAnalyzer
 
         var summary =
             $"{tree.EngineName} sized {tree.FolderCount:N0} folders and {tree.TotalFiles:N0} files on {tree.RootPath} in {tree.Elapsed.TotalSeconds:F1}s. " +
-            $"Files total {FormatBytes(tree.TotalBytes)} by logical size. Open the Folder Browser to explore.";
+            $"Files total {FormatBytes(tree.TotalBytes)} by logical size. Open the Folder Browser to explore." +
+            DescribeIncompleteFolderScan(tree);
         return new DiskUsageSection(title, summary, entries);
     }
 
@@ -431,10 +432,11 @@ public sealed class DiskUsageAnalyzer
             results.TryGetValue(drive.RootPath, out var result);
             var tree = result?.Tree;
             var bitmap = tree?.NtfsAllocation?.Bitmap;
+            var incompleteNote = DescribeIncompleteFolderScan(tree);
             if (drive.Space is not { } space)
             {
                 entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, false, null, "Unavailable",
-                    $"Windows did not report space totals for this volume.{DescribeNtfsBitmap(bitmap)}", display));
+                    $"Windows did not report space totals for this volume.{incompleteNote}{DescribeNtfsBitmap(bitmap)}", display));
                 continue;
             }
 
@@ -496,7 +498,7 @@ public sealed class DiskUsageAnalyzer
             }
 
             var bitmapNote = DescribeNtfsBitmap(bitmap, space.IsVolumeWide ? space.UsedBytes : null);
-            var note = $"{totals}. {scanNote}{bitmapNote}";
+            var note = $"{totals}. {scanNote}{incompleteNote}{bitmapNote}";
             entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, drive.HasDriveLetter || result?.Tree is not null, space.UsedBytes,
                 $"{FormatBytes(space.UsedBytes)} used", note, display));
         }
@@ -525,6 +527,11 @@ public sealed class DiskUsageAnalyzer
             $"{partitionRemainder:N0} inside matched partitions beyond their filesystem capacities, " +
             $"{unmatched:N0} in other partition ranges and {outside:N0} outside partition ranges.";
     }
+
+    private static string DescribeIncompleteFolderScan(FolderTree? tree) =>
+        tree is { IncompleteDirectoryCount: > 0 }
+            ? $" Incomplete listings in {tree.IncompleteDirectoryCount:N0} {(tree.IncompleteDirectoryCount == 1 ? "directory" : "directories")}."
+            : string.Empty;
 
     private static string DescribeNtfsBitmap(NtfsBitmapAllocation? allocation, long? volumeUsedBytes = null)
     {
@@ -593,15 +600,15 @@ public sealed class DiskUsageAnalyzer
     {
         var path = tree.GetPath(node);
         var size = tree.GetTotalBytes(node);
-        var entry = DiskUsageEntry.CreateCompleted(
-            path,
-            true,
-            size,
-            FormatBytes(size),
-            tree.GetAllocatedBytes(node) is long allocatedBytes
-                ? $"{tree.GetFileCount(node):N0} files, {FormatBytes(allocatedBytes)} attributed allocation"
-                : $"{tree.GetFileCount(node):N0} files",
-            ResolveFolderDisplayName(path));
+        var note = tree.GetAllocatedBytes(node) is long allocatedBytes
+            ? $"{tree.GetFileCount(node):N0} files, {FormatBytes(allocatedBytes)} attributed allocation"
+            : $"{tree.GetFileCount(node):N0} files";
+        if (tree.HasIncompleteScan(node))
+        {
+            note += ". Folder scan incomplete.";
+        }
+
+        var entry = DiskUsageEntry.CreateCompleted(path, true, size, FormatBytes(size), note, ResolveFolderDisplayName(path));
         if (includeGrandchildren && tree.HasChildFolders(node))
         {
             entry.SetChildren(BuildChildEntries(tree, node, LargestFolderChildren, includeGrandchildren: false));

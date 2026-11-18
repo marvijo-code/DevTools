@@ -53,7 +53,7 @@ public sealed class ParallelFolderWalker
         Exception? failure = null;
         var options = new EnumerationOptions
         {
-            IgnoreInaccessible = true,
+            IgnoreInaccessible = false,
             RecurseSubdirectories = false,
             ReturnSpecialDirectories = false,
             AttributesToSkip = 0
@@ -77,6 +77,7 @@ public sealed class ParallelFolderWalker
                         long bytes = 0;
                         long files = 0;
                         long allocatedBytes = 0;
+                        var incomplete = false;
                         subfolders.Clear();
                         if (allocationReader is null ||
                             !allocationReader.TryRead(path, subfolders, cancellationToken, out bytes, out allocatedBytes, out files))
@@ -113,6 +114,7 @@ public sealed class ParallelFolderWalker
                             }
                             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                             {
+                                incomplete = true;
                             }
                         }
 
@@ -120,6 +122,11 @@ public sealed class ParallelFolderWalker
                         lock (builderLock)
                         {
                             builder.AddFilesToFolder(node, bytes, files, allocatedBytes);
+                            if (incomplete)
+                            {
+                                builder.MarkIncompleteDirectory(node);
+                            }
+
                             firstChild = builder.AppendEnumeratedChildren(node, subfolders);
                         }
 

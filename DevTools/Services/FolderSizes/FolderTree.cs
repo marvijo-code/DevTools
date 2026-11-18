@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Concurrent;
 using DevTools.Services.BiggestFiles.Ntfs;
 
@@ -21,6 +22,7 @@ public sealed class FolderTree
     private readonly long[]? _allocatedBytes;
     private readonly int[] _childStart;
     private readonly int[] _childIndex;
+    private readonly BitArray? _incompleteSubtrees;
     private ConcurrentDictionary<int, ChildNameIndex>? _childNameIndexes;
 
     internal FolderTree(
@@ -32,7 +34,9 @@ public sealed class FolderTree
         string engineName,
         TimeSpan elapsed,
         long[]? allocatedBytes = null,
-        NtfsRecordAllocation? ntfsAllocation = null)
+        NtfsRecordAllocation? ntfsAllocation = null,
+        BitArray? incompleteSubtrees = null,
+        int incompleteDirectoryCount = 0)
     {
         if (parent.Length == 0 || parent.Length != names.Length || parent.Length != totalBytes.Length ||
             parent.Length != fileCount.Length || (allocatedBytes is not null && parent.Length != allocatedBytes.Length))
@@ -46,6 +50,8 @@ public sealed class FolderTree
         _totalBytes = totalBytes;
         _fileCount = fileCount;
         _allocatedBytes = allocatedBytes;
+        _incompleteSubtrees = incompleteSubtrees;
+        IncompleteDirectoryCount = incompleteDirectoryCount;
         NtfsAllocation = ntfsAllocation;
         EngineName = engineName;
         Elapsed = elapsed;
@@ -94,6 +100,10 @@ public sealed class FolderTree
     public long TotalFiles => _fileCount[0];
 
     internal NtfsRecordAllocation? NtfsAllocation { get; }
+
+    internal int IncompleteDirectoryCount { get; }
+
+    internal bool HasIncompleteScan(int node) => _incompleteSubtrees?[node] ?? false;
 
     public long? GetAllocatedBytes(int node) => _allocatedBytes?[node];
 
@@ -402,6 +412,7 @@ public sealed class FolderTreeBuilder
     private readonly List<long> _ownFiles = [0];
     private readonly List<long> _knownTotal = [-1];
     private readonly List<long>? _ownAllocatedBytes;
+    private List<int>? _incompleteDirectories;
     private readonly Dictionary<(int Parent, string Name), int> _lookup = new(new NodeKeyComparer());
     private string? _lastDirectory;
     private int _lastDirectoryNode;
@@ -490,6 +501,11 @@ public sealed class FolderTreeBuilder
         FilesAdded += files;
     }
 
+    internal void MarkIncompleteDirectory(int node)
+    {
+        (_incompleteDirectories ??= []).Add(node);
+    }
+
     public FolderTree Build(string engineName, TimeSpan elapsed)
     {
         var count = _parent.Count;
@@ -520,7 +536,32 @@ public sealed class FolderTreeBuilder
             totals[0] = _knownTotal[0];
         }
 
-        return new FolderTree(_root, parent, _names.ToArray(), totals, files, engineName, elapsed, allocations);
+        return new FolderTree(_root, parent, _names.ToArray(), totals, files, engineName, elapsed, allocations,
+            incompleteSubtrees: BuildIncompleteSubtrees(parent), incompleteDirectoryCount: _incompleteDirectories?.Count ?? 0);
+    }
+
+    private BitArray? BuildIncompleteSubtrees(int[] parent)
+    {
+        if (_incompleteDirectories is not { } directories)
+        {
+            return null;
+        }
+
+        var incomplete = new BitArray(parent.Length);
+        foreach (var node in directories)
+        {
+            incomplete[node] = true;
+        }
+
+        for (var node = parent.Length - 1; node > 0; node--)
+        {
+            if (incomplete[node])
+            {
+                incomplete[parent[node]] = true;
+            }
+        }
+
+        return incomplete;
     }
 
     private int EnsureFolder(string fullPath)

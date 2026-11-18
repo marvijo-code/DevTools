@@ -116,6 +116,32 @@ public sealed class VolumeSpaceTests
     }
 
     [Fact]
+    public void DriveSummary_ReportsIncompleteFolderListingsAndRetainsMeasuredSizes()
+    {
+        var drive = new DriveDescriptor(@"C:\", "Test", "NTFS",
+            new VolumeSpace(1000, 300, 700, 0, 0, IsVolumeWide: true));
+        var builder = new FolderTreeBuilder(drive.RootPath, trackAllocation: true);
+        var partial = builder.AddFolder(@"C:\documents\protected");
+        var complete = builder.AddFolder(@"C:\complete");
+        builder.AddFilesToFolder(partial, 32, 1, 64);
+        builder.AddFilesToFolder(complete, 64, 1, 128);
+        builder.MarkIncompleteDirectory(partial);
+        var tree = builder.Build("Folder walk", TimeSpan.Zero);
+        var results = new Dictionary<string, DriveScanResult>
+        {
+            [drive.RootPath] = new DriveScanResult(drive, tree, tree.EngineName, "")
+        };
+
+        Assert.True(tree.HasIncompleteScan(partial));
+        Assert.True(tree.HasIncompleteScan(tree.Find(@"C:\documents")));
+        Assert.True(tree.HasIncompleteScan(0));
+        Assert.False(tree.HasIncompleteScan(complete));
+        Assert.Equal(96, tree.TotalBytes);
+        Assert.Equal(192, tree.GetAllocatedBytes(0));
+        Assert.Contains("Incomplete listings in 1 directory.", Assert.Single(DiskUsage.BuildDriveSummarySection([drive], results).Entries).Note);
+    }
+
+    [Fact]
     public void DriveSummary_AccountsForUsedBytesWhenTheScanFails()
     {
         var drive = new DriveDescriptor(@"C:\", "Test", "NTFS",

@@ -241,6 +241,27 @@ internal sealed class MftRecordTable
 internal static class MftTableLoader
 {
     private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly SemaphoreSlim ActiveScan = new(1, 1);
+
+    // Keep the reservation through aggregation as the full table remains live until the caller returns.
+    internal static async ValueTask<IDisposable> EnterScanAsync(CancellationToken cancellationToken)
+    {
+        await ActiveScan.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return new ScanLease();
+    }
+
+    private sealed class ScanLease : IDisposable
+    {
+        private int _released;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                ActiveScan.Release();
+            }
+        }
+    }
 
     public static async Task<MftRecordTable> LoadAsync(
         string scanRoot,

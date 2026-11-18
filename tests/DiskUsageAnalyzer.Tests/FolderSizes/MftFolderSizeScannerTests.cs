@@ -9,6 +9,23 @@ public sealed class MftFolderSizeScannerTests
     private const int Root = 5;
 
     [Fact]
+    public async Task ScanReservation_CancelsQueuedWorkAndCanBeReused()
+    {
+        using var active = await MftTableLoader.EnterScanAsync(CancellationToken.None);
+        using var cts = new CancellationTokenSource();
+        var queued = MftTableLoader.EnterScanAsync(cts.Token).AsTask();
+
+        Assert.False(queued.IsCompleted);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued);
+
+        active.Dispose();
+        active.Dispose();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        using var next = await MftTableLoader.EnterScanAsync(deadline.Token);
+    }
+
+    [Fact]
     public void RankChildFolders_RanksDirectChildrenBySubtreeSize()
     {
         var table = CreateTable(160);

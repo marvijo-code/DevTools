@@ -18,6 +18,7 @@ public sealed class MftScanner
     {
         var root = Path.GetFullPath(request.ScanRoot);
         var stopwatch = Stopwatch.StartNew();
+        using var scan = await MftTableLoader.EnterScanAsync(cancellationToken).ConfigureAwait(false);
 
         var table = await MftTableLoader.LoadAsync(
             root,
@@ -45,6 +46,11 @@ public sealed class MftScanner
 
         for (var index = 0; index < table.RecordCount; index++)
         {
+            if ((index & 4095) == 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
             if (!table.IsNamedFile(index))
             {
                 continue;

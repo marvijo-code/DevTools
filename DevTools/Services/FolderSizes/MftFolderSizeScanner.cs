@@ -21,6 +21,7 @@ public sealed class MftFolderSizeScanner
     {
         var root = Path.GetFullPath(request.ScanRoot);
         var stopwatch = Stopwatch.StartNew();
+        using var scan = await MftTableLoader.EnterScanAsync(cancellationToken).ConfigureAwait(false);
 
         var table = await MftTableLoader.LoadAsync(
             root,
@@ -70,6 +71,7 @@ public sealed class MftFolderSizeScanner
         {
             var root = FolderTree.NormalizeRoot(driveRoot);
             var stopwatch = Stopwatch.StartNew();
+            using var scan = await MftTableLoader.EnterScanAsync(cancellationToken).ConfigureAwait(false);
             var table = await MftTableLoader.LoadAsync(
                 root,
                 (parsed, total, elapsed) => progress?.Report(new FolderSizeProgress(

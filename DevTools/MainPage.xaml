@@ -519,8 +519,11 @@
                       Grid.Row="2"
                       Header="Auth, Refresh, and Repository Setup"
                       HorizontalAlignment="Stretch"
-                      IsExpanded="False">
-              <Border Padding="12"
+                      IsExpanded="False"
+                      Expanding="RepositoryExpander_Expanding">
+              <Border x:Name="RepositorySetupContent"
+                      x:Load="False"
+                      Padding="12"
                       CornerRadius="14"
                       Background="{ThemeResource LayerFillColorDefaultBrush}"
                       BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -1177,7 +1180,9 @@
                       <Expander Header="{Binding Title}"
                                 HorizontalAlignment="Stretch"
                                 IsExpanded="{Binding IsExpanded, Mode=TwoWay}">
-                        <Border Padding="10"
+                        <Border x:Name="DiskSectionContent"
+                                x:Load="{x:Bind IsExpanded, Mode=OneWay}"
+                                Padding="10"
                                 Margin="0,0,0,8"
                                 CornerRadius="14"
                                 HorizontalAlignment="Stretch"
@@ -2577,14 +2582,20 @@
                   </ItemsControl.ItemTemplate>
                 </ItemsControl>
               </StackPanel>
-              <StackPanel Spacing="14" Visibility="{Binding HasSelectedActivity, Converter={StaticResource BoolToVisibilityConverter}}">
+              <StackPanel x:Name="SelectedActivityDetails"
+                          x:Load="False"
+                          Spacing="14"
+                          Visibility="{Binding HasSelectedActivity, Converter={StaticResource BoolToVisibilityConverter}}">
                 <TextBlock Text="{Binding SelectedActivity.Title}" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" />
                 <TextBlock Text="{Binding SelectedActivity.Description}" FontSize="14" TextWrapping="Wrap" />
                 <TextBlock Text="Memory" FontSize="14" FontWeight="SemiBold" />
                 <TextBlock Text="{Binding SelectedActivity.MemoryLabel}" FontSize="16" />
                 <TextBlock Text="{Binding SelectedActivity.Reference}" FontSize="13" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
               </StackPanel>
-            <StackPanel Spacing="12" Visibility="{Binding HasSelectedProcess, Converter={StaticResource BoolToVisibilityConverter}}">
+            <StackPanel x:Name="SelectedProcessDetails"
+                        x:Load="False"
+                        Spacing="12"
+                        Visibility="{Binding HasSelectedProcess, Converter={StaticResource BoolToVisibilityConverter}}">
               <TextBlock Text="{Binding SelectedProcess.DisplayName}" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" />
               <Border Style="{StaticResource ContextCardStyle}">
                 <StackPanel Spacing="6">

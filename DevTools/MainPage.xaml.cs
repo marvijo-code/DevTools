@@ -1080,9 +1080,21 @@ public sealed partial class MainPage : Page
         await ViewModel.DeleteBiggestFileAsync(entry, CancellationToken.None);
     }
 
+    private void RepositoryExpander_Expanding(Expander sender, ExpanderExpandingEventArgs args) =>
+        EnsureRepositorySetupLoaded();
+
+    private void EnsureRepositorySetupLoaded()
+    {
+        if (RepositorySetupContent is null)
+        {
+            FindName(nameof(RepositorySetupContent));
+        }
+    }
+
     private async void NavigateToRepos_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowWorkflowExplorer();
+        EnsureRepositorySetupLoaded();
         RepositoryExpander.IsExpanded = true;
         OwnerInputBox.Focus(FocusState.Programmatic);
         await EnsureWorkflowExplorerInitializedAsync();
@@ -1107,6 +1119,12 @@ public sealed partial class MainPage : Page
         if (e.PropertyName == nameof(MainViewModel.ActiveTab))
         {
             ApplyActivePaneState();
+        }
+
+        if (ViewModel.IsKillProcessesVisible &&
+            e.PropertyName is nameof(MainViewModel.HasSelectedActivity) or nameof(MainViewModel.HasSelectedProcess))
+        {
+            EnsureSelectedProcessDetailsLoaded();
         }
 
         if (e.PropertyName == nameof(MainViewModel.NeedsLiveDisplayUpdates))
@@ -1216,6 +1234,11 @@ public sealed partial class MainPage : Page
         SetDeferredPaneVisibility(ProcessDetailsScroll, nameof(ProcessDetailsScroll), isKillVisible);
         SetDeferredPaneVisibility(StorageOverviewScroll, nameof(StorageOverviewScroll), isDiskVisible);
         SetDeferredPaneVisibility(SystemOverviewScroll, nameof(SystemOverviewScroll), isResourcesVisible);
+        if (isKillVisible)
+        {
+            EnsureSelectedProcessDetailsLoaded();
+        }
+
         if (firstRunDetailsLoad)
         {
             UpdateRunDetailsExpanders();
@@ -1228,6 +1251,19 @@ public sealed partial class MainPage : Page
         ApplyTabButtonState(StorageNavigationButton, isDiskVisible);
         ApplyTabButtonState(OpenWorkNavigationButton, isOpenWorkVisible);
         ApplyTabButtonState(WorktreesNavigationButton, isWorktreesVisible);
+    }
+
+    private void EnsureSelectedProcessDetailsLoaded()
+    {
+        if (ViewModel.HasSelectedActivity && SelectedActivityDetails is null)
+        {
+            FindName(nameof(SelectedActivityDetails));
+        }
+
+        if (ViewModel.HasSelectedProcess && SelectedProcessDetails is null)
+        {
+            FindName(nameof(SelectedProcessDetails));
+        }
     }
 
     private void SetDeferredPaneVisibility(FrameworkElement? pane, string name, bool visible)

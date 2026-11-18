@@ -1,5 +1,6 @@
 using DevTools.Models;
 using DevTools.Services;
+using DevTools.Services.FolderSizes;
 using Xunit;
 
 namespace DiskUsageAnalyzer.Tests.FolderSizes;
@@ -52,6 +53,43 @@ public sealed class DiskUsageExpansionTests
     }
 
     [Fact]
+    public async Task PriorityScan_ReusesTheSameTreeByDriveLetterAndVolumeGuid()
+    {
+        var analyzer = new DevTools.Services.DiskUsageAnalyzer();
+        using var stopAfterInventory = new CancellationTokenSource();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            analyzer.CaptureAsync(new CancelOnProgress(stopAfterInventory), stopAfterInventory.Token));
+        Assert.Empty(analyzer.Trees);
+
+        var fixture = Directory.CreateTempSubdirectory("devtools-overlay-alias-");
+        var child = fixture.CreateSubdirectory("child");
+        var file = Path.Combine(child.FullName, "data.bin");
+        try
+        {
+            await File.WriteAllBytesAsync(file, new byte[512]);
+            var volume = Assert.IsType<string>(WindowsVolumePaths.GetVolumeName(fixture.Root.FullName));
+            var aliasPath = Path.Combine(volume, Path.GetRelativePath(fixture.Root.FullName, fixture.FullName));
+
+            var entry = DiskUsageEntry.CreateCompleted(aliasPath, true, 512, "512 B");
+            var children = await analyzer.ExpandEntryAsync(entry, CancellationToken.None);
+            Assert.Equal(child.FullName, Assert.Single(children).Path);
+
+            Assert.True(await analyzer.SizeFolderNowAsync(aliasPath, CancellationToken.None));
+            Assert.True(analyzer.TryFindNode(child.FullName, out var byLetter, out var letterNode));
+            Assert.True(analyzer.TryFindNode(Path.Combine(aliasPath, child.Name), out var byGuid, out var guidNode));
+            Assert.Same(byLetter, byGuid);
+            Assert.Equal(letterNode, guidNode);
+            Assert.Equal(512, byLetter!.GetTotalBytes(letterNode));
+        }
+        finally
+        {
+            File.Delete(file);
+            child.Delete();
+            fixture.Delete();
+        }
+    }
+
+    [Fact]
     public void SetChildren_MarksChildrenAsLoadedSoExpansionIsNotRepeated()
     {
         var entry = DiskUsageEntry.CreateCompleted(@"C:\Users", true, 100, "100 B");
@@ -64,5 +102,10 @@ public sealed class DiskUsageExpansionTests
 
         Assert.True(entry.HasLoadedChildren);
         Assert.True(entry.HasChildren);
+    }
+
+    private sealed class CancelOnProgress(CancellationTokenSource source) : IProgress<DiskUsageProgress>
+    {
+        public void Report(DiskUsageProgress value) => source.Cancel();
     }
 }

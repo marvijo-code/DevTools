@@ -3,7 +3,8 @@ using System.Text;
 
 namespace DevTools.Services.FolderSizes;
 
-internal readonly record struct VolumeMountAlias(string AccessPath, string ScanRoot);
+internal readonly record struct VolumeMountAlias(string AccessPath, string ScanRoot, string VolumeName);
+internal readonly record struct ResolvedVolumeMount(VolumeMountAlias Mount, string Path);
 
 internal static class WindowsVolumePaths
 {
@@ -106,7 +107,7 @@ internal static class WindowsVolumePaths
                 if (Path.IsPathFullyQualified(path) && Path.EndsInDirectorySeparator(path) &&
                     !path.Equals(drive.RootPath, StringComparison.OrdinalIgnoreCase))
                 {
-                    aliases.Add(new VolumeMountAlias(path, drive.RootPath));
+                    aliases.Add(new VolumeMountAlias(path, drive.RootPath, volumeName));
                 }
             }
         }
@@ -114,7 +115,7 @@ internal static class WindowsVolumePaths
         return [.. aliases];
     }
 
-    internal static (string Root, string Path)? ResolveMountAlias(string path, ReadOnlySpan<VolumeMountAlias> aliases)
+    internal static ResolvedVolumeMount? ResolveMountAlias(string path, ReadOnlySpan<VolumeMountAlias> aliases)
     {
         if (aliases.IsEmpty)
         {
@@ -123,7 +124,7 @@ internal static class WindowsVolumePaths
 
         var normalized = path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
         var bestLength = 0;
-        string? scanRoot = null;
+        VolumeMountAlias best = default;
         foreach (var alias in aliases)
         {
             // Include the separator in the length but also accept a mount root entered without it.
@@ -136,12 +137,13 @@ internal static class WindowsVolumePaths
             }
 
             bestLength = length;
-            scanRoot = alias.ScanRoot;
+            best = alias;
         }
 
-        return scanRoot is null
+        return bestLength == 0
             ? null
-            : (scanRoot, string.Concat(scanRoot.AsSpan(), normalized.AsSpan(Math.Min(bestLength, normalized.Length))));
+            : new ResolvedVolumeMount(best, string.Concat(best.ScanRoot.AsSpan(),
+                normalized.AsSpan(Math.Min(bestLength, normalized.Length))));
     }
 
     internal static string[] GetAccessPaths(string volumeName)

@@ -22,8 +22,9 @@ public sealed class VolumeSpaceTests
         Assert.Equal(identity, systemDrive.VolumeName);
         Assert.Contains(WindowsVolumePaths.GetAccessPaths(identity!), accessPath => accessPath.Equals(path, StringComparison.OrdinalIgnoreCase));
         var aliases = WindowsVolumePaths.GetMountAliases(all, CancellationToken.None);
-        Assert.Equal((path, Path.Combine(path, "Windows")),
-            WindowsVolumePaths.ResolveMountAlias(identity + "Windows", aliases));
+        var resolved = Assert.IsType<ResolvedVolumeMount>(WindowsVolumePaths.ResolveMountAlias(identity + "Windows", aliases));
+        Assert.Equal(new VolumeMountAlias(identity!, path, identity!), resolved.Mount);
+        Assert.Equal(Path.Combine(path, "Windows"), resolved.Path);
         Assert.DoesNotContain(all, drive => drive.RootPath.Equals(identity, StringComparison.OrdinalIgnoreCase));
     }
 
@@ -61,8 +62,8 @@ public sealed class VolumeSpaceTests
     {
         VolumeMountAlias[] aliases =
         [
-            new(@"C:\Mount\Disk\", @"D:\"),
-            new(@"C:\Mount\Disk\Nested\", @"E:\")
+            new(@"C:\Mount\Disk\", @"D:\", @"\\?\Volume{96175894-8c86-41c9-b1d5-6fa9ddba8c34}\"),
+            new(@"C:\Mount\Disk\Nested\", @"E:\", @"\\?\Volume{d301cfcd-d09b-430b-90de-f44dd9e5610e}\")
         ];
 
         Assert.Equal(expected, WindowsVolumePaths.ResolveMountAlias(path, aliases)?.Path);

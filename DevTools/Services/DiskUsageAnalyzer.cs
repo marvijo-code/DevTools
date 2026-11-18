@@ -265,8 +265,9 @@ public sealed class DiskUsageAnalyzer
             return BuildChildEntries(tree!, node, LargestFolderChildren, includeGrandchildren: false);
         }
 
-        var walked = await _driveUsage.WalkFolderAsync(entry.Path, cancellationToken).ConfigureAwait(false);
-        var walkedNode = walked.Find(entry.Path);
+        var scanPath = ResolveWalkPath(entry.Path);
+        var walked = await _driveUsage.WalkFolderAsync(scanPath, cancellationToken).ConfigureAwait(false);
+        var walkedNode = walked.Find(scanPath);
         return walkedNode < 0 ? [] : BuildChildEntries(walked, walkedNode, LargestFolderChildren, includeGrandchildren: false);
     }
 
@@ -288,9 +289,10 @@ public sealed class DiskUsageAnalyzer
         lock (_treesLock)
         {
             var alias = WindowsVolumePaths.ResolveMountAlias(path, _mountAliases);
-            if (_trees.TryGetValue(alias?.Root ?? root, out var found))
+            var scanPath = alias?.Path ?? path;
+            if (_trees.TryGetValue(alias?.Mount.ScanRoot ?? root, out var found))
             {
-                var foundNode = found.Find(alias?.Path ?? path);
+                var foundNode = found.Find(scanPath);
                 if (foundNode >= 0)
                 {
                     tree = found;
@@ -299,30 +301,71 @@ public sealed class DiskUsageAnalyzer
                 }
             }
 
-            // Not in a drive tree (yet): use a folder the user clicked that was sized on demand.
-            var trimmed = Path.TrimEndingDirectorySeparator(path.Trim());
-            foreach (var (folder, overlay) in _overlayTrees)
-            {
-                var underOverlay = trimmed.Equals(folder, StringComparison.Ordinal)
-                    || (trimmed.Length > folder.Length
-                        && trimmed.StartsWith(folder, StringComparison.Ordinal)
-                        && trimmed[folder.Length] == Path.DirectorySeparatorChar);
-                if (!underOverlay)
-                {
-                    continue;
-                }
+            // A priority scan may have finished while the drive is still being scanned.
+            return TryFindOverlayNode(scanPath, out tree, out node)
+                || (alias.HasValue && TryFindOverlayNode(path, out tree, out node));
+        }
+    }
 
-                var overlayNode = overlay.Find(path);
-                if (overlayNode >= 0)
+    private bool TryFindOverlayNode(string path, out FolderTree? tree, out int node)
+    {
+        var trimmed = Path.TrimEndingDirectorySeparator(path.Trim().Replace(
+            Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar));
+        foreach (var (folder, overlay) in _overlayTrees)
+        {
+            var underOverlay = trimmed.Equals(folder, StringComparison.Ordinal)
+                || (trimmed.Length > folder.Length
+                    && trimmed.StartsWith(folder, StringComparison.Ordinal)
+                    && (Path.EndsInDirectorySeparator(folder) || trimmed[folder.Length] == Path.DirectorySeparatorChar));
+            if (!underOverlay)
+            {
+                continue;
+            }
+
+            var overlayNode = overlay.Find(path);
+            if (overlayNode >= 0)
+            {
+                tree = overlay;
+                node = overlayNode;
+                return true;
+            }
+        }
+
+        tree = null;
+        node = -1;
+        return false;
+    }
+
+    private string ResolveWalkPath(string path)
+    {
+        if (!Path.IsPathFullyQualified(path))
+        {
+            return path;
+        }
+
+        ResolvedVolumeMount? resolved;
+        lock (_treesLock)
+        {
+            resolved = WindowsVolumePaths.ResolveMountAlias(path, _mountAliases);
+            if (resolved.HasValue)
+            {
+                var fullPath = Path.GetFullPath(path);
+                if (!fullPath.Equals(path, StringComparison.Ordinal))
                 {
-                    tree = overlay;
-                    node = overlayNode;
-                    return true;
+                    resolved = WindowsVolumePaths.ResolveMountAlias(fullPath, _mountAliases);
                 }
             }
         }
 
-        return false;
+        // A drive letter or mount can change while the volume inventory is cached.
+        if (resolved is { } alias &&
+            alias.Mount.VolumeName.Equals(WindowsVolumePaths.GetVolumeName(alias.Mount.AccessPath), StringComparison.OrdinalIgnoreCase) &&
+            alias.Mount.VolumeName.Equals(WindowsVolumePaths.GetVolumeName(alias.Mount.ScanRoot), StringComparison.OrdinalIgnoreCase))
+        {
+            return alias.Path;
+        }
+
+        return path;
     }
 
     /// <summary>
@@ -341,10 +384,11 @@ public sealed class DiskUsageAnalyzer
             return false;
         }
 
-        var tree = await _driveUsage.WalkFolderAsync(path, cancellationToken).ConfigureAwait(false);
+        var scanPath = ResolveWalkPath(path);
+        var tree = await _driveUsage.WalkFolderAsync(scanPath, cancellationToken).ConfigureAwait(false);
         lock (_treesLock)
         {
-            _overlayTrees[Path.TrimEndingDirectorySeparator(Path.GetFullPath(path))] = tree;
+            _overlayTrees[Path.TrimEndingDirectorySeparator(Path.GetFullPath(scanPath))] = tree;
         }
 
         return true;
@@ -386,7 +430,8 @@ public sealed class DiskUsageAnalyzer
 
         try
         {
-            var walked = await _driveUsage.WalkFolderAsync(path, cancellationToken).ConfigureAwait(false);
+            var scanPath = ResolveWalkPath(path);
+            var walked = await _driveUsage.WalkFolderAsync(scanPath, cancellationToken).ConfigureAwait(false);
             return walked.TotalBytes;
         }
         catch (OperationCanceledException)

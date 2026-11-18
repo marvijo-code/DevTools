@@ -90,7 +90,7 @@ internal sealed class NtfsVolumeBitmap
         {
             long next = 0;
             long inUse = 0;
-            long matched = 0;
+            long unmatchedAllocated = 0;
             long recordedFree = 0;
             while (next < _clusters)
             {
@@ -116,8 +116,12 @@ internal sealed class NtfsVolumeBitmap
 
                     var observed = (ulong)observedWords[i];
                     inUse += BitOperations.PopCount(allocated);
-                    matched += BitOperations.PopCount(allocated & observed);
-                    recordedFree += BitOperations.PopCount(observed & ~allocated);
+                    // Matching words contribute no discrepancies.
+                    if (allocated != observed)
+                    {
+                        unmatchedAllocated += BitOperations.PopCount(allocated & ~observed);
+                        recordedFree += BitOperations.PopCount(observed & ~allocated);
+                    }
                 }
 
                 var tailBits = (int)(end & 63);
@@ -126,7 +130,7 @@ internal sealed class NtfsVolumeBitmap
                     var allocated = ReadTailBits(buffer.AsSpan(offset + fullBytes, (tailBits + 7) / 8), tailBits);
                     var observed = (ulong)_observed[firstWord + fullWords];
                     inUse += BitOperations.PopCount(allocated);
-                    matched += BitOperations.PopCount(allocated & observed);
+                    unmatchedAllocated += BitOperations.PopCount(allocated & ~observed);
                     recordedFree += BitOperations.PopCount(observed & ~allocated);
                 }
 
@@ -134,7 +138,9 @@ internal sealed class NtfsVolumeBitmap
             }
 
             return new NtfsBitmapAllocation(
-                checked(inUse * bytesPerCluster), checked(matched * bytesPerCluster), checked(recordedFree * bytesPerCluster));
+                checked(inUse * bytesPerCluster),
+                checked((inUse - unmatchedAllocated) * bytesPerCluster),
+                checked(recordedFree * bytesPerCluster));
         }
         finally
         {

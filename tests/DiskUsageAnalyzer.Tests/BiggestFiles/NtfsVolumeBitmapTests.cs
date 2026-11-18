@@ -73,6 +73,46 @@ public sealed class NtfsVolumeBitmapTests
     }
 
     [Fact]
+    public void Reconcile_CountsDiscrepanciesInMixedWordsAndTheFinalPartialWord()
+    {
+        const int clusters = 2059;
+        var map = Assert.IsType<NtfsVolumeBitmap>(NtfsVolumeBitmap.TryCreate(clusters, 1024 * 1024));
+        var payload = new byte[(clusters + 7) / 8];
+        var inUse = 0;
+        var matched = 0;
+        var recordedFree = 0;
+        for (var cluster = 0; cluster < clusters; cluster++)
+        {
+            var observed = cluster % 13 < 5;
+            var allocated = cluster < 1024 ? observed : cluster % 17 < 7;
+            if (observed)
+            {
+                map.Mark(cluster, 1);
+            }
+
+            if (allocated)
+            {
+                SetBits(payload, cluster, 1);
+                inUse++;
+                matched += observed ? 1 : 0;
+            }
+            else if (observed)
+            {
+                recordedFree++;
+            }
+        }
+
+        payload[^1] |= 0b1111_1000;
+        var result = map.Reconcile(1, (start, output) =>
+        {
+            var offset = (int)(start / 8);
+            return WriteReply(start, clusters - start, payload.AsSpan(offset, Math.Min(32, payload.Length - offset)), output);
+        }, CancellationToken.None);
+
+        Assert.Equal(new NtfsBitmapAllocation(inUse, matched, recordedFree), result);
+    }
+
+    [Fact]
     public void TryCreate_RespectsMemoryBudget()
     {
         Assert.Null(NtfsVolumeBitmap.TryCreate(4096, null));

@@ -194,6 +194,23 @@ public sealed class MftFolderSizeScannerTests
     }
 
     [Fact]
+    public void ResolveDirectoryRecord_PrefersExactCaseAndRejectsAmbiguousOrForeignPaths()
+    {
+        var table = CreateTable(80);
+        AddDirectory(table, 24, Root, "Workspace");
+        AddDirectory(table, 25, 24, "Repo");
+        AddDirectory(table, 26, 24, "repo");
+        AddDirectory(table, 27, 26, "Artifacts");
+
+        Assert.Equal((uint)Root, table.ResolveDirectoryRecord(@"C:\"));
+        Assert.Equal(25U, table.ResolveDirectoryRecord(@"C:\workspace\Repo"));
+        Assert.Equal(27U, table.ResolveDirectoryRecord(@"C:\workspace\repo\ARTIFACTS"));
+        Assert.Null(table.ResolveDirectoryRecord(@"C:\Workspace\Repo\Artifacts"));
+        Assert.Null(table.ResolveDirectoryRecord(@"C:\Workspace\REPO\Artifacts"));
+        Assert.Null(table.ResolveDirectoryRecord(@"D:\Workspace\repo"));
+    }
+
+    [Fact]
     public void IsUnder_CachesValidAndInvalidPathsIncludingCycles()
     {
         var table = CreateTable(80);

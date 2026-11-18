@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Channels;
 using DevTools.Services.FolderSizes;
@@ -88,42 +89,55 @@ internal sealed class MftRecordTable
     /// <summary>Resolves an absolute directory path to its MFT record number, or null when not found.</summary>
     public uint? ResolveDirectoryRecord(string path)
     {
-        var relative = TrimTrailingSeparators(path)[TrimTrailingSeparators(VolumeRoot).Length..]
-            .Trim(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (relative.Length == 0)
+        var start = FolderTree.GetRelativeStart(VolumeRoot, path);
+        if (start < 0)
+        {
+            return null;
+        }
+
+        var components = path[start..].Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+        if (components.Length == 0)
         {
             return RootRecordNumber;
         }
 
-        var components = relative.Split(
-            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
-            StringSplitOptions.RemoveEmptyEntries);
-
-        // Index directories by (parent, lowercase name) for the walk.
-        var directoryIndex = new Dictionary<(uint Parent, string Name), uint>();
+        // A single path needs only the records whose names occur in one of its components.
+        var componentNames = new HashSet<string>(components, StringComparer.OrdinalIgnoreCase);
+        var childrenByParent = new Dictionary<uint, List<int>>();
         for (var index = 0; index < Flags.Length; index++)
         {
-            if (!IsNamedDirectory(index))
+            if (!IsNamedDirectory(index) || Names[index] is not { } name || !componentNames.Contains(name))
             {
                 continue;
             }
 
-            var name = Names[index];
-            if (name is not null)
+            var parent = Parent[index];
+            if (!childrenByParent.TryGetValue(parent, out var children))
             {
-                directoryIndex[(Parent[index], name.ToLowerInvariant())] = (uint)index;
+                children = [];
+                childrenByParent.Add(parent, children);
             }
+
+            children.Add(index);
         }
 
         var current = RootRecordNumber;
         foreach (var component in components)
         {
-            if (!directoryIndex.TryGetValue((current, component.ToLowerInvariant()), out var next))
+            if (!childrenByParent.TryGetValue(current, out var children))
             {
                 return null;
             }
 
-            current = next;
+            var next = FolderTree.FindChildByName(CollectionsMarshal.AsSpan(children), Names, component);
+            if (next < 0)
+            {
+                return null;
+            }
+
+            current = (uint)next;
         }
 
         return current;
@@ -230,10 +244,7 @@ internal sealed class MftRecordTable
         return full;
     }
 
-    private static string TrimTrailingSeparators(string path)
-    {
-        return path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-    }
+
 }
 
 /// <summary>

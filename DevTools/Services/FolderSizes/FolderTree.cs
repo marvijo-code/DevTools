@@ -213,28 +213,8 @@ public sealed class FolderTree
                 continue;
             }
 
-            var next = -1;
-            var ambiguous = false;
-            for (var i = _childStart[current]; i < _childStart[current + 1]; i++)
-            {
-                var child = _childIndex[i];
-                if (!part.Equals(_names[child], StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                if (part.SequenceEqual(_names[child]))
-                {
-                    next = child;
-                    ambiguous = false;
-                    break;
-                }
-
-                ambiguous = next >= 0;
-                next = child;
-            }
-
-            if (next < 0 || ambiguous)
+            var next = FindChildByName(_childIndex.AsSpan(_childStart[current], GetChildFolderCount(current)), _names, part);
+            if (next < 0)
             {
                 return -1;
             }
@@ -243,6 +223,30 @@ public sealed class FolderTree
         }
 
         return current;
+    }
+
+    internal static int FindChildByName(ReadOnlySpan<int> children, string?[] names, ReadOnlySpan<char> searchName)
+    {
+        var match = -1;
+        var ambiguous = false;
+        foreach (var child in children)
+        {
+            var name = names[child];
+            if (!searchName.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (searchName.SequenceEqual(name))
+            {
+                return child;
+            }
+
+            ambiguous = match >= 0;
+            match = child;
+        }
+
+        return ambiguous ? -1 : match;
     }
 
     internal static string NormalizeRoot(string rootPath)

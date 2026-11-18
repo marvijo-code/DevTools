@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Runtime.InteropServices;
 using DevTools.Services.Resources;
 using Microsoft.Win32.SafeHandles;
@@ -34,7 +35,8 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
         return Math.Min(Math.Min(cpuLimit, memoryLimit), deviceLimit);
     }
 
-    public (int ChunkBytes, int Parsers, int QueueCapacity) MftPlan(int records, long initializedBytes, bool includeFileNames)
+    public (int ChunkBytes, int Parsers, int QueueCapacity, int CarryBytes) MftPlan(
+        int records, long initializedBytes, int clusterBytes, int recordBytes, bool includeFileNames)
     {
         // Estimate the indexed columns, temporary tree indexes and decoded names. Leave half of the
         // available commit and physical memory alone so a drive refresh can coexist with other apps.
@@ -44,24 +46,57 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
             throw new InsufficientMemoryException("Available memory is too low for an in-memory NTFS table.");
         }
 
-        var bufferBudget = MemoryHeadroom is long headroom
-            ? Math.Clamp((headroom - estimatedTableBytes) / 16, 6L * MiB, 192L * MiB)
-            : 64L * MiB;
-        var chunkBytes = bufferBudget >= 96L * MiB ? 8 * MiB : bufferBudget >= 24L * MiB ? 4 * MiB : MiB;
+        var bufferBudget = 64L * MiB;
+        if (MemoryHeadroom is long headroom)
+        {
+            var remaining = headroom - estimatedTableBytes;
+            bufferBudget = Math.Min(Math.Clamp(remaining / 16, 6L * MiB, 192L * MiB), remaining / 2);
+        }
+
+        var targetChunkBytes = bufferBudget >= 96L * MiB ? 8 * MiB : bufferBudget >= 24L * MiB ? 4 * MiB : MiB;
         var cpuParsers = Math.Clamp(LogicalProcessors / 2, 1, 6);
 
         // Give the parsers several chances to take work while the reader is still running.
         const int batchesPerParser = 8;
-        while (chunkBytes > MiB && initializedBytes / chunkBytes < cpuParsers * batchesPerParser)
+        while (targetChunkBytes > MiB && initializedBytes / targetChunkBytes < cpuParsers * batchesPerParser)
         {
-            chunkBytes /= 2;
+            targetChunkBytes /= 2;
         }
 
-        // A carry-over fragment can round the ArrayPool rental up to twice the chunk size.
-        var blocks = (int)(bufferBudget / (2 * chunkBytes));
-        var parsers = Math.Min(cpuParsers, blocks - 2);
-        var queue = Math.Clamp(blocks - parsers - 1, 1, 4);
-        return (chunkBytes, parsers, queue);
+        // Each read ends on a cluster boundary. Its unfinished record can only contain
+        // a multiple of the common divisor, and aligned records need no carry buffer.
+        var divisor = clusterBytes;
+        var remainder = recordBytes;
+        while (remainder != 0)
+        {
+            (divisor, remainder) = (remainder, divisor % remainder);
+        }
+
+        var carryBytes = recordBytes - divisor;
+        var initializedClusters = (initializedBytes - 1) / clusterBytes + 1;
+        while (true)
+        {
+            var clustersPerChunk = (int)Math.Min(initializedClusters, Math.Max(1, targetChunkBytes / clusterBytes));
+            var chunkBytes = clustersPerChunk * clusterBytes;
+            // Shared ArrayPool rents power-of-two buffers. Budget the carry separately.
+            var bucket = (long)BitOperations.RoundUpToPowerOf2((ulong)Math.Max(16L, (long)chunkBytes + carryBytes));
+            var blocks = (bufferBudget - carryBytes) / bucket;
+            if (blocks >= 3)
+            {
+                // Keep a slot for the reader and at least one block waiting for a parser.
+                var parsers = (int)Math.Min(cpuParsers, blocks - 2);
+                // A pending batch per parser is enough to keep the workers fed.
+                var queue = (int)Math.Min(blocks - parsers - 1, Math.Min(parsers, 4));
+                return (chunkBytes, parsers, queue, carryBytes);
+            }
+
+            if (clustersPerChunk == 1)
+            {
+                throw new InsufficientMemoryException("Available memory is too low for NTFS read buffers.");
+            }
+
+            targetChunkBytes /= 2;
+        }
     }
 
     internal static bool? ReadSeekPenalty(string driveRoot)

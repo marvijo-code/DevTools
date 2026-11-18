@@ -204,6 +204,17 @@ public sealed class MftExtentMapReaderTests
         }
     }
 
+    [Theory]
+    [InlineData(8, 6, 2)]
+    [InlineData(4, 6, 4)]
+    [InlineData(4, 1, 1)]
+    public void LimitParserCount_UsesOnlyReadsThatTouchInitializedClusters(int clustersPerChunk, int limit, int expected)
+    {
+        var geometry = new NtfsVolumeData(512, 1024, 7 * 1024, 10, 200);
+        var readers = MftTableLoader.LimitParserCount(geometry, [(10, 7), (50, 24), (100, 20)], clustersPerChunk, limit);
+        Assert.Equal(expected, readers);
+    }
+
     [Fact]
     public async Task LoadVolumeAsync_DoesNotReadUninitializedClustersInTheLastMftExtent()
     {

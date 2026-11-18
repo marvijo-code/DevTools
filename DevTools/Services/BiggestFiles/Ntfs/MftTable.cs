@@ -310,8 +310,10 @@ internal static class MftTableLoader
     {
         var recordCount = GetRecordCount(geometry);
         var recordSize = (int)geometry.BytesPerFileRecordSegment;
+        var clusterBytes = (int)geometry.BytesPerCluster;
         var resources = ScanResources.Capture();
-        var (chunkBytes, parserCount, queueCapacity) = resources.MftPlan(recordCount, geometry.MftValidDataLength, keepFileNames);
+        var (chunkBytes, parserCount, queueCapacity, carryBytes) = resources.MftPlan(
+            recordCount, geometry.MftValidDataLength, clusterBytes, recordSize, keepFileNames);
 
         // Check the full MFT mapping before allocating its in-memory columns.
         await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -322,11 +324,7 @@ internal static class MftTableLoader
         }, cancellationToken);
         ValidateMftExtents(geometry, extents);
 
-        // The last chunk of each physical extent can be partial.
-        var clusterBytes = (int)geometry.BytesPerCluster;
-        var readBytes = Math.Max(1, chunkBytes / clusterBytes) * clusterBytes;
-        var possibleChunks = (geometry.MftValidDataLength - 1) / readBytes + extents.Count;
-        parserCount = (int)Math.Min(parserCount, possibleChunks);
+        parserCount = LimitParserCount(geometry, extents, chunkBytes / clusterBytes, parserCount);
 
         // Structure-of-arrays table, indexed by MFT record number.
         var parent = new uint[recordCount];
@@ -363,7 +361,7 @@ internal static class MftTableLoader
         }
 
         var referencedClusters = await ParseAllRecordsAsync(
-            volume, geometry, extents, recordSize, recordCount, chunkBytes, parserCount, queueCapacity,
+            volume, geometry, extents, recordSize, recordCount, chunkBytes, parserCount, queueCapacity, carryBytes,
             parent, flags, realSize, allocSize, lastWrite, names, keepFileNames, recordAllocation, referenceSequences,
             observedBitmap, OnParsed,
             cancellationToken).ConfigureAwait(false);
@@ -457,6 +455,31 @@ internal static class MftTableLoader
         }
     }
 
+    internal static int LimitParserCount(NtfsVolumeData geometry, List<(long Lcn, long ClusterCount)> extents,
+        int clustersPerChunk, int parserLimit)
+    {
+        // Count only batches that intersect initialized data. Reserved extents never reach the parsers.
+        var clustersRemaining = (geometry.MftValidDataLength - 1) / geometry.BytesPerCluster + 1;
+        long batches = 0;
+        foreach (var (_, clusterCount) in extents)
+        {
+            var clusters = Math.Min(clusterCount, clustersRemaining);
+            batches += (clusters - 1) / clustersPerChunk + 1;
+            if (batches >= parserLimit)
+            {
+                return parserLimit;
+            }
+
+            clustersRemaining -= clusters;
+            if (clustersRemaining == 0)
+            {
+                break;
+            }
+        }
+
+        return (int)batches;
+    }
+
     private static async Task<UInt128> ParseAllRecordsAsync(
         Microsoft.Win32.SafeHandles.SafeFileHandle volume,
         NtfsVolumeData geometry,
@@ -466,6 +489,7 @@ internal static class MftTableLoader
         int targetChunkBytes,
         int parserCount,
         int queueCapacity,
+        int carryBytes,
         uint[] parent,
         byte[] flags,
         long[] realSize,
@@ -480,7 +504,7 @@ internal static class MftTableLoader
         CancellationToken cancellationToken)
     {
         var clusterBytes = (int)geometry.BytesPerCluster;
-        var clustersPerChunk = Math.Max(1, targetChunkBytes / clusterBytes);
+        var clustersPerChunk = targetChunkBytes / clusterBytes;
 
         var channel = Channel.CreateBounded<Block>(new BoundedChannelOptions(queueCapacity)
         {
@@ -613,7 +637,7 @@ internal static class MftTableLoader
         }
 
         // Reader: stream extents, emit record-aligned blocks.
-        var carry = new byte[recordSize];
+        var carry = carryBytes > 0 ? new byte[carryBytes] : [];
         var carryLength = 0;
         var startRecordIndex = 0;
         var parserCompletion = Task.WhenAll(parsers);

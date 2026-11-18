@@ -1,3 +1,4 @@
+using System.Buffers;
 using DevTools.Services.FolderSizes;
 using Xunit;
 
@@ -60,27 +61,69 @@ public sealed class ScanResourcesTests
     public void MftPlan_SizesReadsToTheInitializedTable(int mftMiB, int chunkMiB)
     {
         var plan = new ScanResources(4, 4096 * MiB)
-            .MftPlan(mftMiB * 1024, mftMiB * MiB, includeFileNames: false);
+            .MftPlan(mftMiB * 1024, mftMiB * MiB, clusterBytes: 4096, recordBytes: 1024, includeFileNames: false);
 
         Assert.Equal(chunkMiB * MiB, plan.ChunkBytes);
         Assert.Equal(2, plan.Parsers);
+        Assert.Equal(0, plan.CarryBytes);
     }
 
     [Fact]
     public void MftPlan_UsesSmallerBuffersWithLimitedMemory()
     {
-        var high = new ScanResources(24, 4096 * MiB).MftPlan(1_000_000, 1024 * MiB, includeFileNames: false);
-        var low = new ScanResources(24, 128 * MiB).MftPlan(1_000_000, 1024 * MiB, includeFileNames: false);
+        var high = new ScanResources(24, 4096 * MiB)
+            .MftPlan(1_000_000, 1_024_000_000, clusterBytes: 4096, recordBytes: 1024, includeFileNames: false);
+        var low = new ScanResources(24, 128 * MiB)
+            .MftPlan(1_000_000, 1_024_000_000, clusterBytes: 4096, recordBytes: 1024, includeFileNames: false);
 
         Assert.True(low.ChunkBytes < high.ChunkBytes);
         Assert.True(low.Parsers < high.Parsers);
         Assert.True(low.QueueCapacity <= high.QueueCapacity);
     }
 
+    [Theory]
+    [InlineData(4096, 0, 4)]
+    [InlineData(512, 512, 3)]
+    [InlineData(1536, 512, 3)]
+    public void MftPlan_BudgetsTheActualPoolBucketAndTheLargestPossibleCarry(int clusterBytes, int carryBytes, int parsers)
+    {
+        const int records = 1_000_000;
+        const int recordBytes = 1024;
+        var plan = new ScanResources(24, 128 * MiB)
+            .MftPlan(records, (long)records * recordBytes, clusterBytes, recordBytes, includeFileNames: false);
+
+        Assert.Equal(0, plan.ChunkBytes % clusterBytes);
+        Assert.Equal(carryBytes, plan.CarryBytes);
+        Assert.Equal(parsers, plan.Parsers);
+        Assert.InRange(plan.QueueCapacity, 1, Math.Min(plan.Parsers, 4));
+
+        var buffer = ArrayPool<byte>.Shared.Rent(plan.ChunkBytes + plan.CarryBytes);
+        try
+        {
+            var liveBuffers = (long)buffer.Length * (plan.Parsers + plan.QueueCapacity + 1) + plan.CarryBytes;
+            Assert.InRange(liveBuffers, 1L, 6 * MiB);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    [Fact]
+    public void MftPlan_TinyTableUsesLessThanOneMiBOfMemoryAndRejectsAnOversizeCluster()
+    {
+        var resources = new ScanResources(4, MiB);
+        var plan = resources.MftPlan(32, 32 * 1024, clusterBytes: 4096, recordBytes: 1024, includeFileNames: false);
+        Assert.Equal(32 * 1024, plan.ChunkBytes);
+        Assert.Throws<InsufficientMemoryException>(() =>
+            resources.MftPlan(32, 32 * 1024, clusterBytes: 2 * (int)MiB, recordBytes: 1024, includeFileNames: false));
+    }
+
     [Fact]
     public void MftPlan_RejectsATableThatWouldExhaustMemory()
     {
         var resources = new ScanResources(12, 128 * MiB);
-        Assert.Throws<InsufficientMemoryException>(() => resources.MftPlan(5_000_000, 5120 * MiB, includeFileNames: true));
+        Assert.Throws<InsufficientMemoryException>(() =>
+            resources.MftPlan(5_000_000, 5120 * MiB, clusterBytes: 4096, recordBytes: 1024, includeFileNames: true));
     }
 }

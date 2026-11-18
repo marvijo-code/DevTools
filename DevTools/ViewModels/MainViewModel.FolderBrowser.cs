@@ -118,8 +118,18 @@ public sealed partial class MainViewModel
         get => _folderBrowserUseAllocation;
         set
         {
-            if (SetProperty(ref _folderBrowserUseAllocation, value))
+            if (!SetProperty(ref _folderBrowserUseAllocation, value))
             {
+                return;
+            }
+
+            if (value)
+            {
+                _ = BrowseFolderAsync(_folderBrowserPath);
+            }
+            else
+            {
+                _folderBrowserClickCts?.Cancel();
                 BrowseFolder(_folderBrowserPath);
             }
         }
@@ -130,11 +140,18 @@ public sealed partial class MainViewModel
 
     private bool BrowseFolder(string? path, bool skipUnchanged)
     {
-        if (string.IsNullOrWhiteSpace(path) || !_diskUsageAnalyzer.TryFindNode(path, out var tree, out var node) || tree is null)
+        if (string.IsNullOrWhiteSpace(path) ||
+            !_diskUsageAnalyzer.TryFindNode(path, FolderBrowserUseAllocation, out var tree, out var node) || tree is null)
         {
             return false;
         }
 
+        ShowFolderBrowserLocation(tree, node, skipUnchanged);
+        return true;
+    }
+
+    private void ShowFolderBrowserLocation(FolderTree tree, int node, bool skipUnchanged)
+    {
         var normalized = tree.GetPath(node);
         if (!string.Equals(normalized, _folderBrowserPath, StringComparison.Ordinal))
         {
@@ -143,7 +160,7 @@ public sealed partial class MainViewModel
         }
         else if (skipUnchanged && ReferenceEquals(tree, _folderBrowserFileTree))
         {
-            return true;
+            return;
         }
 
         _folderBrowserPath = normalized;
@@ -164,11 +181,10 @@ public sealed partial class MainViewModel
         RaisePropertyChanged(nameof(CanFolderBrowserGoUp));
 
         RebuildFolderBrowserRows(tree, node);
-        return true;
     }
 
     /// <summary>
-    /// Opens a folder, sizing it right now (ahead of the all-drive scan) when it is not known yet.
+    /// Opens a folder, sizing it right now if it or its requested allocation is missing.
     /// A newer click cancels the previous one.
     /// </summary>
     public async Task BrowseFolderAsync(string? path)
@@ -179,9 +195,15 @@ public sealed partial class MainViewModel
         }
 
         _folderBrowserClickCts?.Cancel();
-        if (BrowseFolder(path))
+        var measureAllocation = FolderBrowserUseAllocation;
+        if (_diskUsageAnalyzer.TryFindNode(path, measureAllocation, out var tree, out var node) && tree is not null)
         {
-            return;
+            ShowFolderBrowserLocation(tree, node, skipUnchanged: false);
+            // A volume root is already covered by the all-drive scan.
+            if (!measureAllocation || node == 0 || tree.GetAllocatedBytes(node).HasValue)
+            {
+                return;
+            }
         }
 
         if (IsDiskUsageRefreshing && _folderBrowserDrives.Any(drive => path.Equals(drive.Path, StringComparison.OrdinalIgnoreCase)))
@@ -195,7 +217,7 @@ public sealed partial class MainViewModel
         RaisePropertyChanged(nameof(FolderBrowserSummary));
         try
         {
-            if (await _diskUsageAnalyzer.SizeFolderNowAsync(path, cts.Token) && !cts.IsCancellationRequested)
+            if (await _diskUsageAnalyzer.SizeFolderNowAsync(path, cts.Token, measureAllocation) && !cts.IsCancellationRequested)
             {
                 BrowseFolder(path);
             }
@@ -225,7 +247,8 @@ public sealed partial class MainViewModel
 
     public void BrowseFolderUp()
     {
-        if (!_canFolderBrowserGoUp || !_diskUsageAnalyzer.TryFindNode(_folderBrowserPath, out var tree, out var node) || tree is null)
+        if (!_canFolderBrowserGoUp ||
+            !_diskUsageAnalyzer.TryFindNode(_folderBrowserPath, FolderBrowserUseAllocation, out var tree, out var node) || tree is null)
         {
             return;
         }
@@ -341,7 +364,7 @@ public sealed partial class MainViewModel
 
     private void RebuildFolderBrowserRows()
     {
-        if (!_diskUsageAnalyzer.TryFindNode(_folderBrowserPath, out var tree, out var node) || tree is null)
+        if (!_diskUsageAnalyzer.TryFindNode(_folderBrowserPath, FolderBrowserUseAllocation, out var tree, out var node) || tree is null)
         {
             return;
         }

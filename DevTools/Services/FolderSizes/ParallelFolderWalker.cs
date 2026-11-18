@@ -20,16 +20,19 @@ public sealed class ParallelFolderWalker
         IProgress<FolderScanProgress>? progress,
         CancellationToken cancellationToken,
         int? workerCount = null,
-        bool prioritize = false)
+        bool prioritize = false,
+        bool measureAllocation = false)
     {
-        return Task.Run(() => Scan(rootPath, progress, cancellationToken, workerCount, prioritize, volumeShare: 1),
+        return Task.Run(() => Scan(rootPath, progress, cancellationToken, workerCount, prioritize, volumeShare: 1,
+                measureAllocation),
             cancellationToken);
     }
 
     internal Task<FolderTree> ScanVolumeAsync(string rootPath, IProgress<FolderScanProgress>? progress,
         CancellationToken cancellationToken, int volumeShare)
     {
-        return Task.Run(() => Scan(rootPath, progress, cancellationToken, workerCount: null, prioritize: false, volumeShare),
+        return Task.Run(() => Scan(rootPath, progress, cancellationToken, workerCount: null, prioritize: false, volumeShare,
+                measureAllocation: true),
             cancellationToken);
     }
 
@@ -38,7 +41,7 @@ public sealed class ParallelFolderWalker
     /// on <see cref="ScanGate"/>. Background scans wait while one of these runs.
     /// </param>
     private static FolderTree Scan(string rootPath, IProgress<FolderScanProgress>? progress,
-        CancellationToken cancellationToken, int? workerCount, bool prioritize, int volumeShare)
+        CancellationToken cancellationToken, int? workerCount, bool prioritize, int volumeShare, bool measureAllocation)
     {
         var fullRoot = Path.GetFullPath(rootPath);
         var driveRoot = FolderTree.NormalizeRoot(fullRoot);
@@ -46,7 +49,7 @@ public sealed class ParallelFolderWalker
         var resources = ScanResources.Capture();
         var fullVolume = string.Equals(fullRoot, driveRoot, StringComparison.OrdinalIgnoreCase);
         var volumeRoot = WindowsVolumePaths.GetContainingVolumeRoot(fullRoot, driveRoot);
-        var fileSystem = !prioritize && volumeRoot is not null && OperatingSystem.IsWindows()
+        var fileSystem = (!prioritize || measureAllocation) && volumeRoot is not null && OperatingSystem.IsWindows()
             ? WindowsVolumePaths.ReadVolumeInformation(volumeRoot).FileSystem
             : string.Empty;
         var allocationIndex = volumeRoot is not null && string.Equals(fileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)
@@ -135,7 +138,9 @@ public sealed class ParallelFolderWalker
         {
             try
             {
-                var allocationReader = trackAllocation ? new DirectoryAllocationReader(allocationIndex, allocationUnitBytes, workers) : null;
+                var allocationReader = trackAllocation
+                    ? new DirectoryAllocationReader(allocationIndex, allocationUnitBytes, workers, prioritize)
+                    : null;
                 var subfolders = new List<string>();
                 foreach (var (node, directory, streams) in queue.GetConsumingEnumerable(scanToken))
                 {

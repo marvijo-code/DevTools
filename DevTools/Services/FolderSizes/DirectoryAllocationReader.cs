@@ -6,7 +6,8 @@ using Microsoft.Win32.SafeHandles;
 namespace DevTools.Services.FolderSizes;
 
 /// <summary>Reads allocation for files and directories, including NTFS named data streams.</summary>
-internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identities, uint allocationUnitBytes, int streamWorkers = 1)
+internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identities, uint allocationUnitBytes,
+    int streamWorkers = 1, bool prioritize = false)
 {
     // The variable-length UTF-16 name follows the fixed fields in each information class.
     private const int FullEntryHeaderBytes = 68;
@@ -41,6 +42,18 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
         string.Equals(fileSystem, "FAT32", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(fileSystem, "exFAT", StringComparison.OrdinalIgnoreCase);
 
+    private void WaitForScan(CancellationToken cancellationToken)
+    {
+        if (prioritize)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        else
+        {
+            ScanGate.Wait(cancellationToken);
+        }
+    }
+
     public bool TryRead(
         string path,
         int node,
@@ -66,7 +79,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
         {
             if (Marshal.GetLastPInvokeError() == ErrorAccessDenied)
             {
-                ScanGate.Wait(cancellationToken);
+                WaitForScan(cancellationToken);
                 // Windows can allow metadata access to the directory itself when it denies listing its children.
                 using var metadata = OpenDirectory(nativePath, 0, 7, IntPtr.Zero, 3,
                     BackupSemantics | OpenReparsePoint | OpenNoRecall, IntPtr.Zero);
@@ -104,7 +117,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
 
         while (true)
         {
-            ScanGate.Wait(cancellationToken);
+            WaitForScan(cancellationToken);
             if (!GetFileInformationByHandleEx(handle, informationClass, _buffer, (uint)_buffer.Length))
             {
                 return Marshal.GetLastWin32Error() == ErrorNoMoreFiles;
@@ -139,7 +152,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
                     }
                     else if (identities is not null)
                     {
-                        ScanGate.Wait(cancellationToken);
+                        WaitForScan(cancellationToken);
                         // Attribute the link's own storage to the containing folder. Its target stays outside this walk.
                         var low = BinaryPrimitives.ReadUInt64LittleEndian(remaining[72..]);
                         var high = BinaryPrimitives.ReadUInt64LittleEndian(remaining[80..]);
@@ -275,7 +288,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
         long allocatedBytes = 0;
         foreach (var fileId in fileIds)
         {
-            ScanGate.Wait(cancellationToken);
+            WaitForScan(cancellationToken);
             var id = new FileIdDescriptor(fileId);
             // Metadata access only. Prevent reparse resolution and remote file recall.
             using var file = OpenFileById(hint, in id, 0, 7, IntPtr.Zero, OpenReparsePoint | OpenNoRecall);

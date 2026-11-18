@@ -210,11 +210,12 @@ public sealed class DriveUsageService
     /// Measures one folder subtree the user asked for (a click). It runs at full speed while the
     /// background all-drive scans pause, so the clicked folder is sized first.
     /// </summary>
-    public async Task<FolderTree> WalkFolderAsync(string path, CancellationToken cancellationToken)
+    public async Task<FolderTree> WalkFolderAsync(string path, CancellationToken cancellationToken, bool measureAllocation = false)
     {
         using (ScanGate.Pause())
         {
-            return await _walker.ScanAsync(path, null, cancellationToken, prioritize: true).ConfigureAwait(false);
+            return await _walker.ScanAsync(path, null, cancellationToken, prioritize: true, measureAllocation: measureAllocation)
+                .ConfigureAwait(false);
         }
     }
 

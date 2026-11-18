@@ -86,6 +86,51 @@ public sealed class DirectoryAllocationTests
     }
 
     [Fact]
+    public async Task PriorityAllocation_UpgradesLogicalFolderWhileBackgroundScansArePaused()
+    {
+        var root = Directory.CreateTempSubdirectory("devtools-priority-allocation-");
+        var child = root.CreateSubdirectory("child");
+        var file = Path.Combine(child.FullName, "data.bin");
+        var contents = new byte[65537];
+        new Random(27).NextBytes(contents);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            await File.WriteAllBytesAsync(file, contents, timeout.Token);
+            WriteNamedStream(file + ":payload", contents);
+            Assert.True(GetDiskFreeSpace(root.Root.FullName, out var sectorsPerCluster, out var bytesPerSector, out _, out _));
+            var clusterBytes = (long)sectorsPerCluster * bytesPerSector;
+            Assert.True(clusterBytes > 0);
+            var fileAllocation = 2 * ((contents.Length + clusterBytes - 1) / clusterBytes) * clusterBytes;
+            var analyzer = new DevTools.Services.DiskUsageAnalyzer();
+
+            using var pause = ScanGate.Pause();
+            Assert.True(await analyzer.SizeFolderNowAsync(root.FullName, timeout.Token));
+            Assert.True(analyzer.TryFindNode(child.FullName, out var logical, out var logicalNode));
+            Assert.Null(logical!.GetAllocatedBytes(logicalNode));
+
+            Assert.True(await analyzer.SizeFolderNowAsync(child.FullName, timeout.Token, measureAllocation: true));
+            Assert.True(analyzer.TryFindNode(child.FullName, preferAllocation: true, out var allocated, out var allocatedNode));
+            Assert.NotSame(logical, allocated);
+            Assert.Equal(contents.Length, allocated!.GetTotalBytes(allocatedNode));
+            Assert.Equal(fileAllocation, allocated.GetAllocatedBytes(allocatedNode));
+            Assert.False(allocated.HasIncompleteAllocation(allocatedNode));
+
+            Assert.True(await analyzer.SizeFolderNowAsync(child.FullName, timeout.Token, measureAllocation: true));
+            Assert.True(analyzer.TryFindNode(child.FullName, preferAllocation: true, out var cached, out var cachedNode));
+            Assert.Same(allocated, cached);
+            Assert.Equal(allocatedNode, cachedNode);
+        }
+        finally
+        {
+            File.Delete(file);
+            child.Delete();
+            root.Delete();
+        }
+    }
+
+    [Fact]
     public async Task Walker_MatchesWindowsAllocationForSparseFileWithTwoWrittenRanges()
     {
         var root = Directory.CreateTempSubdirectory("devtools-sparse-");

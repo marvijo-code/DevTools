@@ -25,7 +25,7 @@ public sealed class DiskUsageAnalyzer
     private readonly DriveUsageService _driveUsage = new();
     private readonly object _treesLock = new();
     private readonly Dictionary<string, FolderTree> _trees = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, FolderTree> _overlayTrees = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (FolderTree Tree, bool AllocationRequested)> _overlayTrees = new(StringComparer.Ordinal);
     private VolumeMountAlias[] _mountAliases = [];
 
     /// <summary>The folder trees from the last scan, system drive first.</summary>
@@ -352,7 +352,10 @@ public sealed class DiskUsageAnalyzer
     }
 
     /// <summary>Finds the tree and node for a folder path from the last scan.</summary>
-    public bool TryFindNode(string path, out FolderTree? tree, out int node)
+    public bool TryFindNode(string path, out FolderTree? tree, out int node) =>
+        TryFindNode(path, preferAllocation: false, out tree, out node);
+
+    internal bool TryFindNode(string path, bool preferAllocation, out FolderTree? tree, out int node)
     {
         tree = null;
         node = -1;
@@ -377,22 +380,39 @@ public sealed class DiskUsageAnalyzer
                 {
                     tree = found;
                     node = foundNode;
-                    return true;
+                    if (!preferAllocation || found.GetAllocatedBytes(foundNode).HasValue)
+                    {
+                        return true;
+                    }
                 }
             }
 
-            // A priority scan may have finished while the drive is still being scanned.
-            return TryFindOverlayNode(scanPath, out tree, out node)
-                || (alias.HasValue && TryFindOverlayNode(path, out tree, out node));
+            // A priority scan can supply allocation while the drive scan is pending or has logical sizes only.
+            if (preferAllocation &&
+                (TryFindOverlayNode(scanPath, requireAllocation: true, out var allocatedTree, out var allocatedNode) ||
+                    (alias.HasValue && TryFindOverlayNode(path, requireAllocation: true, out allocatedTree, out allocatedNode))))
+            {
+                tree = allocatedTree;
+                node = allocatedNode;
+                return true;
+            }
+
+            return tree is not null || TryFindOverlayNode(scanPath, requireAllocation: false, out tree, out node)
+                || (alias.HasValue && TryFindOverlayNode(path, requireAllocation: false, out tree, out node));
         }
     }
 
-    private bool TryFindOverlayNode(string path, out FolderTree? tree, out int node)
+    private bool TryFindOverlayNode(string path, bool requireAllocation, out FolderTree? tree, out int node)
     {
         var trimmed = Path.TrimEndingDirectorySeparator(path.Trim().Replace(
             Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar));
-        foreach (var (folder, overlay) in _overlayTrees)
+        foreach (var (folder, (overlay, allocationRequested)) in _overlayTrees)
         {
+            if (requireAllocation && !allocationRequested)
+            {
+                continue;
+            }
+
             var underOverlay = trimmed.Equals(folder, StringComparison.Ordinal)
                 || (trimmed.Length > folder.Length
                     && trimmed.StartsWith(folder, StringComparison.Ordinal)
@@ -403,7 +423,7 @@ public sealed class DiskUsageAnalyzer
             }
 
             var overlayNode = overlay.Find(path);
-            if (overlayNode >= 0)
+            if (overlayNode >= 0 && (!requireAllocation || overlay.GetAllocatedBytes(overlayNode).HasValue))
             {
                 tree = overlay;
                 node = overlayNode;
@@ -452,9 +472,13 @@ public sealed class DiskUsageAnalyzer
     /// Sizes a folder the user just clicked, ahead of the all-drive scan, unless it is already known.
     /// The background scans pause while this runs. Returns false when the folder does not exist.
     /// </summary>
-    public async Task<bool> SizeFolderNowAsync(string path, CancellationToken cancellationToken)
+    public Task<bool> SizeFolderNowAsync(string path, CancellationToken cancellationToken) =>
+        SizeFolderNowAsync(path, cancellationToken, measureAllocation: false);
+
+    internal async Task<bool> SizeFolderNowAsync(string path, CancellationToken cancellationToken, bool measureAllocation)
     {
-        if (TryFindNode(path, out _, out _))
+        var known = TryFindNode(path, measureAllocation, out var knownTree, out var knownNode);
+        if (known && (!measureAllocation || knownTree!.GetAllocatedBytes(knownNode).HasValue))
         {
             return true;
         }
@@ -465,10 +489,23 @@ public sealed class DiskUsageAnalyzer
         }
 
         var scanPath = ResolveWalkPath(path);
-        var tree = await _driveUsage.WalkFolderAsync(scanPath, cancellationToken).ConfigureAwait(false);
+        var overlayPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(scanPath));
         lock (_treesLock)
         {
-            _overlayTrees[Path.TrimEndingDirectorySeparator(Path.GetFullPath(scanPath))] = tree;
+            if (_overlayTrees.TryGetValue(overlayPath, out var cached) && cached.AllocationRequested)
+            {
+                return true;
+            }
+        }
+
+        var tree = await _driveUsage.WalkFolderAsync(scanPath, cancellationToken, measureAllocation).ConfigureAwait(false);
+        lock (_treesLock)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_overlayTrees.TryGetValue(overlayPath, out var cached) || !cached.AllocationRequested)
+            {
+                _overlayTrees[overlayPath] = (tree, measureAllocation);
+            }
         }
 
         return true;

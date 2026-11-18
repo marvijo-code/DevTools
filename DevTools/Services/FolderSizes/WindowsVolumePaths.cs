@@ -3,10 +3,14 @@ using System.Text;
 
 namespace DevTools.Services.FolderSizes;
 
+internal readonly record struct VolumeMountAlias(string AccessPath, string ScanRoot);
+
 internal static class WindowsVolumePaths
 {
     private const int VolumeNameCapacity = 64;
     private const int ErrorNoMoreFiles = 18;
+    private const int ErrorMoreData = 234;
+    private const int MaximumAccessPathChars = 1024 * 1024;
     private const string VolumeGuidPrefix = @"\\?\Volume{";
 
     internal static Guid? GetVolumeGuid(string? path) =>
@@ -40,6 +44,87 @@ internal static class WindowsVolumePaths
         return GetVolumeNameForVolumeMountPoint(rootPath, buffer, VolumeNameCapacity)
             ? buffer.ToString()
             : null;
+    }
+
+    internal static VolumeMountAlias[] GetMountAliases(IReadOnlyList<DriveDescriptor> drives,
+        CancellationToken cancellationToken)
+    {
+        var aliases = new List<VolumeMountAlias>();
+        foreach (var drive in drives)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (drive.VolumeName is not { } volumeName)
+            {
+                continue;
+            }
+
+            foreach (var path in GetAccessPaths(volumeName).Append(volumeName))
+            {
+                if (Path.IsPathFullyQualified(path) && Path.EndsInDirectorySeparator(path) &&
+                    !path.Equals(drive.RootPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    aliases.Add(new VolumeMountAlias(path, drive.RootPath));
+                }
+            }
+        }
+
+        return [.. aliases];
+    }
+
+    internal static (string Root, string Path)? ResolveMountAlias(string path, ReadOnlySpan<VolumeMountAlias> aliases)
+    {
+        if (aliases.IsEmpty)
+        {
+            return null;
+        }
+
+        var normalized = path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        var bestLength = 0;
+        string? scanRoot = null;
+        foreach (var alias in aliases)
+        {
+            // Include the separator in the length but also accept a mount root entered without it.
+            var length = alias.AccessPath.Length;
+            if (length <= bestLength || normalized.Length < length - 1 ||
+                !normalized.AsSpan().StartsWith(alias.AccessPath.AsSpan(0, length - 1), StringComparison.OrdinalIgnoreCase) ||
+                (normalized.Length >= length && normalized[length - 1] != Path.DirectorySeparatorChar))
+            {
+                continue;
+            }
+
+            bestLength = length;
+            scanRoot = alias.ScanRoot;
+        }
+
+        return scanRoot is null
+            ? null
+            : (scanRoot, string.Concat(scanRoot.AsSpan(), normalized.AsSpan(Math.Min(bestLength, normalized.Length))));
+    }
+
+    internal static string[] GetAccessPaths(string volumeName)
+    {
+        if (!OperatingSystem.IsWindows() || !GetVolumeGuid(volumeName).HasValue)
+        {
+            return [];
+        }
+
+        var buffer = new char[256];
+        while (true)
+        {
+            if (GetVolumePathNamesForVolumeName(volumeName, buffer, (uint)buffer.Length, out var required))
+            {
+                return required <= buffer.Length
+                    ? new string(buffer, 0, (int)required).Split('\0', StringSplitOptions.RemoveEmptyEntries)
+                    : [];
+            }
+
+            if (Marshal.GetLastPInvokeError() != ErrorMoreData || required <= buffer.Length || required > MaximumAccessPathChars)
+            {
+                return [];
+            }
+
+            buffer = new char[required];
+        }
     }
 
     internal static IEnumerable<string> GetFixedVolumeNames()
@@ -105,6 +190,11 @@ internal static class WindowsVolumePaths
     [DllImport("kernel32.dll", EntryPoint = "GetVolumeNameForVolumeMountPointW", ExactSpelling = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetVolumeNameForVolumeMountPoint(string rootPath, StringBuilder name, int capacity);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetVolumePathNamesForVolumeNameW", ExactSpelling = true,
+        CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetVolumePathNamesForVolumeName(string volumeName, [Out] char[] paths, uint length, out uint required);
 
     [DllImport("kernel32.dll", EntryPoint = "FindFirstVolumeW", ExactSpelling = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr FindFirstVolume(StringBuilder name, int capacity);

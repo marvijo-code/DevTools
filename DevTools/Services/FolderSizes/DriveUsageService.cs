@@ -5,7 +5,10 @@ using DevTools.Services.BiggestFiles;
 namespace DevTools.Services.FolderSizes;
 
 /// <summary>One fixed drive as the scan sees it.</summary>
-public sealed record DriveDescriptor(string RootPath, string Label, string FileSystem, VolumeSpace? Space, bool HasDriveLetter = true);
+public sealed record DriveDescriptor(string RootPath, string Label, string FileSystem, VolumeSpace? Space, bool HasDriveLetter = true)
+{
+    internal string? VolumeName { get; init; }
+}
 
 /// <summary>Byte counts reported by Windows for one volume.</summary>
 public readonly record struct VolumeSpace(
@@ -57,7 +60,10 @@ public sealed class DriveUsageService
 
                 var rootPath = FolderTree.NormalizeRoot(drive.RootDirectory.FullName);
                 var volumeName = WindowsVolumePaths.GetVolumeName(rootPath);
-                var descriptor = new DriveDescriptor(rootPath, drive.VolumeLabel, drive.DriveFormat, ReadVolumeSpace(drive));
+                var descriptor = new DriveDescriptor(rootPath, drive.VolumeLabel, drive.DriveFormat, ReadVolumeSpace(drive))
+                {
+                    VolumeName = volumeName
+                };
                 if (volumeName is null || volumeNames.Add(volumeName))
                 {
                     drives.Add(descriptor);
@@ -80,7 +86,10 @@ public sealed class DriveUsageService
 
                 var (label, fileSystem) = WindowsVolumePaths.ReadVolumeInformation(volumeName);
                 drives.Add(new DriveDescriptor(volumeName, label, fileSystem,
-                    TryReadWindowsVolumeSpace(volumeName), HasDriveLetter: false));
+                    TryReadWindowsVolumeSpace(volumeName), HasDriveLetter: false)
+                {
+                    VolumeName = volumeName
+                });
             }
         }
 

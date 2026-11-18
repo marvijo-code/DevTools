@@ -26,6 +26,7 @@ public sealed class DiskUsageAnalyzer
     private readonly object _treesLock = new();
     private readonly Dictionary<string, FolderTree> _trees = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, FolderTree> _overlayTrees = new(StringComparer.Ordinal);
+    private VolumeMountAlias[] _mountAliases = [];
 
     /// <summary>The folder trees from the last scan, system drive first.</summary>
     public IReadOnlyList<FolderTree> Trees
@@ -60,8 +61,10 @@ public sealed class DiskUsageAnalyzer
             string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)) && ElevationService.IsProcessElevated();
         var concurrentWalks = hasSeparateDisks && !useRawMft && ScanResources.Capture().CanOverlapVolumeWalks ? 2 : 1;
         var browseRoots = drives.Select(drive => drive.RootPath).ToArray();
+        var mountAliases = WindowsVolumePaths.GetMountAliases(drives, cancellationToken);
         lock (_treesLock)
         {
+            _mountAliases = mountAliases;
             foreach (var root in _trees.Keys.Where(root => !browseRoots.Contains(root, StringComparer.OrdinalIgnoreCase)).ToArray())
             {
                 _trees.Remove(root);
@@ -284,9 +287,10 @@ public sealed class DiskUsageAnalyzer
 
         lock (_treesLock)
         {
-            if (_trees.TryGetValue(root, out var found))
+            var alias = WindowsVolumePaths.ResolveMountAlias(path, _mountAliases);
+            if (_trees.TryGetValue(alias?.Root ?? root, out var found))
             {
-                var foundNode = found.Find(path);
+                var foundNode = found.Find(alias?.Path ?? path);
                 if (foundNode >= 0)
                 {
                     tree = found;

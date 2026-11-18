@@ -19,7 +19,29 @@ public sealed class VolumeSpaceTests
 
         var systemDrive = Assert.Single(all, drive => drive.RootPath.Equals(path, StringComparison.OrdinalIgnoreCase));
         Assert.True(systemDrive.HasDriveLetter);
+        Assert.Equal(identity, systemDrive.VolumeName);
+        Assert.Contains(WindowsVolumePaths.GetAccessPaths(identity!), accessPath => accessPath.Equals(path, StringComparison.OrdinalIgnoreCase));
+        var aliases = WindowsVolumePaths.GetMountAliases(all, CancellationToken.None);
+        Assert.Equal((path, Path.Combine(path, "Windows")),
+            WindowsVolumePaths.ResolveMountAlias(identity + "Windows", aliases));
         Assert.DoesNotContain(all, drive => drive.RootPath.Equals(identity, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData(@"C:\Mount\Disk", @"D:\")]
+    [InlineData(@"c:/mount/disk/one", @"D:\one")]
+    [InlineData(@"C:\Mount\Disk\Nested\one", @"E:\one")]
+    [InlineData(@"C:\Mount\Disk-old\one", null)]
+    [InlineData(@"C:\Mount\Disk\Nested-old\one", @"D:\Nested-old\one")]
+    public void ResolveMountAlias_PrefersTheDeepestCompleteMountPath(string path, string? expected)
+    {
+        VolumeMountAlias[] aliases =
+        [
+            new(@"C:\Mount\Disk\", @"D:\"),
+            new(@"C:\Mount\Disk\Nested\", @"E:\")
+        ];
+
+        Assert.Equal(expected, WindowsVolumePaths.ResolveMountAlias(path, aliases)?.Path);
     }
 
     [Fact]

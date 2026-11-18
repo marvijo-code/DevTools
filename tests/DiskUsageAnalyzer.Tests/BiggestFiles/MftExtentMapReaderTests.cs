@@ -64,14 +64,24 @@ public sealed class MftExtentMapReaderTests
         {
             await File.WriteAllBytesAsync(path, BuildDisk(nonResidentList: true));
             using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var allocated = new byte[25];
+            NtfsVolumeBitmapTests.SetBits(allocated, 10, 3);
+            NtfsVolumeBitmapTests.SetBits(allocated, 30, 1);
+            NtfsVolumeBitmapTests.SetBits(allocated, 40, 4);
+            NtfsVolumeBitmapTests.SetBits(allocated, 55, 56);
+            NtfsVolumeBitmapTests.SetBits(allocated, 150, 1);
+            NtfsVolumeBitmapTests.SetBits(allocated, 120, 15);
+            NtfsVolumeBitmapTests.SetBits(allocated, 199, 1);
             var source = await MftTableLoader.LoadVolumeAsync(handle, @"C:\", Geometry, null,
-                Stopwatch.StartNew(), CancellationToken.None, keepFileNames: false);
+                Stopwatch.StartNew(), CancellationToken.None, keepFileNames: false,
+                bitmapQuery: (start, output) => NtfsVolumeBitmapTests.WriteReply(start, Geometry.TotalClusters, allocated, output));
             var tree = MftFolderSizeScanner.BuildTree(source, @"C:\", "fixture", Stopwatch.StartNew());
 
             Assert.Equal(4130, tree.TotalBytes);
             Assert.Equal(1, tree.TotalFiles);
             Assert.Equal(8192, tree.GetAllocatedBytes(tree.Find(@"C:\Folder")));
-            Assert.Equal(new NtfsRecordAllocation(65 * ClusterSize, 0), tree.NtfsAllocation);
+            var expected = new NtfsBitmapAllocation(81 * ClusterSize, 80 * ClusterSize, ClusterSize);
+            Assert.Equal(new NtfsRecordAllocation(65 * ClusterSize, 0, expected), tree.NtfsAllocation);
         }
         finally
         {

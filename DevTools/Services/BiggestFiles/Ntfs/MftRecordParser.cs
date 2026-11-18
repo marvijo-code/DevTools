@@ -74,7 +74,9 @@ public static class MftRecordParser
         bool requireInUse,
         bool readLastWrite,
         bool countAllocation = false,
-        long volumeClusters = long.MaxValue)
+        long volumeClusters = long.MaxValue,
+        NtfsVolumeBitmap? observedBitmap = null,
+        List<(long Lcn, long ClusterCount)>? attributeRuns = null)
     {
         info = default;
 
@@ -141,10 +143,17 @@ public static class MftRecordParser
             var nonResident = form == 1;
             if (countAllocation && nonResident &&
                 TryGetMappingPairs(attribute, out var runs) &&
-                TryDecodeRunList(runs, null, out var allocated, volumeClusters: volumeClusters) &&
+                TryDecodeRunList(runs, attributeRuns, out var allocated, volumeClusters: volumeClusters) &&
                 allocated <= volumeClusters - info.AllocatedClusters)
             {
                 info.AllocatedClusters += allocated;
+                if (observedBitmap is not null && attributeRuns is not null)
+                {
+                    foreach (var (lcn, count) in attributeRuns)
+                    {
+                        observedBitmap.Mark(lcn, count);
+                    }
+                }
             }
 
             switch (attributeType)

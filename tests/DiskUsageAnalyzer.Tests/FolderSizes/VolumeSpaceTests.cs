@@ -1,4 +1,5 @@
 using DiskUsage = DevTools.Services.DiskUsageAnalyzer;
+using DevTools.Services.BiggestFiles.Ntfs;
 using DevTools.Services.FolderSizes;
 using Xunit;
 
@@ -70,6 +71,27 @@ public sealed class VolumeSpaceTests
         Assert.Contains("150 in reserved NTFS records", note);
         Assert.Contains("200 in NTFS records without a verified folder", note);
         Assert.Contains("250 used bytes remain unattributed", note);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void DriveSummary_ReportsBitmapSeparatelyFromWindowsCapacityCounters(bool hasSpace)
+    {
+        var drive = new DriveDescriptor(@"C:\", "Test", "NTFS",
+            hasSpace ? new VolumeSpace(1000, 300, 700, 0, 0, IsVolumeWide: true) : null);
+        var tree = new FolderTree(drive.RootPath, [-1], [""], [400], [1], "NTFS", TimeSpan.Zero,
+            [444], new NtfsRecordAllocation(0, 0, new NtfsBitmapAllocation(690, 440, 4)));
+        var results = new Dictionary<string, DriveScanResult>
+        {
+            [drive.RootPath] = new DriveScanResult(drive, tree, "NTFS", "")
+        };
+
+        var note = Assert.Single(DiskUsage.BuildDriveSummarySection([drive], results).Entries).Note;
+
+        Assert.Contains("The NTFS bitmap reported 690 allocated bytes.", note);
+        Assert.Contains("440 appear in MFT runs and 250 have no matching run.", note);
+        Assert.Contains("4 bytes in MFT runs were marked free", note);
     }
 
     [Fact]

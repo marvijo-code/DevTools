@@ -23,6 +23,8 @@ internal static class NativeMethods
     private const uint OpenDirectory = 0x02000000;
     private const uint OpenExisting = 3;
     private const uint FsctlGetNtfsVolumeData = 0x00090064;
+    private const uint FsctlGetVolumeBitmap = 0x0009006F;
+    private const int ErrorMoreData = 234;
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "CreateFileW")]
     private static extern SafeFileHandle CreateFile(
@@ -45,6 +47,19 @@ internal static class NativeMethods
         uint nOutBufferSize,
         out uint lpBytesReturned,
         IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", EntryPoint = "DeviceIoControl", ExactSpelling = true, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryBitmap(
+        SafeFileHandle volume, uint code, in long inputLcn, uint inputSize, [Out] byte[] output,
+        uint outputSize, out uint returned, IntPtr overlapped);
+
+    internal static int ReadVolumeBitmap(SafeFileHandle volume, long start, byte[] output)
+    {
+        var success = QueryBitmap(volume, FsctlGetVolumeBitmap, in start, sizeof(long), output,
+            (uint)output.Length, out var bytes, IntPtr.Zero);
+        return (success || Marshal.GetLastPInvokeError() == ErrorMoreData) && bytes <= output.Length ? (int)bytes : 0;
+    }
 
     /// <summary>Opens a raw read handle to a volume, e.g. <c>\\.\C:</c>. Requires elevation.</summary>
     internal static SafeFileHandle OpenVolume(string path)

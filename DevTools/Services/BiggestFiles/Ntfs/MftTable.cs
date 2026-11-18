@@ -35,7 +35,8 @@ internal sealed class MftRecordTable
         long[] allocSize,
         long[] lastWrite,
         string?[] names,
-        long[]? recordAllocation = null)
+        long[]? recordAllocation = null,
+        NtfsBitmapAllocation? bitmapAllocation = null)
     {
         VolumeRoot = volumeRoot;
         RecordCount = recordCount;
@@ -46,6 +47,7 @@ internal sealed class MftRecordTable
         LastWrite = lastWrite;
         Names = names;
         RecordAllocation = recordAllocation;
+        BitmapAllocation = bitmapAllocation;
     }
 
     public string VolumeRoot { get; }
@@ -64,6 +66,7 @@ internal sealed class MftRecordTable
 
     public string?[] Names { get; }
     public long[]? RecordAllocation { get; }
+    public NtfsBitmapAllocation? BitmapAllocation { get; }
 
     /// <summary>True when the record is a base (non-extension) directory that carries a name.</summary>
     public bool IsNamedDirectory(int index)
@@ -295,7 +298,8 @@ internal static class MftTableLoader
         var volumeRoot = FolderTree.NormalizeRoot(root);
         using var volume = NativeMethods.OpenVolume(devicePath);
         var geometry = NativeMethods.GetVolumeData(volume);
-        return await LoadVolumeAsync(volume, volumeRoot, geometry, reportProgress, stopwatch, cancellationToken, keepFileNames)
+        return await LoadVolumeAsync(volume, volumeRoot, geometry, reportProgress, stopwatch, cancellationToken, keepFileNames,
+            keepFileNames ? null : (start, output) => NativeMethods.ReadVolumeBitmap(volume, start, output))
             .ConfigureAwait(false);
     }
 
@@ -306,11 +310,13 @@ internal static class MftTableLoader
         Action<long, long, TimeSpan>? reportProgress,
         Stopwatch stopwatch,
         CancellationToken cancellationToken,
-        bool keepFileNames)
+        bool keepFileNames,
+        NtfsVolumeBitmap.Query? bitmapQuery = null)
     {
         var recordCount = GetRecordCount(geometry);
         var recordSize = (int)geometry.BytesPerFileRecordSegment;
-        var (chunkBytes, parserCount, queueCapacity) = ScanResources.Capture().MftPlan(recordCount, keepFileNames);
+        var resources = ScanResources.Capture();
+        var (chunkBytes, parserCount, queueCapacity) = resources.MftPlan(recordCount, keepFileNames);
 
         // Check the full MFT mapping before allocating its in-memory columns.
         var extents = MftExtentMapReader.Read(geometry, (offset, buffer) => ReadExact(volume, buffer, offset), cancellationToken);
@@ -323,6 +329,9 @@ internal static class MftTableLoader
         var allocSize = keepFileNames ? new long[recordCount] : [];
         var lastWrite = keepFileNames ? new long[recordCount] : [];
         var recordAllocation = keepFileNames ? null : new long[recordCount];
+        var observedBitmap = bitmapQuery is not null && recordAllocation is not null
+            ? NtfsVolumeBitmap.TryCreate(geometry.TotalClusters, resources.MemoryHeadroom)
+            : null;
         // The record sequence and its parent reference sequence share one temporary column.
         var referenceSequences = new uint[recordCount];
         var names = new string?[recordCount];
@@ -350,12 +359,16 @@ internal static class MftTableLoader
         await ParseAllRecordsAsync(
             volume, geometry, extents, recordSize, recordCount, chunkBytes, parserCount, queueCapacity,
             parent, flags, realSize, allocSize, lastWrite, names, keepFileNames, recordAllocation, referenceSequences,
-            OnParsed,
+            observedBitmap, OnParsed,
             cancellationToken).ConfigureAwait(false);
 
+        var bitmapAllocation = bitmapQuery is not null
+            ? observedBitmap?.Reconcile(geometry.BytesPerCluster, bitmapQuery, cancellationToken)
+            : null;
         reportProgress?.Invoke(recordCount, recordCount, stopwatch.Elapsed);
 
-        return new MftRecordTable(volumeRoot, recordCount, parent, flags, realSize, allocSize, lastWrite, names, recordAllocation);
+        return new MftRecordTable(volumeRoot, recordCount, parent, flags, realSize, allocSize, lastWrite, names,
+            recordAllocation, bitmapAllocation);
     }
 
     internal static int GetRecordCount(NtfsVolumeData geometry)
@@ -447,6 +460,7 @@ internal static class MftTableLoader
         bool keepFileNames,
         long[]? recordAllocation,
         uint[] referenceSequences,
+        NtfsVolumeBitmap? observedBitmap,
         Action<int> reportThrottled,
         CancellationToken cancellationToken)
     {
@@ -472,6 +486,7 @@ internal static class MftTableLoader
             parsers[i] = Task.Run(async () =>
             {
                 var localExtensions = new List<ExtensionAllocation>();
+                var attributeRuns = observedBitmap is not null ? new List<(long Lcn, long ClusterCount)>() : null;
                 var info = new MftRecordInfo();
                 try
                 {
@@ -486,7 +501,7 @@ internal static class MftTableLoader
                                 var recordSpan = span.Slice(r * recordSize, recordSize);
                                 if (!MftRecordParser.TryParseRecord(recordSpan, ref info,
                                     requireInUse: true, readLastWrite: keepFileNames, countAllocation: recordAllocation is not null,
-                                    volumeClusters: geometry.TotalClusters))
+                                    volumeClusters: geometry.TotalClusters, observedBitmap: observedBitmap, attributeRuns: attributeRuns))
                                 {
                                     continue;
                                 }

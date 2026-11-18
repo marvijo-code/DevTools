@@ -223,7 +223,7 @@ public sealed class MftFolderSizeScanner
 
         stopwatch.Stop();
         return new FolderTree(rootPath, nodeParents, nodeNames, totals, files, engineName, stopwatch.Elapsed,
-            allocated, allocated is null ? null : new NtfsRecordAllocation(reservedBytes, unlinkedBytes));
+            allocated, allocated is null ? null : new NtfsRecordAllocation(reservedBytes, unlinkedBytes, table.BitmapAllocation));
     }
 
     /// <summary>

@@ -1,5 +1,6 @@
 using DevTools.Infrastructure;
 using DevTools.Models;
+using DevTools.Services.BiggestFiles.Ntfs;
 using DevTools.Services.FolderSizes;
 
 namespace DevTools.Services;
@@ -423,10 +424,13 @@ public sealed class DiskUsageAnalyzer
         {
             var label = string.IsNullOrWhiteSpace(drive.Label) ? drive.FileSystem : $"{drive.Label}, {drive.FileSystem}";
             var display = string.IsNullOrWhiteSpace(label) ? drive.RootPath : $"{drive.RootPath} ({label})";
+            results.TryGetValue(drive.RootPath, out var result);
+            var tree = result?.Tree;
+            var bitmapNote = DescribeNtfsBitmap(tree?.NtfsAllocation?.Bitmap);
             if (drive.Space is not { } space)
             {
                 entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, false, null, "Unavailable",
-                    "Windows did not report space totals for this volume.", display));
+                    $"Windows did not report space totals for this volume.{bitmapNote}", display));
                 continue;
             }
 
@@ -448,8 +452,6 @@ public sealed class DiskUsageAnalyzer
                     : $", Windows categories overlap by {-remainder:N0} bytes";
             }
 
-            results.TryGetValue(drive.RootPath, out var result);
-            var tree = result?.Tree;
             var scanNote = tree is not null
                 ? $"Logical file size: {tree.TotalBytes:N0} bytes ({tree.EngineName}, {tree.Elapsed.TotalSeconds:F1}s)."
                 : result?.Note ?? "Folder scan pending.";
@@ -486,12 +488,30 @@ public sealed class DiskUsageAnalyzer
                     : " Folder allocation is unavailable.";
             }
 
-            var note = $"{totals}. {scanNote}";
+            var note = $"{totals}. {scanNote}{bitmapNote}";
             entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, drive.HasDriveLetter || result?.Tree is not null, space.UsedBytes,
                 $"{FormatBytes(space.UsedBytes)} used", note, display));
         }
 
         return new DiskUsageSection("Drive Summary", "Space reported by Windows for each fixed drive. Logical file sizes are shown separately.", entries);
+    }
+
+    private static string DescribeNtfsBitmap(NtfsBitmapAllocation? allocation)
+    {
+        if (allocation is not { } bitmap)
+        {
+            return string.Empty;
+        }
+
+        var withoutRun = bitmap.InUseBytes - bitmap.MatchedBytes;
+        var note = $" The NTFS bitmap reported {bitmap.InUseBytes:N0} allocated bytes. " +
+            $"Of these, {bitmap.MatchedBytes:N0} appear in MFT runs and {withoutRun:N0} have no matching run.";
+        if (bitmap.RecordedFreeBytes > 0)
+        {
+            note += $" {bitmap.RecordedFreeBytes:N0} bytes in MFT runs were marked free in the bitmap.";
+        }
+
+        return note;
     }
 
     private static List<DiskUsageEntry> ChildEntriesFor(FolderTree? tree, string path, int top)

@@ -1687,12 +1687,7 @@ public sealed partial class MainViewModel : ObservableObject
                 return;
             }
 
-            var settings = JsonSerializer.Deserialize<AppSettings>(
-                File.ReadAllText(SettingsFilePath),
-                new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true
-                });
+            var settings = JsonSerializer.Deserialize(File.ReadAllText(SettingsFilePath), AppSettingsJsonContext.Default.AppSettings);
 
             if (settings is null)
             {
@@ -1763,10 +1758,7 @@ public sealed partial class MainViewModel : ObservableObject
                         ResourceIntervalSeconds = _resourceIntervalSeconds,
                         RunAsAdministrator = _runAsAdministrator
                     },
-                    new JsonSerializerOptions
-                    {
-                        WriteIndented = true
-                    }));
+                    AppSettingsJsonContext.Default.AppSettings));
             File.Move(SettingsFilePath + ".tmp", SettingsFilePath, overwrite: true);
         }
         catch (Exception ex)
@@ -1936,28 +1928,4 @@ public sealed partial class MainViewModel : ObservableObject
             : MainContentTab.KillProcesses;
     }
 
-    private sealed class AppSettings
-    {
-        public ProcessViewState? ProcessView { get; set; }
-        public bool AutoRefreshEnabled { get; set; } = true;
-
-        public int RefreshIntervalSeconds { get; set; } = 10;
-
-        public string? ActiveTab { get; set; }
-
-        public bool IsDiskUsageVisible { get; set; }
-
-        public string? EncryptedPersonalAccessToken { get; set; }
-
-        public string? BiggestFilesScanRoot { get; set; }
-
-        public int BiggestFilesTopCount { get; set; } = 100;
-
-        public bool ResourceMonitoringEnabled { get; set; } = true;
-
-        public int ResourceIntervalSeconds { get; set; } = 1;
-
-        /// <summary>Read by Start-DevTools.ps1: start DevTools with administrator rights.</summary>
-        public bool RunAsAdministrator { get; set; } = true;
-    }
 }

@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\DevTools\Models\ProcessViewState.cs" Link="Models\ProcessViewState.cs" />
+    <Compile Include="..\..\DevTools\Models\AppSettings.cs" Link="Models\AppSettings.cs" />
     <Compile Include="..\..\DevTools\Models\AppActivityEntry.cs" Link="Models\AppActivityEntry.cs" />
     <Compile Include="..\..\DevTools\Services\FirefoxSessionReader.cs" Link="Services\FirefoxSessionReader.cs" />
     <Compile Include="..\..\DevTools\Models\WorkspaceContext.cs" Link="Models\WorkspaceContext.cs" />

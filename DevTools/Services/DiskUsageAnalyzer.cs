@@ -430,11 +430,11 @@ public sealed class DiskUsageAnalyzer
             var display = string.IsNullOrWhiteSpace(label) ? drive.RootPath : $"{drive.RootPath} ({label})";
             results.TryGetValue(drive.RootPath, out var result);
             var tree = result?.Tree;
-            var bitmapNote = DescribeNtfsBitmap(tree?.NtfsAllocation?.Bitmap);
+            var bitmap = tree?.NtfsAllocation?.Bitmap;
             if (drive.Space is not { } space)
             {
                 entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, false, null, "Unavailable",
-                    $"Windows did not report space totals for this volume.{bitmapNote}", display));
+                    $"Windows did not report space totals for this volume.{DescribeNtfsBitmap(bitmap)}", display));
                 continue;
             }
 
@@ -465,24 +465,27 @@ public sealed class DiskUsageAnalyzer
                 if (tree.NtfsAllocation is { } ntfs)
                 {
                     observed += (Int128)ntfs.ReservedBytes + ntfs.UnlinkedBytes;
-                    scanNote += $" {allocatedBytes:N0} bytes assigned to folders, {ntfs.ReservedBytes:N0} in reserved NTFS records, " +
-                        $"and {ntfs.UnlinkedBytes:N0} in NTFS records without a verified folder.";
+                    scanNote += bitmap is null
+                        ? $" {allocatedBytes:N0} bytes assigned to folders, {ntfs.ReservedBytes:N0} in reserved NTFS records, " +
+                            $"and {ntfs.UnlinkedBytes:N0} in NTFS records without a verified folder."
+                        : $" {allocatedBytes:N0} bytes referenced by folder records, {ntfs.ReservedBytes:N0} by reserved NTFS records, " +
+                            $"and {ntfs.UnlinkedBytes:N0} by unlinked NTFS records.";
                 }
                 else
                 {
                     scanNote += $" {allocatedBytes:N0} bytes of allocation attributed by the scan.";
                 }
 
-                if (space.IsVolumeWide)
+                if (!space.IsVolumeWide)
+                {
+                    scanNote += " Volume-wide usage is unavailable for reconciliation.";
+                }
+                else if (bitmap is null)
                 {
                     var remainingUsed = space.UsedBytes - observed;
                     scanNote += remainingUsed >= 0
                         ? $" {remainingUsed:N0} used bytes remain unattributed."
                         : $" Observed allocation exceeded reported usage by {-remainingUsed:N0} bytes during the scan.";
-                }
-                else
-                {
-                    scanNote += " Volume-wide usage is unavailable for reconciliation.";
                 }
             }
             else if (result is not null)
@@ -492,6 +495,7 @@ public sealed class DiskUsageAnalyzer
                     : " Folder allocation is unavailable.";
             }
 
+            var bitmapNote = DescribeNtfsBitmap(bitmap, space.IsVolumeWide ? space.UsedBytes : null);
             var note = $"{totals}. {scanNote}{bitmapNote}";
             entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, drive.HasDriveLetter || result?.Tree is not null, space.UsedBytes,
                 $"{FormatBytes(space.UsedBytes)} used", note, display));
@@ -522,7 +526,7 @@ public sealed class DiskUsageAnalyzer
             $"{unmatched:N0} in other partition ranges and {outside:N0} outside partition ranges.";
     }
 
-    private static string DescribeNtfsBitmap(NtfsBitmapAllocation? allocation)
+    private static string DescribeNtfsBitmap(NtfsBitmapAllocation? allocation, long? volumeUsedBytes = null)
     {
         if (allocation is not { } bitmap)
         {
@@ -540,6 +544,13 @@ public sealed class DiskUsageAnalyzer
         if (bitmap.RepeatedReferenceBytes > 0)
         {
             note += $" MFT runs contain {bitmap.RepeatedReferenceBytes:N0} bytes of repeated cluster references.";
+        }
+
+        if (volumeUsedBytes is long used && used != bitmap.InUseBytes)
+        {
+            var difference = (Int128)used - bitmap.InUseBytes;
+            note += $" Windows volume counters reported {Int128.Abs(difference):N0} " +
+                $"{(difference > 0 ? "more" : "fewer")} used bytes than the bitmap pass.";
         }
 
         return note;

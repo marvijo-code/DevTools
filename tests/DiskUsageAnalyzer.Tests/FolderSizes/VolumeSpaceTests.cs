@@ -75,14 +75,18 @@ public sealed class VolumeSpaceTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void DriveSummary_ReportsBitmapSeparatelyFromWindowsCapacityCounters(bool hasSpace)
+    [InlineData(700L, true, "10 more used bytes")]
+    [InlineData(450L, true, "240 fewer used bytes")]
+    [InlineData(690L, true, null)]
+    [InlineData(700L, false, null)]
+    [InlineData(null, false, null)]
+    public void DriveSummary_ReconcilesBitmapClustersAndReportsCapacityDifferences(
+        long? windowsUsed, bool volumeWide, string? expectedDifference)
     {
         var drive = new DriveDescriptor(@"C:\", "Test", "NTFS",
-            hasSpace ? new VolumeSpace(1000, 300, 700, 0, 0, IsVolumeWide: true) : null);
+            windowsUsed is long used ? new VolumeSpace(1000, 1000 - used, used, 0, 0, volumeWide) : null);
         var tree = new FolderTree(drive.RootPath, [-1], [""], [400], [1], "NTFS", TimeSpan.Zero,
-            [444], new NtfsRecordAllocation(0, 0, new NtfsBitmapAllocation(690, 440, 4, 20UL)));
+            [414], new NtfsRecordAllocation(30, 20, new NtfsBitmapAllocation(690, 440, 4, 20UL)));
         var results = new Dictionary<string, DriveScanResult>
         {
             [drive.RootPath] = new DriveScanResult(drive, tree, "NTFS", "")
@@ -94,6 +98,21 @@ public sealed class VolumeSpaceTests
         Assert.Contains("440 appear in MFT runs and 250 have no matching run.", note);
         Assert.Contains("4 bytes in MFT runs were marked free", note);
         Assert.Contains("20 bytes of repeated cluster references", note);
+        Assert.DoesNotContain("used bytes remain unattributed", note);
+        Assert.DoesNotContain("Observed allocation exceeded", note);
+        if (windowsUsed is not null)
+        {
+            Assert.Contains("414 bytes referenced by folder records, 30 by reserved NTFS records, and 20 by unlinked NTFS records.", note);
+        }
+
+        if (expectedDifference is null)
+        {
+            Assert.DoesNotContain("used bytes than the bitmap pass", note);
+        }
+        else
+        {
+            Assert.Contains($"Windows volume counters reported {expectedDifference} than the bitmap pass.", note);
+        }
     }
 
     [Fact]

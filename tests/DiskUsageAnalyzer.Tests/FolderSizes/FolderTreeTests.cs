@@ -138,6 +138,35 @@ public sealed class FolderTreeTests
     }
 
     [Fact]
+    public void Tree_IndexesChildrenWhenTheirNodeNumbersAreInterleaved()
+    {
+        var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);
+        var first = builder.AddChildFolder(0, "first");
+        var second = builder.AddChildFolder(0, "second");
+        var start = builder.AppendEnumeratedChildren(first,
+            Enumerable.Range(0, 1500).Select(index => $"folder-{index:D4}").ToList());
+        var unrelated = builder.AddChildFolder(second, "unrelated");
+        var last = builder.AddChildFolder(first, "last");
+        builder.AddFilesToFolder(start, 10, 1, 4096);
+        builder.AddFilesToFolder(last, 20, 1, 8192);
+        builder.AddFilesToFolder(first, 5, 1, 4096);
+        builder.AddFilesToFolder(unrelated, 50, 1, 16384);
+        var tree = builder.Build("Fixture", TimeSpan.Zero);
+
+        Assert.Equal(1501, tree.GetChildFolderCount(first));
+        Assert.Equal([last, start], tree.GetChildren(first, 2));
+        Assert.Equal([last, start], tree.GetChildrenByAllocation(first, 2));
+        Assert.Equal([unrelated], tree.GetChildren(second));
+        Assert.Equal((5L, 1L), tree.GetDirectFileStatistics(first));
+        Assert.Equal(4096, tree.GetDirectAllocatedBytes(first));
+        for (var index = 0; index < 6; index++)
+        {
+            Assert.Equal(last, tree.Find(@"C:\FIRST\LAST"));
+            Assert.Equal(-1, tree.Find(@"C:\first\unrelated"));
+        }
+    }
+
+    [Fact]
     public void EnumeratedSiblings_KeepDistinctNamesAndTotalsThroughRefresh()
     {
         var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);

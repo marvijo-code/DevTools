@@ -24,7 +24,7 @@ public sealed class FolderTree
     private readonly long[] _fileCount;
     private readonly long[]? _allocatedBytes;
     private readonly int[] _childStart;
-    private readonly int[] _childIndex;
+    private readonly int[]? _childIndex;
     private readonly BitArray? _incompleteSubtrees;
     private readonly BitArray? _incompleteAllocationSubtrees;
     private ConcurrentDictionary<int, ChildNameIndex>? _childNameIndexes;
@@ -44,7 +44,8 @@ public sealed class FolderTree
         BitArray? incompleteSubtrees = null,
         int incompleteDirectoryCount = 0,
         BitArray? incompleteAllocationSubtrees = null,
-        int incompleteAllocationDirectoryCount = 0)
+        int incompleteAllocationDirectoryCount = 0,
+        int[]? contiguousChildStarts = null)
     {
         if (parent.Length == 0 || parent.Length != names.Length || parent.Length != totalBytes.Length ||
             parent.Length != fileCount.Length || (allocatedBytes is not null && parent.Length != allocatedBytes.Length))
@@ -66,20 +67,52 @@ public sealed class FolderTree
         EngineName = engineName;
         Elapsed = elapsed;
 
-        // Counting sort of nodes by parent: children of node p live in
-        // _childIndex[_childStart[p] .. _childStart[p + 1]).
         var count = parent.Length;
+        if (contiguousChildStarts is not null)
+        {
+            if (contiguousChildStarts.Length != count + 1 ||
+                contiguousChildStarts[0] != 0 || contiguousChildStarts[count] != count - 1)
+            {
+                throw new ArgumentException("The contiguous child ranges must cover all non-root folders.", nameof(contiguousChildStarts));
+            }
+
+            _childStart = contiguousChildStarts;
+            return;
+        }
+
+        // Counting sort by parent when the caller has not already grouped each parent's children.
         _childStart = new int[count + 1];
+        var previousParent = 0;
+        var grouped = true;
         for (var i = 1; i < count; i++)
         {
             var p = parent[i];
             if (p >= 0 && p < count && p != i)
             {
                 _childStart[p]++;
+                grouped &= p >= previousParent;
+                previousParent = p;
+            }
+            else
+            {
+                grouped = false;
             }
         }
 
         var childCount = 0;
+        if (grouped)
+        {
+            for (var i = 0; i < count; i++)
+            {
+                var groupLength = _childStart[i];
+                _childStart[i] = childCount;
+                childCount += groupLength;
+            }
+
+            _childStart[count] = childCount;
+            return;
+        }
+
         for (var i = 0; i < count; i++)
         {
             childCount += _childStart[i];
@@ -149,7 +182,7 @@ public sealed class FolderTree
         var files = _fileCount[node];
         for (var i = _childStart[node]; i < _childStart[node + 1]; i++)
         {
-            var child = _childIndex[i];
+            var child = GetChildAt(i);
             bytes -= _totalBytes[child];
             files -= _fileCount[child];
         }
@@ -165,7 +198,7 @@ public sealed class FolderTree
         var total = totals[node];
         for (var i = _childStart[node]; i < _childStart[node + 1]; i++)
         {
-            total -= totals[_childIndex[i]];
+            total -= totals[GetChildAt(i)];
         }
 
         return Math.Max(0, total);
@@ -192,7 +225,7 @@ public sealed class FolderTree
         {
             // Retain only the requested children of wide folders. The lowest-ranked entry leaves first.
             var heap = new int[max];
-            Array.Copy(_childIndex, start, heap, 0, max);
+            CopyChildRange(start, heap);
             for (var i = heap.Length / 2 - 1; i >= 0; i--)
             {
                 SiftWorstDown(heap, i, heap[i], sizes);
@@ -200,9 +233,27 @@ public sealed class FolderTree
 
             var worst = heap[0];
             var cutoff = sizes[worst];
-            for (var i = start + max; i < start + count; i++)
+            if (_childIndex is { } indexes)
             {
-                var child = _childIndex[i];
+                foreach (var child in indexes.AsSpan(start + max, count - max))
+                {
+                    Consider(child);
+                }
+            }
+            else
+            {
+                for (var child = start + max + 1; child <= start + count; child++)
+                {
+                    Consider(child);
+                }
+            }
+
+            SortChildren(heap, sizes);
+            return heap;
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            void Consider(int child)
+            {
                 var size = sizes[child];
                 if (size > cutoff || (size == cutoff && CompareChildNames(child, worst) < 0))
                 {
@@ -211,15 +262,29 @@ public sealed class FolderTree
                     cutoff = sizes[worst];
                 }
             }
-
-            SortChildren(heap, sizes);
-            return heap;
         }
 
         var children = new int[count];
-        Array.Copy(_childIndex, start, children, 0, count);
+        CopyChildRange(start, children);
         SortChildren(children, sizes);
         return count <= max ? children : children[..max];
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int GetChildAt(int slot) => _childIndex is null ? slot + 1 : _childIndex[slot];
+
+    private void CopyChildRange(int start, Span<int> destination)
+    {
+        if (_childIndex is not null)
+        {
+            _childIndex.AsSpan(start, destination.Length).CopyTo(destination);
+            return;
+        }
+
+        for (var index = 0; index < destination.Length; index++)
+        {
+            destination[index] = start + index + 1;
+        }
     }
 
     private void SiftWorstDown(int[] heap, int position, int node, long[] sizes)
@@ -320,7 +385,7 @@ public sealed class FolderTree
                 continue;
             }
 
-            var children = _childIndex.AsSpan(_childStart[current], GetChildFolderCount(current));
+            var children = GetChildRange(current);
             var next = children.Length < MinimumIndexedChildren
                 ? FindChildByName(children, _names, part)
                 : FindIndexedChild(current, children, part);
@@ -335,7 +400,7 @@ public sealed class FolderTree
         return current;
     }
 
-    private int FindIndexedChild(int parent, ReadOnlySpan<int> children, ReadOnlySpan<char> searchName)
+    private int FindIndexedChild(int parent, ChildRange children, ReadOnlySpan<char> searchName)
     {
         var indexes = LazyInitializer.EnsureInitialized(ref _childNameIndexes);
         var index = indexes.GetOrAdd(parent, static (node, tree) => new ChildNameIndex(tree, node), this);
@@ -375,7 +440,7 @@ public sealed class FolderTree
 
     private int[] BuildChildNameHashes(int parent)
     {
-        var children = _childIndex.AsSpan(_childStart[parent], GetChildFolderCount(parent));
+        var children = GetChildRange(parent);
         var hashes = new int[children.Length];
         for (var index = 0; index < hashes.Length; index++)
         {
@@ -395,12 +460,33 @@ public sealed class FolderTree
             _hashes.IsValueCreated || Interlocked.Increment(ref _lookups) >= 4 ? _hashes.Value : null;
     }
 
-    internal static int FindChildByName(ReadOnlySpan<int> children, string?[] names, ReadOnlySpan<char> searchName)
+    private ChildRange GetChildRange(int parent)
+    {
+        var start = _childStart[parent];
+        var count = GetChildFolderCount(parent);
+        return new ChildRange(_childIndex is null ? default : _childIndex.AsSpan(start, count), start + 1, count);
+    }
+
+    // A grouped tree can use consecutive node numbers without storing an index for each child.
+    private readonly ref struct ChildRange(ReadOnlySpan<int> indexes, int first, int length)
+    {
+        private readonly ReadOnlySpan<int> _indexes = indexes;
+        private readonly int _first = first;
+
+        public int Length { get; } = length;
+        public int this[int index] => _indexes.IsEmpty ? _first + index : _indexes[index];
+    }
+
+    internal static int FindChildByName(ReadOnlySpan<int> children, string?[] names, ReadOnlySpan<char> searchName) =>
+        FindChildByName(new ChildRange(children, 0, children.Length), names, searchName);
+
+    private static int FindChildByName(ChildRange children, string?[] names, ReadOnlySpan<char> searchName)
     {
         var match = -1;
         var ambiguous = false;
-        foreach (var child in children)
+        for (var index = 0; index < children.Length; index++)
         {
+            var child = children[index];
             var name = names[child];
             if (!searchName.Equals(name, StringComparison.OrdinalIgnoreCase))
             {

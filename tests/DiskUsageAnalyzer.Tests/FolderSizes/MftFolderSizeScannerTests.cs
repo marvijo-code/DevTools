@@ -202,7 +202,12 @@ public sealed class MftFolderSizeScannerTests
 
         var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "NTFS MFT", System.Diagnostics.Stopwatch.StartNew());
 
+        var parent = tree.Find(@"C:\Parent");
         var child = tree.Find(@"C:\Parent\First");
+        Assert.Equal([parent], tree.GetChildren(0));
+        Assert.Equal([child], tree.GetChildren(parent));
+        Assert.Empty(tree.GetChildren(child));
+        Assert.Equal((20L, 1L), tree.GetDirectFileStatistics(child));
         Assert.Equal(3, tree.FolderCount);
         Assert.Equal(20, tree.TotalBytes);
         Assert.Equal(20, tree.GetTotalBytes(child));

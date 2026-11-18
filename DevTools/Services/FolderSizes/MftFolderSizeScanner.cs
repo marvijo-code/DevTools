@@ -136,6 +136,7 @@ public sealed class MftFolderSizeScanner
         var capacity = edgeCount + 1;
         var nodeParents = new int[capacity];
         var nodeNames = new string[capacity];
+        var childStarts = new int[capacity + 1];
         nodeParents[0] = root;
         var count = 1;
         for (var head = 0; head < count; head++)
@@ -145,6 +146,7 @@ public sealed class MftFolderSizeScanner
             nodeParents[head] = head == 0 ? 0 : ~recordLinks[table.Parent[record]];
             nodeNames[head] = head == 0 ? string.Empty : table.Names[record] ?? "<unnamed>";
 
+            childStarts[head] = count - 1;
             // Each record has at most one parent edge and the root has no parent edge.
             // A cycle therefore cannot be reached from the root.
             var edge = recordLinks[record];
@@ -158,11 +160,13 @@ public sealed class MftFolderSizeScanner
             }
         }
 
+        childStarts[count] = count - 1;
         if (count < capacity)
         {
             // Some directory records have no verified path from the root.
             Array.Resize(ref nodeParents, count);
             Array.Resize(ref nodeNames, count);
+            Array.Resize(ref childStarts, count + 1);
         }
 
         var totals = new long[count];
@@ -242,7 +246,7 @@ public sealed class MftFolderSizeScanner
         ScanGate.Wait(cancellationToken);
         stopwatch.Stop();
         var tree = new FolderTree(rootPath, nodeParents, nodeNames, totals, files, engineName, stopwatch.Elapsed,
-            allocated, allocation);
+            allocated, allocation, contiguousChildStarts: childStarts);
         cancellationToken.ThrowIfCancellationRequested();
         return tree;
     }

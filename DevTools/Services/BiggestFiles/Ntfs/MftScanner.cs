@@ -96,14 +96,17 @@ public sealed class MftScanner
         }
 
         var winners = top.UnorderedItems.ToList();
-        table.LoadFileNames(winners.Select(winner => winner.Element), cancellationToken);
+        var details = table.LoadRankedFileDetails(winners.Select(winner => winner.Element), cancellationToken);
         winners.Sort(static (left, right) => right.Priority.CompareTo(left.Priority));
         var pathCache = new Dictionary<uint, string>();
         var hits = new List<FileSizeHit>(winners.Count);
         foreach (var (index, size) in winners)
         {
-            var fullPath = table.BuildPath(index, pathCache);
-            hits.Add(new FileSizeHit(fullPath, size, table.AllocSize[index], ToModified(table.LastWrite[index])));
+            var file = details is null
+                ? new MftRankedFileDetails(table.Names[index] ?? "<unknown>", table.AllocSize[index], table.LastWrite[index])
+                : details[index];
+            var fullPath = table.BuildPath(index, pathCache, file.Name);
+            hits.Add(new FileSizeHit(fullPath, size, file.AllocatedBytes, ToModified(file.LastWriteFileTime)));
         }
 
         cancellationToken.ThrowIfCancellationRequested();

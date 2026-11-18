@@ -191,8 +191,8 @@ public sealed class MftExtentMapReaderTests
         {
             var disk = BuildDisk(nonResidentList: true);
             new MftRecordBuilder().Directory(true).Sequence(3).Build().CopyTo(disk, 95 * ClusterSize);
-            new MftRecordBuilder().NonResidentData(4130, 8192, runs: [0x11, 16, 120, 0], highestVcn: 15)
-                .Build().CopyTo(disk, 97 * ClusterSize);
+            var modified = new DateTimeOffset(2020, 4, 5, 6, 7, 8, TimeSpan.Zero);
+            new MftRecordBuilder().LastWrite(modified.ToFileTime()).Build().CopyTo(disk, 97 * ClusterSize);
 
             foreach (var (offset, baseReference, name, parent, nameNamespace) in new (int, ulong, string, ulong, byte)[]
             {
@@ -204,8 +204,12 @@ public sealed class MftExtentMapReaderTests
                 (109, (3UL << 48) | 24, "Folder", (1UL << 48) | 5, 1)
             })
             {
-                new MftRecordBuilder().BaseRecord(baseReference).FileName(name, parent, nameNamespace)
-                    .Build().CopyTo(disk, offset * ClusterSize);
+                var extension = new MftRecordBuilder().BaseRecord(baseReference).FileName(name, parent, nameNamespace);
+                if (offset == 103)
+                {
+                    extension.NonResidentData(4130, 8192, runs: [0x11, 16, 120, 0], highestVcn: 15);
+                }
+                extension.Build().CopyTo(disk, offset * ClusterSize);
             }
 
             await File.WriteAllBytesAsync(path, disk);
@@ -221,7 +225,16 @@ public sealed class MftExtentMapReaderTests
             Assert.Equal(1, tree.TotalFiles);
             var folder = tree.Find(@"C:\Folder");
             Assert.True(folder > 0);
-            if (!keepFileNames)
+            if (keepFileNames)
+            {
+                var ranked = MftScanner.RankFiles(table, @"C:\Folder", 1, Stopwatch.StartNew(), CancellationToken.None);
+                var hit = Assert.Single(ranked.Top);
+                Assert.Equal(@"C:\Folder\data.bin", hit.FullPath);
+                Assert.Equal(4130, hit.SizeBytes);
+                Assert.Equal(8192, hit.AllocatedBytes);
+                Assert.Equal(modified, hit.ModifiedUtc);
+            }
+            else
             {
                 Assert.Equal(16 * ClusterSize, tree.GetAllocatedBytes(folder));
                 Assert.Equal(0, tree.NtfsAllocation?.UnlinkedBytes);
@@ -235,7 +248,7 @@ public sealed class MftExtentMapReaderTests
     }
 
     [Fact]
-    public void LoadDeferredFileNames_CoalescesAdjacentWinnersAndSkipsGapsAcrossExtents()
+    public void LoadDeferredFileDetails_CoalescesAdjacentWinnersAndSkipsGapsAcrossExtents()
     {
         const int recordSize = MftRecordBuilder.RecordSize;
         var extents = new List<(long Lcn, long ClusterCount)> { (20, 3), (50, 4), (100, 6) };
@@ -260,28 +273,35 @@ public sealed class MftExtentMapReaderTests
             logicalOffset += length;
         }
 
-        var names = new string?[6];
+        var table = new MftRecordTable(@"C:\", 6, parentReferences, new byte[6], new long[6], [], [], new string?[6]);
         var reads = new List<(long Offset, int Length)>();
-        MftTableLoader.LoadDeferredFileNames(winners, extents, recordSize, ClusterSize, parentReferences, sequences, names,
+        var details = MftTableLoader.LoadDeferredFileDetails(table, winners, extents, recordSize, ClusterSize, sequences,
+            new Dictionary<int, long>(),
             (offset, destination) =>
             {
                 reads.Add((offset, destination.Length));
                 physical.AsSpan((int)offset, destination.Length).CopyTo(destination);
             }, CancellationToken.None);
 
-        Assert.Equal(["file-1.bin", "file-2.bin", "file-5.bin"], winners.Select(index => names[index]));
+        Assert.Equal(["file-1.bin", "file-2.bin", "file-5.bin"], winners.Select(index => details[index].Name));
         Assert.Equal([(22L * ClusterSize, ClusterSize), (50L * ClusterSize, 3 * ClusterSize),
             (103L * ClusterSize, 2 * ClusterSize)], reads);
     }
 
-    [Fact]
-    public async Task RankFiles_ReadsDeferredNamesFromTheVerifiedRecords()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RankFiles_ReadsWinnerDetailsAndRejectsChangedRecords(bool reuseRecord)
     {
         var directory = Directory.CreateTempSubdirectory("devtools-deferred-mft-names-");
         var path = Path.Combine(directory.FullName, "image.bin");
         try
         {
-            await File.WriteAllBytesAsync(path, BuildDisk(nonResidentList: true));
+            var disk = BuildDisk(nonResidentList: true);
+            var modified = new DateTimeOffset(2021, 2, 3, 4, 5, 6, TimeSpan.Zero);
+            new MftRecordBuilder().FileName("data.bin", (3UL << 48) | 24, 1).LastWrite(modified.ToFileTime())
+                .NonResidentData(4130, 8192, runs: [0x11, 16, 120, 0], highestVcn: 15).Build().CopyTo(disk, 97 * ClusterSize);
+            await File.WriteAllBytesAsync(path, disk);
             using var volume = File.OpenHandle(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
             var eager = await MftTableLoader.LoadVolumeAsync(volume, @"C:\", Geometry, null, Stopwatch.StartNew(),
                 CancellationToken.None, keepFileNames: true);
@@ -289,16 +309,21 @@ public sealed class MftExtentMapReaderTests
                 CancellationToken.None, keepFileNames: true, deferFileNames: true);
             Assert.Equal("Folder", deferred.Names[24]);
             Assert.Null(deferred.Names[25]);
+            Assert.Empty(deferred.AllocSize);
+            Assert.Empty(deferred.LastWrite);
 
             var first = MftScanner.RankFiles(eager, @"C:\Folder", 1, Stopwatch.StartNew(), CancellationToken.None);
             var second = MftScanner.RankFiles(deferred, @"C:\Folder", 1, Stopwatch.StartNew(), CancellationToken.None);
-            Assert.Equal(Assert.Single(first.Top), Assert.Single(second.Top));
-            Assert.Equal("data.bin", deferred.Names[25]);
+            var hit = Assert.Single(second.Top);
+            Assert.Equal(Assert.Single(first.Top), hit);
+            Assert.Equal(modified, hit.ModifiedUtc);
+            Assert.Null(deferred.Names[25]);
 
             var stale = await MftTableLoader.LoadVolumeAsync(volume, @"C:\", Geometry, null, Stopwatch.StartNew(),
                 CancellationToken.None, keepFileNames: true, deferFileNames: true);
-            var replacement = new MftRecordBuilder().Sequence(2).FileName("replacement.bin", (3UL << 48) | 24, 1)
-                .ResidentData(80).Build();
+            var replacement = new MftRecordBuilder().Sequence(reuseRecord ? (ushort)2 : (ushort)1)
+                .FileName("data.bin", (3UL << 48) | 24, 1)
+                .NonResidentData(reuseRecord ? 4130 : 8193, 12288).Build();
             RandomAccess.Write(volume, replacement, 97 * ClusterSize);
             var error = Assert.Throws<IOException>(() =>
                 MftScanner.RankFiles(stale, @"C:\Folder", 1, Stopwatch.StartNew(), CancellationToken.None));

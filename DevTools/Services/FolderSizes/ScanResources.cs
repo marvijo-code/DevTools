@@ -51,7 +51,7 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
     {
         // Estimate the indexed columns, temporary tree indexes and decoded names. Leave half of the
         // available commit and physical memory alone so a drive refresh can coexist with other apps.
-        var bytesPerRecord = includeFileNames ? (deferFileNames ? 64 : 100) : 50;
+        var bytesPerRecord = includeFileNames ? (deferFileNames ? 48 : 100) : 50;
         var estimatedTableBytes = (long)records * bytesPerRecord;
         if (MemoryHeadroom is long available && estimatedTableBytes > available / 2)
         {

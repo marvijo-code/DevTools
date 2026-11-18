@@ -8,6 +8,8 @@ using DevTools.Services.FolderSizes;
 
 namespace DevTools.Services.BiggestFiles.Ntfs;
 
+internal readonly record struct MftRankedFileDetails(string Name, long AllocatedBytes, long LastWriteFileTime);
+
 /// <summary>
 /// In-memory snapshot of the NTFS Master File Table as parallel arrays indexed by MFT record
 /// number. Built once by <see cref="MftTableLoader"/> and shared by the biggest-files and
@@ -39,7 +41,7 @@ internal sealed class MftRecordTable
         string?[] names,
         MftRecordAllocations? recordAllocation = null,
         NtfsBitmapAllocation? bitmapAllocation = null,
-        Action<int[], CancellationToken>? loadFileNames = null)
+        Func<MftRecordTable, int[], CancellationToken, Dictionary<int, MftRankedFileDetails>>? loadFileDetails = null)
     {
         VolumeRoot = volumeRoot;
         RecordCount = recordCount;
@@ -51,7 +53,7 @@ internal sealed class MftRecordTable
         Names = names;
         RecordAllocation = recordAllocation;
         BitmapAllocation = bitmapAllocation;
-        _loadFileNames = loadFileNames;
+        _loadFileDetails = loadFileDetails;
     }
 
     public string VolumeRoot { get; }
@@ -71,22 +73,10 @@ internal sealed class MftRecordTable
     public string?[] Names { get; }
     public MftRecordAllocations? RecordAllocation { get; }
     public NtfsBitmapAllocation? BitmapAllocation { get; }
-    private readonly Action<int[], CancellationToken>? _loadFileNames;
+    private readonly Func<MftRecordTable, int[], CancellationToken, Dictionary<int, MftRankedFileDetails>>? _loadFileDetails;
 
-    public void LoadFileNames(IEnumerable<int> records, CancellationToken cancellationToken)
-    {
-        if (_loadFileNames is null)
-        {
-            return;
-        }
-
-        // Names recovered from extension records are already available.
-        var missing = records.Where(record => Names[record] is null).Distinct().Order().ToArray();
-        if (missing.Length > 0)
-        {
-            _loadFileNames(missing, cancellationToken);
-        }
-    }
+    public Dictionary<int, MftRankedFileDetails>? LoadRankedFileDetails(IEnumerable<int> records, CancellationToken cancellationToken) =>
+        _loadFileDetails?.Invoke(this, records.Distinct().Order().ToArray(), cancellationToken);
 
     /// <summary>True when the record is a base (non-extension) directory that carries a name.</summary>
     public bool IsNamedDirectory(int index)
@@ -223,9 +213,9 @@ internal sealed class MftRecordTable
         return result == 1;
     }
 
-    public string BuildPath(int index, Dictionary<uint, string> directoryCache)
+    public string BuildPath(int index, Dictionary<uint, string> directoryCache, string? fileName = null)
     {
-        var fileName = Names[index] ?? "<unknown>";
+        fileName ??= Names[index] ?? "<unknown>";
         var directory = BuildDirectoryPath((int)Parent[index], directoryCache, 0);
         return Path.Combine(directory, fileName);
     }
@@ -456,8 +446,10 @@ internal static class MftTableLoader
         var parent = new uint[recordCount];
         var flags = new byte[recordCount];
         var realSize = new long[recordCount];
-        var allocSize = keepFileNames ? new long[recordCount] : [];
-        var lastWrite = keepFileNames ? new long[recordCount] : [];
+        var eagerFileDetails = keepFileNames && !deferFileNames;
+        var allocSize = eagerFileDetails ? new long[recordCount] : [];
+        var lastWrite = eagerFileDetails ? new long[recordCount] : [];
+        var extensionFileAllocations = keepFileNames && deferFileNames ? new Dictionary<int, long>() : null;
         var recordAllocation = keepFileNames ? null : new MftRecordAllocations(recordCount, geometry.BytesPerCluster, geometry.TotalClusters);
         var observedBitmap = bitmapQuery is not null && recordAllocation is not null
             ? NtfsVolumeBitmap.TryCreate(geometry.TotalClusters, resources.MemoryHeadroom, bitmapQuery, cancellationToken)
@@ -488,7 +480,8 @@ internal static class MftTableLoader
 
         var referencedClusters = await ParseAllRecordsAsync(
             volume, geometry, extents, recordSize, recordCount, chunkBytes, parserCount, queueCapacity, carryBytes,
-            parent, flags, realSize, allocSize, lastWrite, names, keepFileNames, deferFileNames, recordAllocation, referenceSequences,
+            parent, flags, realSize, allocSize, lastWrite, names, keepFileNames, deferFileNames, extensionFileAllocations,
+            recordAllocation, referenceSequences,
             observedBitmap, OnParsed,
             cancellationToken).ConfigureAwait(false);
 
@@ -506,18 +499,25 @@ internal static class MftTableLoader
 
         reportProgress?.Invoke(recordCount, recordCount, stopwatch.Elapsed);
 
-        Action<int[], CancellationToken>? loadFileNames = deferFileNames && keepFileNames
-            ? (records, token) => LoadDeferredFileNames(records, extents, recordSize, clusterBytes, parent,
-                referenceSequences, names, (offset, destination) => ReadExact(volume, destination, offset), token)
-            : null;
+        Func<MftRecordTable, int[], CancellationToken, Dictionary<int, MftRankedFileDetails>>? loadFileDetails =
+            extensionFileAllocations is not null
+                ? (table, records, token) => LoadDeferredFileDetails(table, records, extents, recordSize, clusterBytes,
+                    referenceSequences, extensionFileAllocations, (offset, destination) => ReadExact(volume, destination, offset), token)
+                : null;
         return new MftRecordTable(volumeRoot, recordCount, parent, flags, realSize, allocSize, lastWrite, names,
-            recordAllocation, bitmapAllocation, loadFileNames);
+            recordAllocation, bitmapAllocation, loadFileDetails);
     }
 
-    internal static void LoadDeferredFileNames(int[] records, List<(long Lcn, long ClusterCount)> extents,
-        int recordSize, int clusterBytes, uint[] parents, uint[] referenceSequences, string?[] names,
-        MftExtentMapReader.ReadAt readAt, CancellationToken cancellationToken)
+    internal static Dictionary<int, MftRankedFileDetails> LoadDeferredFileDetails(MftRecordTable table, int[] records,
+        List<(long Lcn, long ClusterCount)> extents, int recordSize, int clusterBytes, uint[] referenceSequences,
+        IReadOnlyDictionary<int, long> extensionFileAllocations, MftExtentMapReader.ReadAt readAt, CancellationToken cancellationToken)
     {
+        var details = new Dictionary<int, MftRankedFileDetails>(records.Length);
+        if (records.Length == 0)
+        {
+            return details;
+        }
+
         long ClusterStart(long offset) => offset / clusterBytes * clusterBytes;
         long ClusterEnd(long offset) => ((offset - 1) / clusterBytes + 1) * clusterBytes;
 
@@ -567,14 +567,21 @@ internal static class MftTableLoader
                     var index = records[first];
                     var record = batch.Slice((int)((long)index * recordSize - batchStart), recordSize);
                     var info = new MftRecordInfo();
-                    if (!MftRecordParser.TryParseRecord(record, ref info, requireInUse: true, readLastWrite: false) ||
-                        info.IsDirectory || info.IsExtension || !info.HasName || info.ParentRecordNumber != parents[index] ||
-                        (((uint)info.SequenceNumber << 16) | info.ParentRecordSequence) != referenceSequences[index])
+                    var extensionName = table.Names[index];
+                    var sizeFromExtension = extensionFileAllocations.TryGetValue(index, out var extensionBytes);
+                    var hadBaseSize = !sizeFromExtension && (table.Flags[index] & MftRecordTable.FlagHasSize) != 0;
+                    if (!MftRecordParser.TryParseRecord(record, ref info, requireInUse: true, readLastWrite: true) ||
+                        info.IsDirectory || info.IsExtension ||
+                        (extensionName is null && (!info.HasName || info.ParentRecordNumber != table.Parent[index])) ||
+                        (((uint)info.SequenceNumber << 16) | info.ParentRecordSequence) != referenceSequences[index] ||
+                        info.DataSizesValid != hadBaseSize || (hadBaseSize && info.DataRealSize != table.RealSize[index]))
                     {
-                        throw new IOException($"NTFS record {index} changed while validating its file name.");
+                        throw new IOException($"NTFS record {index} changed while validating its file details.");
                     }
 
-                    names[index] = Encoding.Unicode.GetString(record.Slice(info.NameOffsetInRecord, info.NameLengthChars * 2));
+                    var name = extensionName ?? Encoding.Unicode.GetString(record.Slice(info.NameOffsetInRecord, info.NameLengthChars * 2));
+                    var allocated = sizeFromExtension ? extensionBytes : info.DataAllocatedSize;
+                    details.Add(index, new MftRankedFileDetails(name, allocated, info.LastWriteFileTime));
                 }
             }
         }
@@ -586,6 +593,8 @@ internal static class MftTableLoader
                 ArrayPool<byte>.Shared.Return(buffer);
             }
         }
+
+        return details;
     }
 
     internal static int GetRecordCount(NtfsVolumeData geometry)
@@ -702,6 +711,7 @@ internal static class MftTableLoader
         string?[] names,
         bool keepFileNames,
         bool deferFileNames,
+        Dictionary<int, long>? extensionFileAllocations,
         MftRecordAllocations? recordAllocation,
         uint[] referenceSequences,
         NtfsVolumeBitmap? observedBitmap,
@@ -777,9 +787,13 @@ internal static class MftTableLoader
             if (extension.HasLogicalSize && (flags[baseNumber] & MftRecordTable.FlagHasSize) == 0)
             {
                 realSize[baseNumber] = extension.LogicalBytes;
-                if (keepFileNames)
+                if (allocSize.Length != 0)
                 {
                     allocSize[baseNumber] = extension.UnnamedDataAllocation;
+                }
+                else if (extensionFileAllocations is not null && (flags[baseNumber] & MftRecordTable.FlagDirectory) == 0)
+                {
+                    extensionFileAllocations.Add(baseNumber, extension.UnnamedDataAllocation);
                 }
 
                 flags[baseNumber] |= MftRecordTable.FlagHasSize;
@@ -815,7 +829,7 @@ internal static class MftTableLoader
                 var globalIndex = block.StartRecordIndex + r;
                 var recordSpan = span.Slice(r * recordSize, recordSize);
                 if (!MftRecordParser.TryParseRecord(recordSpan, ref info,
-                    requireInUse: true, readLastWrite: keepFileNames, countAllocation: recordAllocation is not null,
+                    requireInUse: true, readLastWrite: lastWrite.Length != 0, countAllocation: recordAllocation is not null,
                     volumeClusters: geometry.TotalClusters, observedBitmap: observedBitmap, attributeRuns: attributeRuns))
                 {
                     if (info.HasIncompleteAllocation)
@@ -857,7 +871,7 @@ internal static class MftTableLoader
                     {
                         flag |= MftRecordTable.FlagHasSize;
                         realSize[globalIndex] = info.DataRealSize;
-                        if (keepFileNames)
+                        if (allocSize.Length != 0)
                         {
                             allocSize[globalIndex] = info.DataAllocatedSize;
                         }
@@ -868,7 +882,7 @@ internal static class MftTableLoader
                     ? (uint)info.ParentRecordNumber
                     : MftRecordTable.InvalidParentRecord;
                 referenceSequences[globalIndex] = ((uint)info.SequenceNumber << 16) | info.ParentRecordSequence;
-                if (keepFileNames)
+                if (lastWrite.Length != 0)
                 {
                     lastWrite[globalIndex] = info.LastWriteFileTime;
                 }

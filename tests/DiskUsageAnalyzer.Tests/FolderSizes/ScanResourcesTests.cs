@@ -151,6 +151,16 @@ public sealed class ScanResourcesTests
     }
 
     [Fact]
+    public void MftPlan_CanFitDeferredRankingsWithoutFullVolumeDetailColumns()
+    {
+        var resources = new ScanResources(8, 32 * MiB);
+        Assert.Throws<InsufficientMemoryException>(() =>
+            resources.MftPlan(200_000, 204_800_000, 4096, 1024, includeFileNames: true));
+        var plan = resources.MftPlan(200_000, 204_800_000, 4096, 1024, includeFileNames: true, deferFileNames: true);
+        Assert.True(plan.ChunkBytes >= 4096);
+    }
+
+    [Fact]
     public void MftPlan_RejectsATableThatWouldExhaustMemory()
     {
         var resources = new ScanResources(12, 128 * MiB);

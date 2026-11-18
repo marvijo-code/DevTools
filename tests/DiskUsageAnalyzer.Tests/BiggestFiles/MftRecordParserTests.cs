@@ -417,6 +417,30 @@ public sealed class MftRecordParserTests
     }
 
     [Fact]
+    public void TryDecodeRunList_IsolatesPackedFieldsAndKeepsTheLcnAcrossSparseRuns()
+    {
+        byte[] runs =
+        [
+            0x12, 0x66, 0x00, 0x74, // 102 clusters at LCN 116.
+            0x01, 0x06,             // Six sparse clusters.
+            0x31, 0x0C, 0xF0, 0xFF, 0xFF, // 12 clusters after a negative delta of 16.
+            0x11, 0x04, 0x7F,       // Four clusters after a positive delta of 127.
+            0x00, 0xFF, 0xFF, 0xFF
+        ];
+        var extents = new List<(long Lcn, long ClusterCount)>();
+
+        Assert.True(MftRecordParser.TryDecodeRunList(runs, extents));
+        Assert.Equal([(116L, 102L), (100L, 12L), (227L, 4L)], extents);
+    }
+
+    [Fact]
+    public void TryDecodeRunList_RejectsLengthsOutsideTheSignedClusterRange()
+    {
+        byte[] runs = [0x08, 0, 0, 0, 0, 0, 0, 0, 0x80, 0];
+        Assert.False(MftRecordParser.TryDecodeRunList(runs, []));
+    }
+
+    [Fact]
     public void TryDecodeRunList_HandlesNegativeRelativeOffsets()
     {
         // Run 1: 0x11 0x20 0x00  -> length 0x20 at LCN 0x00 ... wait offsetSize 1, offset 0x00 => LCN 0.

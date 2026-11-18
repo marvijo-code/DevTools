@@ -453,19 +453,26 @@ public static class MftRecordParser
             }
 
             var lengthSize = header & 0x0F;
-            var offsetSize = (header >> 4) & 0x0F;
-            if (lengthSize is < 1 or > 8 || offsetSize > 8 || lengthSize + offsetSize > runList.Length - index)
+            var offsetSize = header >> 4;
+            var fieldBytes = lengthSize + offsetSize;
+            if (lengthSize is < 1 or > 8 || offsetSize > 8 || fieldBytes > runList.Length - index)
             {
                 return false;
             }
 
-            var clusterCount = ReadUnsignedLittleEndian(runList.Slice(index, lengthSize));
+            var fields = runList[index..];
+            index += fieldBytes;
+            // A single load covers typical runs. The shifts discard any bytes from the next run.
+            var usePackedRead = fieldBytes <= sizeof(ulong) && fields.Length >= sizeof(ulong);
+            var packed = usePackedRead ? BinaryPrimitives.ReadUInt64LittleEndian(fields) : 0UL;
+            var lengthShift = (sizeof(ulong) - lengthSize) * 8;
+            var clusterCount = usePackedRead
+                ? unchecked((long)((packed << lengthShift) >> lengthShift))
+                : ReadUnsignedLittleEndian(fields[..lengthSize]);
             if (clusterCount <= 0)
             {
                 return false;
             }
-
-            index += lengthSize;
 
             if (offsetSize == 0)
             {
@@ -483,7 +490,10 @@ public static class MftRecordParser
                 return false;
             }
 
-            var deltaLcn = ReadSignedLittleEndian(runList.Slice(index, offsetSize));
+            var offsetShift = (sizeof(ulong) - offsetSize) * 8;
+            var deltaLcn = usePackedRead
+                ? unchecked((long)((packed >> (lengthSize * 8)) << offsetShift)) >> offsetShift
+                : ReadSignedLittleEndian(fields.Slice(lengthSize, offsetSize));
             if (deltaLcn < -currentLcn || deltaLcn > volumeClusters - clusterCount - currentLcn)
             {
                 return false;
@@ -492,7 +502,6 @@ public static class MftRecordParser
             currentLcn += deltaLcn;
             allocatedClusters += clusterCount;
             extents?.Add((currentLcn, clusterCount));
-            index += offsetSize;
         }
 
         return false;

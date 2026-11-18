@@ -15,7 +15,8 @@ namespace DevTools;
 
 public sealed partial class MainPage : Page
 {
-    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _refreshTimer;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _refreshTimer;
+    private Task? _workflowInitialization;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _liveRunTimer;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _resourceTimer;
     private readonly WindowZoomController _windowZoomController;
@@ -31,17 +32,12 @@ public sealed partial class MainPage : Page
         DataContext = ViewModel;
         _windowZoomController = new WindowZoomController(RootLayoutGrid);
         RegisterZoomKeyboardAccelerators();
-        ViewModel.PropertyChanged += ViewModel_PropertyChanged;
 
-        _refreshTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
-        _refreshTimer.Tick += RefreshTimer_Tick;
         _liveRunTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
         _liveRunTimer.Interval = TimeSpan.FromMilliseconds(500);
         _liveRunTimer.Tick += LiveRunTimer_Tick;
         _resourceTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
         _resourceTimer.Tick += ResourceTimer_Tick;
-        ApplyRefreshTimerSettings();
-        ApplyResourceTimerSettings();
         ApplyActivePaneState();
         RootLayoutGrid.KeyDown += RootLayoutGrid_KeyDown;
 
@@ -52,6 +48,7 @@ public sealed partial class MainPage : Page
     private void MainPage_Loaded(object sender, RoutedEventArgs e)
     {
         AppLog.Info("MainPage loaded.");
+        ViewModel.PropertyChanged += ViewModel_PropertyChanged;
         if (!_startupRenderRecorded)
         {
             CompositionTarget.Rendering += MainPage_FirstRendering;
@@ -66,6 +63,7 @@ public sealed partial class MainPage : Page
             }
 
             _liveRunTimer.Start();
+            ApplyRefreshTimerSettings();
             ApplyResourceTimerSettings();
             _ = InitializePageAsync();
         });
@@ -84,7 +82,7 @@ public sealed partial class MainPage : Page
     {
         CompositionTarget.Rendering -= MainPage_FirstRendering;
         AppLog.Info("MainPage unloaded.");
-        _refreshTimer.Stop();
+        _refreshTimer?.Stop();
         _liveRunTimer.Stop();
         _resourceTimer.Stop();
         ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
@@ -110,15 +108,13 @@ public sealed partial class MainPage : Page
 
     private async Task InitializePageAsync()
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-
         try
         {
-            // The GitHub auth check runs alongside the tab load instead of in front of it.
-            var initialization = ViewModel.InitializeAsync(cts.Token);
-            // Tab data loads run unbounded - the 8s startup token is only for the auth/run check,
-            // and cancelling a disk scan mid-flight leaves the tab stuck on "Canceled".
-            if (ViewModel.IsKillProcessesVisible)
+            if (ViewModel.IsWorkflowExplorerVisible)
+            {
+                await EnsureWorkflowExplorerInitializedAsync();
+            }
+            else if (ViewModel.IsKillProcessesVisible)
             {
                 await ViewModel.EnsureKillProcessesLoadedAsync(CancellationToken.None);
             }
@@ -135,20 +131,44 @@ public sealed partial class MainPage : Page
                 await ViewModel.EnsureWorktreesLoadedAsync(CancellationToken.None);
             }
 
-            await initialization;
-            ApplyRefreshTimerSettings();
-            ApplyActivePaneState();
             AppLog.Info("InitializePageAsync completed.");
-        }
-        catch (OperationCanceledException)
-        {
-            ViewModel.AuthMessage = "GitHub auth check timed out. Click Reload Auth.";
-            ViewModel.StatusMessage = "Startup timed out while checking GitHub auth.";
-            AppLog.Info("InitializePageAsync timed out.");
         }
         catch (Exception ex)
         {
             AppLog.Error("InitializePageAsync failed.", ex);
+            ViewModel.StatusMessage = ex.Message;
+        }
+    }
+
+    private async Task EnsureWorkflowExplorerInitializedAsync()
+    {
+        if (_workflowInitialization is not null)
+        {
+            await _workflowInitialization;
+            return;
+        }
+
+        _workflowInitialization = InitializeWorkflowExplorerAsync();
+        await _workflowInitialization;
+        ApplyRefreshTimerSettings();
+    }
+
+    private async Task InitializeWorkflowExplorerAsync()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        try
+        {
+            await ViewModel.InitializeAsync(cts.Token);
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            ViewModel.AuthMessage = "GitHub auth check timed out. Click Reload Auth.";
+            ViewModel.StatusMessage = "Workflow Explorer initialization timed out.";
+            AppLog.Info("InitializeWorkflowExplorerAsync timed out.");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("InitializeWorkflowExplorerAsync failed.", ex);
             ViewModel.StatusMessage = ex.Message;
         }
     }
@@ -324,7 +344,6 @@ public sealed partial class MainPage : Page
     private void NavigateToResources_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowResources();
-        ApplyActivePaneState();
         ResourcesScroll.ChangeView(null, 0, null, true);
         ResourcesScroll.Focus(FocusState.Programmatic);
     }
@@ -347,24 +366,22 @@ public sealed partial class MainPage : Page
     private async void NavigateToKillProcesses_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowKillProcesses();
-        ApplyActivePaneState();
         ProcessFilterBox.Focus(FocusState.Programmatic);
         KillProcessesScroll.ChangeView(null, 0, null, true);
         KillProcessesScroll.Focus(FocusState.Programmatic);
         await ViewModel.EnsureKillProcessesLoadedAsync(CancellationToken.None);
     }
 
-    private void NavigateToRuns_Click(object sender, RoutedEventArgs e)
+    private async void NavigateToRuns_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowWorkflowExplorer();
-        ApplyActivePaneState();
         RunFilterBox.Focus(FocusState.Programmatic);
+        await EnsureWorkflowExplorerInitializedAsync();
     }
 
     private async void NavigateToDisk_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowDiskUsage();
-        ApplyActivePaneState();
         DiskScroll.ChangeView(null, 0, null, true);
         DiskScroll.Focus(FocusState.Programmatic);
         await ViewModel.EnsureDiskUsageLoadedAsync(CancellationToken.None);
@@ -373,7 +390,6 @@ public sealed partial class MainPage : Page
     private async void NavigateToOpenWork_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowOpenWork();
-        ApplyActivePaneState();
         OpenWorkScroll.ChangeView(null, 0, null, true);
         OpenWorkScroll.Focus(FocusState.Programmatic);
         await ViewModel.EnsureOpenWorkLoadedAsync(CancellationToken.None);
@@ -382,7 +398,6 @@ public sealed partial class MainPage : Page
     private async void NavigateToWorktrees_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowWorktrees();
-        ApplyActivePaneState();
         WorktreesScroll.ChangeView(null, 0, null, true);
         WorktreesScroll.Focus(FocusState.Programmatic);
         await ViewModel.EnsureWorktreesLoadedAsync(CancellationToken.None);
@@ -410,7 +425,6 @@ public sealed partial class MainPage : Page
             case CleanupActionKind.Navigate:
                 ViewModel.WorktreeFilter = "Safe to remove";
                 ViewModel.ShowWorktrees();
-                ApplyActivePaneState();
                 WorktreesScroll.ChangeView(null, 0, null, true);
                 await ViewModel.EnsureWorktreesLoadedAsync(CancellationToken.None);
                 return;
@@ -1072,12 +1086,12 @@ public sealed partial class MainPage : Page
         await ViewModel.DeleteBiggestFileAsync(entry, CancellationToken.None);
     }
 
-    private void NavigateToRepos_Click(object sender, RoutedEventArgs e)
+    private async void NavigateToRepos_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowWorkflowExplorer();
-        ApplyActivePaneState();
         RepositoryExpander.IsExpanded = true;
         OwnerInputBox.Focus(FocusState.Programmatic);
+        await EnsureWorkflowExplorerInitializedAsync();
     }
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -1096,12 +1110,7 @@ public sealed partial class MainPage : Page
             ApplyResourceTimerSettings();
         }
 
-        if (e.PropertyName is nameof(MainViewModel.IsKillProcessesVisible) or
-            nameof(MainViewModel.IsWorkflowExplorerVisible) or
-            nameof(MainViewModel.IsDiskUsageVisible) or
-            nameof(MainViewModel.IsOpenWorkVisible) or
-            nameof(MainViewModel.IsWorktreesVisible) or
-            nameof(MainViewModel.ActiveTab))
+        if (e.PropertyName == nameof(MainViewModel.ActiveTab))
         {
             ApplyActivePaneState();
         }
@@ -1115,17 +1124,27 @@ public sealed partial class MainPage : Page
 
     private void ApplyRefreshTimerSettings()
     {
-        _refreshTimer.Stop();
-        _refreshTimer.Interval = TimeSpan.FromSeconds(ViewModel.RefreshIntervalSeconds);
-
-        if (ViewModel.AutoRefreshEnabled)
+        if (_workflowInitialization?.IsCompletedSuccessfully != true)
         {
-            _refreshTimer.Start();
-            AppLog.Info($"Refresh timer active. Interval={ViewModel.RefreshIntervalSeconds}s");
             return;
         }
 
-        AppLog.Info("Refresh timer paused.");
+        _refreshTimer?.Stop();
+        if (!IsLoaded || !ViewModel.AutoRefreshEnabled)
+        {
+            AppLog.Info("Refresh timer paused.");
+            return;
+        }
+
+        if (_refreshTimer is null)
+        {
+            _refreshTimer = DispatcherQueue.CreateTimer();
+            _refreshTimer.Tick += RefreshTimer_Tick;
+        }
+
+        _refreshTimer.Interval = TimeSpan.FromSeconds(ViewModel.RefreshIntervalSeconds);
+        _refreshTimer.Start();
+        AppLog.Info($"Refresh timer active. Interval={ViewModel.RefreshIntervalSeconds}s");
     }
 
     /// <summary>
@@ -1136,7 +1155,7 @@ public sealed partial class MainPage : Page
     {
         _resourceTimer.Stop();
 
-        if (!ViewModel.ResourceMonitoringEnabled)
+        if (!IsLoaded || !ViewModel.ResourceMonitoringEnabled)
         {
             AppLog.Info("Resource monitor paused.");
             return;

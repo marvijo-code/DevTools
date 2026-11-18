@@ -395,11 +395,11 @@ public sealed partial class MainViewModel : ObservableObject
             : $"Last refresh: {_lastRefreshAt.Value.LocalDateTime:yyyy-MM-dd HH:mm:ss}";
 
     public string VisibleRunsText =>
-        _allRuns.Count == Runs.Count
-            ? $"{Runs.Count} runs"
-            : $"{Runs.Count} of {_allRuns.Count} runs";
+        _lastRefreshAt is null
+            ? string.Empty
+            : _allRuns.Count == Runs.Count ? $"{Runs.Count} runs" : $"{Runs.Count} of {_allRuns.Count} runs";
 
-    public string RepositorySummaryText => $"{Repositories.Count} repo(s)";
+    public string RepositorySummaryText => _repositoriesLoaded ? $"{Repositories.Count} repo(s)" : string.Empty;
 
     public string RefreshIntervalSummary =>
         AutoRefreshEnabled

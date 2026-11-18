@@ -654,20 +654,25 @@ public sealed class DiskUsageAnalyzer
     private static string DescribeDiskCapacity(DiskCapacity disk)
     {
         var total = $"Disk {disk.DiskNumber} has {disk.TotalBytes:N0} bytes.";
-        if (disk.PartitionedBytes is not long partitioned)
-        {
-            return $"{total} Partition ranges are unavailable.";
-        }
-
         var matchedRemainder = disk.MatchedExtentBytes - disk.FileSystemBytes;
         var otherVolumeExtents = disk.VolumeExtentBytes - disk.MatchedExtentBytes;
-        var otherPartitions = partitioned - disk.VolumeExtentBytes;
-        var outside = disk.TotalBytes - partitioned;
         var otherExtentNote = otherVolumeExtents > 0 ? $"{otherVolumeExtents:N0} in other volume extents, " : string.Empty;
-        return $"{total} {disk.FileSystemBytes:N0} bytes in matched filesystem capacities, " +
+        var volumeNotes = $"{disk.FileSystemBytes:N0} bytes in matched filesystem capacities, " +
             $"{matchedRemainder:N0} inside matched volume extents beyond their filesystem capacities, " +
-            otherExtentNote +
-            $"{otherPartitions:N0} in other partition ranges and {outside:N0} outside partition ranges.";
+            otherExtentNote;
+        if (disk.PartitionedBytes is not long partitioned)
+        {
+            return $"{total} {volumeNotes}and {disk.TotalBytes - disk.VolumeExtentBytes:N0} outside reported volume extents. " +
+                "Partition ranges are unavailable.";
+        }
+
+        var extentsOutsidePartitions = disk.VolumeExtentBytes - disk.VolumeExtentBytesInPartitions;
+        var otherPartitions = partitioned - disk.VolumeExtentBytesInPartitions;
+        var outside = disk.TotalBytes - partitioned - extentsOutsidePartitions;
+        var outsideNote = extentsOutsidePartitions > 0
+            ? $"outside partition and volume ranges. Of the reported volume extents, {extentsOutsidePartitions:N0} bytes are outside partition ranges."
+            : "outside partition ranges.";
+        return $"{total} {volumeNotes}{otherPartitions:N0} in other partition ranges and {outside:N0} {outsideNote}";
     }
 
     private static string DescribeIncompleteFolderScan(FolderTree? tree) =>

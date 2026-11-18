@@ -364,7 +364,7 @@ public sealed class VolumeSpaceTests
             new VolumeDiskExtent(1, otherPartition, 90)
         ]);
 
-        Assert.Equal(new DiskCapacity(0, 900, 600, 300, 300, 280), capacity);
+        Assert.Equal(new DiskCapacity(0, 900, 600, 300, 300, 280, 300), capacity);
         var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
         Assert.Contains("Disk 0 has 900 bytes.", summary.Summary);
         Assert.Contains("280 bytes in matched filesystem capacities", summary.Summary);
@@ -382,7 +382,7 @@ public sealed class VolumeSpaceTests
             new(0, new DiskRange(200, 300), 290)
         };
 
-        Assert.Equal(new DiskCapacity(0, 900, 500, 500, 0, 0), DiskCapacityInventory.Reconcile(0, 900, partitions, extents));
+        Assert.Equal(new DiskCapacity(0, 900, 500, 500, 0, 0, 500), DiskCapacityInventory.Reconcile(0, 900, partitions, extents));
     }
 
     [Fact]
@@ -394,14 +394,50 @@ public sealed class VolumeSpaceTests
             new VolumeDiskExtent(0, new DiskRange(250, 200), null),
             new VolumeDiskExtent(0, new DiskRange(500, 100), null),
             new VolumeDiskExtent(1, new DiskRange(300, 400), null),
-            new VolumeDiskExtent(0, new DiskRange(900, 50), null)
+            new VolumeDiskExtent(0, new DiskRange(900, 50), null),
+            new VolumeDiskExtent(0, new DiskRange(975, 100), null)
         ]);
 
-        Assert.Equal(new DiskCapacity(0, 1000, 800, 400, 100, 80), capacity);
+        Assert.Equal(new DiskCapacity(0, 1000, 800, 450, 100, 80, 400), capacity);
         var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
         Assert.Contains("80 bytes in matched filesystem capacities", summary.Summary);
         Assert.Contains("20 inside matched volume extents beyond their filesystem capacities", summary.Summary);
-        Assert.Contains("300 in other volume extents, 400 in other partition ranges and 200 outside partition ranges.", summary.Summary);
+        Assert.Contains("350 in other volume extents, 400 in other partition ranges and 150 outside partition and volume ranges.", summary.Summary);
+        Assert.Contains("Of the reported volume extents, 50 bytes are outside partition ranges.", summary.Summary);
+    }
+
+    [Fact]
+    public void DriveSummary_PreservesReportedExtentsWhenPartitionRangesAreUnavailable()
+    {
+        var capacity = DiskCapacityInventory.Reconcile(0, 1000, null,
+        [
+            new VolumeDiskExtent(0, new DiskRange(50, 100), 80),
+            new VolumeDiskExtent(0, new DiskRange(200, 350), null),
+            new VolumeDiskExtent(0, new DiskRange(400, 200), null)
+        ]);
+
+        Assert.Equal(new DiskCapacity(0, 1000, null, 500, 100, 80, 0), capacity);
+        var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
+        Assert.Contains("80 bytes in matched filesystem capacities", summary.Summary);
+        Assert.Contains("20 inside matched volume extents beyond their filesystem capacities", summary.Summary);
+        Assert.Contains("400 in other volume extents, and 500 outside reported volume extents.", summary.Summary);
+        Assert.Contains("Partition ranges are unavailable.", summary.Summary);
+    }
+
+    [Fact]
+    public void PhysicalDiskCapacity_CountsExtentsThatPartlyCrossPartitionRanges()
+    {
+        var capacity = DiskCapacityInventory.Reconcile(0, 1000, [new DiskRange(100, 200), new DiskRange(500, 100)],
+        [
+            new VolumeDiskExtent(0, new DiskRange(50, 125), null),
+            new VolumeDiskExtent(0, new DiskRange(250, 275), null),
+            new VolumeDiskExtent(0, new DiskRange(850, 50), null)
+        ]);
+
+        Assert.Equal(new DiskCapacity(0, 1000, 300, 450, 0, 0, 150), capacity);
+        var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
+        Assert.Contains("450 in other volume extents, 150 in other partition ranges and 400 outside partition and volume ranges.", summary.Summary);
+        Assert.Contains("Of the reported volume extents, 300 bytes are outside partition ranges.", summary.Summary);
     }
 
     [Fact]

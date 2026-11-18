@@ -164,6 +164,7 @@ public sealed class DirectoryAllocationTests
             var node = tree.Find(root.FullName);
             Assert.Equal(1L, tree.GetTotalBytes(node));
             Assert.Equal(0L, tree.GetAllocatedBytes(node));
+            Assert.False(tree.HasIncompleteAllocation(node));
         }
         finally
         {
@@ -255,12 +256,45 @@ public sealed class DirectoryAllocationTests
             ((UInt128)1 << 64) | ((42UL << 48) | 9),
             (42UL << 48) | 200
         };
-        var results = new bool[4096];
-        Parallel.For(0, results.Length, i => results[i] = index.TryClaim(ids[i % ids.Length]));
+        var results = new DirectoryAllocationIndex.ClaimResult[4096];
+        Parallel.For(0, results.Length, i => results[i] = index.Claim(ids[i % ids.Length]));
 
-        Assert.Equal(ids.Length, results.Count(result => result));
-        Assert.All(ids, id => Assert.False(index.TryClaim(id)));
-        Assert.False(index.TryClaim(0));
+        Assert.Equal(ids.Length, results.Count(result => result == DirectoryAllocationIndex.ClaimResult.New));
+        Assert.All(ids, id => Assert.Equal(DirectoryAllocationIndex.ClaimResult.AlreadyCounted, index.Claim(id)));
+        Assert.Equal(DirectoryAllocationIndex.ClaimResult.Unavailable, index.Claim(0));
+    }
+
+    [Fact]
+    public void AllocationIndex_DistinguishesDuplicatesFromExhaustedCapacity()
+    {
+        var index = new DirectoryAllocationIndex(32);
+        UInt128 first = 1;
+        var sameShard = Enumerable.Range(2, 64).Select(value => (UInt128)value)
+            .First(id => (id.GetHashCode() & 31) == (first.GetHashCode() & 31));
+
+        Assert.Equal(DirectoryAllocationIndex.ClaimResult.New, index.Claim(first));
+        Assert.Equal(DirectoryAllocationIndex.ClaimResult.AlreadyCounted, index.Claim(first));
+        Assert.Equal(DirectoryAllocationIndex.ClaimResult.Unavailable, index.Claim(sameShard));
+    }
+
+    [Fact]
+    public void StreamReader_FlagsAFileWhoseMetadataCannotBeOpened()
+    {
+        var root = Directory.CreateTempSubdirectory("devtools-unavailable-streams-");
+        try
+        {
+            using var directory = CreateFile(root.FullName, 1, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+            Assert.False(directory.IsInvalid);
+            var reader = new DirectoryAllocationReader(new DirectoryAllocationIndex(32), 4096);
+            var incomplete = false;
+
+            Assert.Equal(0, reader.ReadFileStreams(directory, [ulong.MaxValue], CancellationToken.None, ref incomplete));
+            Assert.True(incomplete);
+        }
+        finally
+        {
+            root.Delete();
+        }
     }
 
     private static void WriteNamedStream(string path, byte[] bytes)

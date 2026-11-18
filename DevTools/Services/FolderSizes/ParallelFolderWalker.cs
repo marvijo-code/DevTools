@@ -132,10 +132,15 @@ public sealed class ParallelFolderWalker
                     if (streams is not null)
                     {
                         Interlocked.Decrement(ref queuedStreamBatches);
-                        var streamBytes = allocationReader!.ReadFileStreams(streams.Hint, streams.FileIds, scanToken);
+                        var incompleteStreams = false;
+                        var streamBytes = allocationReader!.ReadFileStreams(streams.Hint, streams.FileIds, scanToken, ref incompleteStreams);
                         lock (builderLock)
                         {
                             builder.AddFilesToFolder(node, 0, 0, streamBytes);
+                            if (incompleteStreams)
+                            {
+                                builder.MarkIncompleteAllocation(node);
+                            }
                         }
 
                         CompleteWork();
@@ -147,11 +152,14 @@ public sealed class ParallelFolderWalker
                     long files = 0;
                     long allocatedBytes = 0;
                     var incomplete = false;
+                    var incompleteAllocation = false;
                     subfolders.Clear();
                     if (allocationReader is null ||
-                        !allocationReader.TryRead(path, node, subfolders, scheduleStreams, scanToken, out bytes, out allocatedBytes, out files))
+                        !allocationReader.TryRead(path, node, subfolders, scheduleStreams, scanToken,
+                            out bytes, out allocatedBytes, out files, out incompleteAllocation))
                     {
                         // Retry the logical listing if the filesystem cannot return allocation data.
+                        incompleteAllocation = allocationReader is not null;
                         bytes = 0;
                         files = 0;
                         subfolders.Clear();
@@ -195,6 +203,11 @@ public sealed class ParallelFolderWalker
                         if (incomplete)
                         {
                             builder.MarkIncompleteDirectory(node);
+                        }
+
+                        if (incompleteAllocation)
+                        {
+                            builder.MarkIncompleteAllocation(node);
                         }
 
                         firstChild = builder.AppendEnumeratedChildren(node, subfolders);

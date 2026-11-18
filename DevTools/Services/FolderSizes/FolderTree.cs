@@ -23,6 +23,7 @@ public sealed class FolderTree
     private readonly int[] _childStart;
     private readonly int[] _childIndex;
     private readonly BitArray? _incompleteSubtrees;
+    private readonly BitArray? _incompleteAllocationSubtrees;
     private ConcurrentDictionary<int, ChildNameIndex>? _childNameIndexes;
 
     internal FolderTree(
@@ -36,7 +37,9 @@ public sealed class FolderTree
         long[]? allocatedBytes = null,
         NtfsRecordAllocation? ntfsAllocation = null,
         BitArray? incompleteSubtrees = null,
-        int incompleteDirectoryCount = 0)
+        int incompleteDirectoryCount = 0,
+        BitArray? incompleteAllocationSubtrees = null,
+        int incompleteAllocationDirectoryCount = 0)
     {
         if (parent.Length == 0 || parent.Length != names.Length || parent.Length != totalBytes.Length ||
             parent.Length != fileCount.Length || (allocatedBytes is not null && parent.Length != allocatedBytes.Length))
@@ -52,6 +55,8 @@ public sealed class FolderTree
         _allocatedBytes = allocatedBytes;
         _incompleteSubtrees = incompleteSubtrees;
         IncompleteDirectoryCount = incompleteDirectoryCount;
+        _incompleteAllocationSubtrees = incompleteAllocationSubtrees;
+        IncompleteAllocationDirectoryCount = incompleteAllocationDirectoryCount;
         NtfsAllocation = ntfsAllocation;
         EngineName = engineName;
         Elapsed = elapsed;
@@ -104,6 +109,10 @@ public sealed class FolderTree
     internal int IncompleteDirectoryCount { get; }
 
     internal bool HasIncompleteScan(int node) => _incompleteSubtrees?[node] ?? false;
+
+    internal int IncompleteAllocationDirectoryCount { get; }
+
+    internal bool HasIncompleteAllocation(int node) => _incompleteAllocationSubtrees?[node] ?? false;
 
     public long? GetAllocatedBytes(int node) => _allocatedBytes?[node];
 
@@ -413,6 +422,7 @@ public sealed class FolderTreeBuilder
     private readonly List<long> _knownTotal = [-1];
     private readonly List<long>? _ownAllocatedBytes;
     private List<int>? _incompleteDirectories;
+    private HashSet<int>? _incompleteAllocationDirectories;
     private readonly Dictionary<(int Parent, string Name), int> _lookup = new(new NodeKeyComparer());
     private string? _lastDirectory;
     private int _lastDirectoryNode;
@@ -506,6 +516,11 @@ public sealed class FolderTreeBuilder
         (_incompleteDirectories ??= []).Add(node);
     }
 
+    internal void MarkIncompleteAllocation(int node)
+    {
+        (_incompleteAllocationDirectories ??= []).Add(node);
+    }
+
     public FolderTree Build(string engineName, TimeSpan elapsed)
     {
         var count = _parent.Count;
@@ -537,12 +552,15 @@ public sealed class FolderTreeBuilder
         }
 
         return new FolderTree(_root, parent, _names.ToArray(), totals, files, engineName, elapsed, allocations,
-            incompleteSubtrees: BuildIncompleteSubtrees(parent), incompleteDirectoryCount: _incompleteDirectories?.Count ?? 0);
+            incompleteSubtrees: BuildIncompleteSubtrees(parent, _incompleteDirectories),
+            incompleteDirectoryCount: _incompleteDirectories?.Count ?? 0,
+            incompleteAllocationSubtrees: BuildIncompleteSubtrees(parent, _incompleteAllocationDirectories),
+            incompleteAllocationDirectoryCount: _incompleteAllocationDirectories?.Count ?? 0);
     }
 
-    private BitArray? BuildIncompleteSubtrees(int[] parent)
+    private static BitArray? BuildIncompleteSubtrees(int[] parent, IEnumerable<int>? directories)
     {
-        if (_incompleteDirectories is not { } directories)
+        if (directories is null)
         {
             return null;
         }

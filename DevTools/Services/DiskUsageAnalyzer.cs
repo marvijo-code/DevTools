@@ -512,7 +512,7 @@ public sealed class DiskUsageAnalyzer
             results.TryGetValue(drive.RootPath, out var result);
             var tree = result?.Tree;
             var bitmap = tree?.NtfsAllocation?.Bitmap;
-            var incompleteNote = DescribeIncompleteFolderScan(tree);
+            var incompleteNote = DescribeIncompleteFolderScan(tree) + DescribeIncompleteAllocation(tree);
             if (drive.Space is not { } space)
             {
                 entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, false, null, "Unavailable",
@@ -613,6 +613,11 @@ public sealed class DiskUsageAnalyzer
             ? $" Incomplete listings in {tree.IncompleteDirectoryCount:N0} {(tree.IncompleteDirectoryCount == 1 ? "directory" : "directories")}."
             : string.Empty;
 
+    private static string DescribeIncompleteAllocation(FolderTree? tree) =>
+        tree is { IncompleteAllocationDirectoryCount: > 0 }
+            ? $" Incomplete allocation in {tree.IncompleteAllocationDirectoryCount:N0} {(tree.IncompleteAllocationDirectoryCount == 1 ? "directory" : "directories")}."
+            : string.Empty;
+
     private static string DescribeNtfsBitmap(NtfsBitmapAllocation? allocation, long? volumeUsedBytes = null)
     {
         if (allocation is not { } bitmap)
@@ -686,6 +691,11 @@ public sealed class DiskUsageAnalyzer
         if (tree.HasIncompleteScan(node))
         {
             note += ". Folder scan incomplete.";
+        }
+
+        if (tree.HasIncompleteAllocation(node))
+        {
+            note += ". Allocation incomplete.";
         }
 
         var entry = DiskUsageEntry.CreateCompleted(path, true, size, FormatBytes(size), note, ResolveFolderDisplayName(path));

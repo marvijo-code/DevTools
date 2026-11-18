@@ -18,6 +18,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
     private const int StreamHeaderBytes = 24;
     private const int MaximumStreamBufferBytes = 1024 * 1024;
     private const int ErrorNoMoreFiles = 18;
+    private const int ErrorHandleEof = 38;
     private const int ErrorInsufficientBuffer = 122;
     private const int ErrorMoreData = 234;
     private const uint Directory = 0x10;
@@ -36,11 +37,13 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
         CancellationToken cancellationToken,
         out long logicalBytes,
         out long allocatedBytes,
-        out long files)
+        out long files,
+        out bool incompleteAllocation)
     {
         logicalBytes = 0;
         allocatedBytes = 0;
         files = 0;
+        incompleteAllocation = allocationUnitBytes == 0;
 
         var nativePath = path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path : @"\\?\" + path;
         // List directory, share with other processes, open existing, and handle reparse points themselves.
@@ -62,8 +65,12 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
 
             allocatedBytes = PhysicalAllocation(BinaryPrimitives.ReadInt64LittleEndian(_buffer));
         }
+        else
+        {
+            incompleteAllocation = true;
+        }
 
-        allocatedBytes += ReadNamedStreamAllocation(handle);
+        allocatedBytes += ReadNamedStreamAllocation(handle, ref incompleteAllocation);
         while (true)
         {
             ScanGate.Wait(cancellationToken);
@@ -83,7 +90,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                     nameBytes <= 0 || (nameBytes & 1) != 0 || nameBytes > entryLength - EntryHeaderBytes ||
                     (nextOffset != 0 && remaining.Length - entryLength < EntryHeaderBytes))
                 {
-                    allocatedBytes += ReadFileStreams(handle, _fileIds.AsSpan(0, streamFileCount), cancellationToken);
+                    allocatedBytes += ReadFileStreams(handle, _fileIds.AsSpan(0, streamFileCount), cancellationToken, ref incompleteAllocation);
                     return false;
                 }
 
@@ -104,7 +111,8 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                     logicalBytes += Math.Max(0, BinaryPrimitives.ReadInt64LittleEndian(remaining[40..]));
                     var low = BinaryPrimitives.ReadUInt64LittleEndian(remaining[72..]);
                     var high = BinaryPrimitives.ReadUInt64LittleEndian(remaining[80..]);
-                    if (identities.TryClaim(new UInt128(high, low)))
+                    var claim = identities.Claim(new UInt128(high, low));
+                    if (claim == DirectoryAllocationIndex.ClaimResult.New)
                     {
                         allocatedBytes += PhysicalAllocation(BinaryPrimitives.ReadInt64LittleEndian(remaining[48..]));
                         if (high == 0)
@@ -114,12 +122,20 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                             {
                                 if (scheduleStreams?.Invoke(node, handle, _fileIds) != true)
                                 {
-                                    allocatedBytes += ReadFileStreams(handle, _fileIds, cancellationToken);
+                                    allocatedBytes += ReadFileStreams(handle, _fileIds, cancellationToken, ref incompleteAllocation);
                                 }
 
                                 streamFileCount = 0;
                             }
                         }
+                        else
+                        {
+                            incompleteAllocation = true;
+                        }
+                    }
+                    else if (claim == DirectoryAllocationIndex.ClaimResult.Unavailable)
+                    {
+                        incompleteAllocation = true;
                     }
 
                     files++;
@@ -133,11 +149,11 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                 remaining = remaining[nextOffset..];
             }
 
-            allocatedBytes += ReadFileStreams(handle, _fileIds.AsSpan(0, streamFileCount), cancellationToken);
+            allocatedBytes += ReadFileStreams(handle, _fileIds.AsSpan(0, streamFileCount), cancellationToken, ref incompleteAllocation);
         }
     }
 
-    internal long ReadFileStreams(SafeFileHandle hint, ReadOnlySpan<ulong> fileIds, CancellationToken cancellationToken)
+    internal long ReadFileStreams(SafeFileHandle hint, ReadOnlySpan<ulong> fileIds, CancellationToken cancellationToken, ref bool incompleteAllocation)
     {
         long allocatedBytes = 0;
         foreach (var fileId in fileIds)
@@ -146,10 +162,13 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             var id = new FileIdDescriptor(fileId);
             // Metadata access only. Prevent reparse resolution and remote file recall.
             using var file = OpenFileById(hint, in id, 0, 7, IntPtr.Zero, 0x00300000);
-            if (!file.IsInvalid)
+            if (file.IsInvalid)
             {
-                allocatedBytes += ReadNamedStreamAllocation(file);
+                incompleteAllocation = true;
+                continue;
             }
+
+            allocatedBytes += ReadNamedStreamAllocation(file, ref incompleteAllocation);
         }
 
         return allocatedBytes;
@@ -173,13 +192,20 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
     private long PhysicalAllocation(long bytes) =>
         bytes > 0 && (allocationUnitBytes == 0 || bytes % allocationUnitBytes == 0) ? bytes : 0;
 
-    private long ReadNamedStreamAllocation(SafeFileHandle file)
+    private long ReadNamedStreamAllocation(SafeFileHandle file, ref bool incompleteAllocation)
     {
         while (!GetFileInformationByHandleEx(file, FileStreamInfo, _streamBuffer, (uint)_streamBuffer.Length))
         {
-            if (Marshal.GetLastWin32Error() is not (ErrorInsufficientBuffer or ErrorMoreData) ||
-                _streamBuffer.Length >= MaximumStreamBufferBytes)
+            var error = Marshal.GetLastWin32Error();
+            if (error == ErrorHandleEof)
             {
+                // An ordinary directory may have no data streams.
+                return 0;
+            }
+
+            if (error is not (ErrorInsufficientBuffer or ErrorMoreData) || _streamBuffer.Length >= MaximumStreamBufferBytes)
+            {
+                incompleteAllocation = true;
                 return 0;
             }
 
@@ -197,7 +223,8 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             if (entryLength < StreamHeaderBytes || entryLength > remaining.Length ||
                 nameBytes <= 0 || (nameBytes & 1) != 0 || nameBytes > entryLength - StreamHeaderBytes)
             {
-                return 0;
+                incompleteAllocation = true;
+                return allocated;
             }
 
             var name = MemoryMarshal.Cast<byte, char>(remaining.Slice(StreamHeaderBytes, nameBytes));
@@ -214,7 +241,8 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             remaining = remaining[nextOffset..];
         }
 
-        return 0;
+        incompleteAllocation = true;
+        return allocated;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -309,11 +337,13 @@ internal sealed class DirectoryAllocationIndex
         return new DirectoryAllocationIndex(entryLimit, recordCapacity);
     }
 
-    public bool TryClaim(UInt128 id)
+    internal enum ClaimResult { New, AlreadyCounted, Unavailable }
+
+    public ClaimResult Claim(UInt128 id)
     {
         if (id == 0)
         {
-            return false;
+            return ClaimResult.Unavailable;
         }
 
         var low = (ulong)id;
@@ -325,12 +355,12 @@ internal sealed class DirectoryAllocationIndex
             var previous = Interlocked.CompareExchange(ref _recordSequences[(int)record], sequence, 0);
             if (previous == 0)
             {
-                return true;
+                return ClaimResult.New;
             }
 
             if (previous == sequence)
             {
-                return false;
+                return ClaimResult.AlreadyCounted;
             }
         }
 
@@ -338,7 +368,12 @@ internal sealed class DirectoryAllocationIndex
         var shard = _shards[id.GetHashCode() & (ShardCount - 1)];
         lock (shard)
         {
-            return shard.Count < _entriesPerShard && shard.Add(id);
+            if (shard.Count < _entriesPerShard)
+            {
+                return shard.Add(id) ? ClaimResult.New : ClaimResult.AlreadyCounted;
+            }
+
+            return shard.Contains(id) ? ClaimResult.AlreadyCounted : ClaimResult.Unavailable;
         }
     }
 }

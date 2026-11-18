@@ -224,16 +224,18 @@ public sealed class VolumeSpaceTests
     }
 
     [Fact]
-    public void DriveSummary_ReportsIncompleteFolderListingsAndRetainsMeasuredSizes()
+    public void DriveSummary_DistinguishesIncompleteListingsAndAllocation()
     {
         var drive = new DriveDescriptor(@"C:\", "Test", "NTFS",
             new VolumeSpace(1000, 300, 700, 0, 0, IsVolumeWide: true));
         var builder = new FolderTreeBuilder(drive.RootPath, trackAllocation: true);
         var partial = builder.AddFolder(@"C:\documents\protected");
-        var complete = builder.AddFolder(@"C:\complete");
+        var allocationOnly = builder.AddFolder(@"C:\data\partial");
         builder.AddFilesToFolder(partial, 32, 1, 64);
-        builder.AddFilesToFolder(complete, 64, 1, 128);
+        builder.AddFilesToFolder(allocationOnly, 64, 1, 128);
         builder.MarkIncompleteDirectory(partial);
+        builder.MarkIncompleteAllocation(allocationOnly);
+        builder.MarkIncompleteAllocation(allocationOnly); // Several stream batches can miss metadata in the same folder.
         var tree = builder.Build("Folder walk", TimeSpan.Zero);
         var results = new Dictionary<string, DriveScanResult>
         {
@@ -243,10 +245,18 @@ public sealed class VolumeSpaceTests
         Assert.True(tree.HasIncompleteScan(partial));
         Assert.True(tree.HasIncompleteScan(tree.Find(@"C:\documents")));
         Assert.True(tree.HasIncompleteScan(0));
-        Assert.False(tree.HasIncompleteScan(complete));
+        Assert.False(tree.HasIncompleteScan(allocationOnly));
+        Assert.True(tree.HasIncompleteAllocation(allocationOnly));
+        Assert.True(tree.HasIncompleteAllocation(tree.Find(@"C:\data")));
+        Assert.True(tree.HasIncompleteAllocation(0));
+        Assert.False(tree.HasIncompleteAllocation(partial));
+        Assert.Equal(1, tree.IncompleteAllocationDirectoryCount);
         Assert.Equal(96, tree.TotalBytes);
         Assert.Equal(192, tree.GetAllocatedBytes(0));
-        Assert.Contains("Incomplete listings in 1 directory.", Assert.Single(DiskUsage.BuildDriveSummarySection([drive], results).Entries).Note);
+        var note = Assert.Single(DiskUsage.BuildDriveSummarySection([drive], results).Entries).Note;
+        Assert.Contains("508 used bytes remain unattributed.", note);
+        Assert.Contains("Incomplete listings in 1 directory.", note);
+        Assert.Contains("Incomplete allocation in 1 directory.", note);
     }
 
     [Fact]

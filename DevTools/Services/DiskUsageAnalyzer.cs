@@ -679,30 +679,10 @@ public sealed class DiskUsageAnalyzer
             var tree = result?.Tree;
             var bitmap = tree?.NtfsAllocation?.Bitmap;
             var incompleteNote = DescribeIncompleteFolderScan(tree) + DescribeIncompleteAllocation(tree);
-            if (drive.Space is not { } space)
-            {
-                entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, false, null, "Unavailable",
-                    $"Windows did not report space totals for this volume.{incompleteNote}{DescribeNtfsBitmap(bitmap)}", display));
-                continue;
-            }
-
-            var totals = $"{space.TotalBytes:N0} bytes total, {space.UsedBytes:N0} used, {space.FreeBytes:N0} free";
-            if (space.IsVolumeWide)
-            {
-                totals += $", {space.ReservedBytes:N0} reserved, {space.PoolUnavailableBytes:N0} unavailable in the storage pool";
-            }
-            else
-            {
-                totals += " (caller-visible totals)";
-            }
-
-            var remainder = space.UnclassifiedBytes;
-            if (remainder != 0)
-            {
-                totals += remainder > 0
-                    ? $", {remainder:N0} unclassified"
-                    : $", Windows categories overlap by {-remainder:N0} bytes";
-            }
+            var totals = drive.Space is { } space
+                ? DescribeVolumeTotals(space)
+                : "Windows did not report space totals for this volume";
+            long? volumeUsed = drive.Space is { IsVolumeWide: true } reported ? reported.UsedBytes : null;
 
             var scanNote = tree is not null
                 ? $"Logical file size: {tree.TotalBytes:N0} bytes ({tree.EngineName}, {tree.Elapsed.TotalSeconds:F1}s)."
@@ -724,29 +704,40 @@ public sealed class DiskUsageAnalyzer
                     scanNote += $" {allocatedBytes:N0} bytes of allocation attributed by the scan.";
                 }
 
-                if (!space.IsVolumeWide)
+                if (bitmap is null)
                 {
-                    scanNote += " Volume-wide usage is unavailable for reconciliation.";
-                }
-                else if (bitmap is null)
-                {
-                    var remainingUsed = space.UsedBytes - observed;
-                    scanNote += remainingUsed >= 0
-                        ? $" {remainingUsed:N0} used bytes remain unattributed."
-                        : $" Observed allocation exceeded reported usage by {-remainingUsed:N0} bytes during the scan.";
+                    if (volumeUsed is long used)
+                    {
+                        var remainingUsed = used - observed;
+                        scanNote += remainingUsed >= 0
+                            ? $" {remainingUsed:N0} used bytes remain unattributed."
+                            : $" Observed allocation exceeded reported usage by {-remainingUsed:N0} bytes during the scan.";
+                    }
+                    else
+                    {
+                        scanNote += " Volume-wide usage is unavailable for reconciliation.";
+                    }
                 }
             }
             else if (result is not null)
             {
-                scanNote += space.IsVolumeWide
-                    ? $" {space.UsedBytes:N0} used bytes have no folder attribution."
+                scanNote += volumeUsed is long used
+                    ? $" {used:N0} used bytes have no folder attribution."
                     : " Folder allocation is unavailable.";
             }
 
-            var bitmapNote = DescribeNtfsBitmap(bitmap, space.IsVolumeWide ? space.UsedBytes : null);
+            var bitmapNote = DescribeNtfsBitmap(bitmap, volumeUsed);
             var note = $"{totals}. {scanNote}{incompleteNote}{bitmapNote}";
-            entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, drive.HasDriveLetter || result?.Tree is not null, space.UsedBytes,
-                $"{FormatBytes(space.UsedBytes)} used", note, display));
+            var usedBytes = volumeUsed ?? bitmap?.InUseBytes ?? drive.Space?.UsedBytes;
+            var sizeText = usedBytes switch
+            {
+                long bytes when volumeUsed.HasValue => $"{FormatBytes(bytes)} used",
+                long bytes when bitmap.HasValue => $"{FormatBytes(bytes)} allocated (NTFS bitmap)",
+                long bytes => $"{FormatBytes(bytes)} used (caller-visible)",
+                _ => "Usage unavailable"
+            };
+            var hasBrowsableRoot = tree is not null || (drive.HasDriveLetter && drive.Space.HasValue);
+            entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, hasBrowsableRoot, usedBytes, sizeText, note, display));
         }
 
         var summary = "Space reported by Windows for each fixed volume.";
@@ -756,6 +747,22 @@ public sealed class DiskUsageAnalyzer
         }
 
         return new DiskUsageSection("Drive Summary", summary, entries);
+    }
+
+    private static string DescribeVolumeTotals(VolumeSpace space)
+    {
+        var totals = $"{space.TotalBytes:N0} bytes total, {space.UsedBytes:N0} used, {space.FreeBytes:N0} free";
+        totals += space.IsVolumeWide
+            ? $", {space.ReservedBytes:N0} reserved, {space.PoolUnavailableBytes:N0} unavailable in the storage pool"
+            : " (caller-visible totals)";
+
+        var remainder = space.UnclassifiedBytes;
+        return remainder switch
+        {
+            > 0 => $"{totals}, {remainder:N0} unclassified",
+            < 0 => $"{totals}, Windows categories overlap by {-remainder:N0} bytes",
+            _ => totals
+        };
     }
 
     private static string DescribeDiskCapacity(DiskCapacity disk)

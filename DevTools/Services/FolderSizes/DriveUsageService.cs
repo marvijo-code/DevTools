@@ -60,7 +60,7 @@ public sealed class DriveUsageService
 
                 var rootPath = FolderTree.NormalizeRoot(drive.RootDirectory.FullName);
                 var volumeName = WindowsVolumePaths.GetVolumeName(rootPath);
-                var descriptor = new DriveDescriptor(rootPath, drive.VolumeLabel, drive.DriveFormat, ReadVolumeSpace(drive))
+                var descriptor = new DriveDescriptor(rootPath, drive.VolumeLabel, drive.DriveFormat, ReadVolumeSpace(rootPath))
                 {
                     VolumeName = volumeName
                 };
@@ -86,7 +86,7 @@ public sealed class DriveUsageService
 
                 var (label, fileSystem) = WindowsVolumePaths.ReadVolumeInformation(volumeName);
                 drives.Add(new DriveDescriptor(volumeName, label, fileSystem,
-                    TryReadWindowsVolumeSpace(volumeName), HasDriveLetter: false)
+                    ReadVolumeSpace(volumeName), HasDriveLetter: false)
                 {
                     VolumeName = volumeName
                 });
@@ -96,17 +96,37 @@ public sealed class DriveUsageService
         return drives;
     }
 
-    internal static VolumeSpace ReadVolumeSpace(DriveInfo drive)
+    internal static VolumeSpace? ReadVolumeSpace(string rootPath) =>
+        TryReadWindowsVolumeSpace(rootPath) ?? TryReadCallerVolumeSpace(rootPath);
+
+    internal static VolumeSpace? TryReadCallerVolumeSpace(string rootPath)
     {
-        if (TryReadWindowsVolumeSpace(drive.RootDirectory.FullName) is { } space)
+        if (!OperatingSystem.IsWindows())
         {
-            return space;
+            return null;
         }
 
-        // DriveInfo.TotalSize and AvailableFreeSpace can both reflect a caller quota.
-        var total = drive.TotalSize;
-        var free = drive.AvailableFreeSpace;
-        return new VolumeSpace(total, free, Math.Max(0, total - free), 0, 0, IsVolumeWide: false);
+        const uint failCriticalErrors = 0x0001;
+        var restoreErrorMode = SetThreadErrorMode(failCriticalErrors, out var previousMode);
+        try
+        {
+            // Read both quota-sensitive counters in a single call, also for volume GUID paths.
+            if (!GetDiskFreeSpaceEx(rootPath, out var free, out var total, IntPtr.Zero) ||
+                total > long.MaxValue || free > long.MaxValue)
+            {
+                return null;
+            }
+
+            return new VolumeSpace((long)total, (long)free, Math.Max(0, (long)total - (long)free),
+                0, 0, IsVolumeWide: false);
+        }
+        finally
+        {
+            if (restoreErrorMode)
+            {
+                SetThreadErrorMode(previousMode, out _);
+            }
+        }
     }
 
     private static VolumeSpace? TryReadWindowsVolumeSpace(string rootPath)
@@ -139,6 +159,15 @@ public sealed class DriveUsageService
 
     [DllImport("kernel32.dll", EntryPoint = "GetDiskSpaceInformationW", ExactSpelling = true, CharSet = CharSet.Unicode)]
     private static extern int GetDiskSpaceInformation(string rootPath, out DiskSpaceInformation information);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetDiskFreeSpaceExW", ExactSpelling = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetDiskFreeSpaceEx(string rootPath, out ulong freeToCaller, out ulong callerTotal,
+        IntPtr volumeFree);
+
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetThreadErrorMode(uint mode, out uint previousMode);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct DiskSpaceInformation
@@ -222,17 +251,11 @@ public sealed class DriveUsageService
     private static DriveScanResult Done(DriveDescriptor drive, FolderTree tree, List<string> notes)
     {
         AppLog.Info($"Drive {drive.RootPath}: {tree.EngineName} sized {tree.FolderCount:N0} folders ({ByteFormatter.Format(tree.TotalBytes)} in {tree.TotalFiles:N0} files) in {tree.Elapsed.TotalSeconds:F1}s.");
-        try
+        if (ReadVolumeSpace(drive.RootPath) is { } refreshed)
         {
-            var space = drive.HasDriveLetter
-                ? ReadVolumeSpace(new DriveInfo(drive.RootPath))
-                : TryReadWindowsVolumeSpace(drive.RootPath);
-            if (space is { } refreshed)
-            {
-                drive = drive with { Space = refreshed };
-            }
+            drive = drive with { Space = refreshed };
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        else if (drive.Space.HasValue)
         {
             notes.Add("Volume totals are from before the folder scan.");
         }

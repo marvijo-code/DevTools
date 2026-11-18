@@ -29,6 +29,28 @@ public sealed class VolumeSpaceTests
     }
 
     [Fact]
+    public void CallerSpaceFallback_MeasuresTheSystemVolumeByGuid()
+    {
+        var driveRoot = Path.GetPathRoot(Environment.SystemDirectory)!;
+        var volumeRoot = Assert.IsType<string>(WindowsVolumePaths.GetVolumeName(driveRoot));
+
+        var space = Assert.IsType<VolumeSpace>(DriveUsageService.TryReadCallerVolumeSpace(volumeRoot));
+
+        Assert.False(space.IsVolumeWide);
+        Assert.Equal(new DriveInfo(driveRoot).TotalSize, space.TotalBytes);
+        Assert.Equal(space.TotalBytes, space.FreeBytes + space.UsedBytes);
+        Assert.Equal(0, space.ReservedBytes);
+        Assert.Equal(0, space.PoolUnavailableBytes);
+    }
+
+    [Fact]
+    public void CallerSpaceFallback_DoesNotReportZeroUsageForAnUnknownVolume()
+    {
+        var unknownVolume = @"\\?\Volume{" + Guid.NewGuid().ToString("D") + @"}\";
+        Assert.Null(DriveUsageService.TryReadCallerVolumeSpace(unknownVolume));
+    }
+
+    [Fact]
     public void ContainingVolumeRoot_ResolvesDriveLetterAndGuidPaths()
     {
         var fixture = Directory.CreateTempSubdirectory("devtools-volume-root-");
@@ -333,7 +355,14 @@ public sealed class VolumeSpaceTests
             [drive.RootPath] = new DriveScanResult(drive, tree, "NTFS", "")
         };
 
-        var note = Assert.Single(DiskUsage.BuildDriveSummarySection([drive], results).Entries).Note;
+        var entry = Assert.Single(DiskUsage.BuildDriveSummarySection([drive], results).Entries);
+        var note = entry.Note;
+
+        Assert.Equal(volumeWide ? windowsUsed : 690L, entry.SizeBytes);
+        if (!volumeWide)
+        {
+            Assert.Contains("allocated (NTFS bitmap)", entry.Usage);
+        }
 
         Assert.Contains("The NTFS bitmap reported 690 allocated bytes.", note);
         Assert.Contains("440 appear in MFT runs and 250 have no matching run.", note);
@@ -341,10 +370,7 @@ public sealed class VolumeSpaceTests
         Assert.Contains("20 bytes of repeated cluster references", note);
         Assert.DoesNotContain("used bytes remain unattributed", note);
         Assert.DoesNotContain("Observed allocation exceeded", note);
-        if (windowsUsed is not null)
-        {
-            Assert.Contains("414 bytes referenced by folder records, 30 by reserved NTFS records, and 20 by unlinked NTFS records.", note);
-        }
+        Assert.Contains("414 bytes referenced by folder records, 30 by reserved NTFS records, and 20 by unlinked NTFS records.", note);
 
         if (expectedDifference is null)
         {
@@ -390,6 +416,27 @@ public sealed class VolumeSpaceTests
         Assert.Contains("508 used bytes remain unattributed.", note);
         Assert.Contains("Incomplete listings in 1 directory.", note);
         Assert.Contains("Incomplete allocation in 1 directory.", note);
+    }
+
+    [Fact]
+    public void DriveSummary_ShowsMeasuredFolderBytesWhenVolumeCountersAreMissing()
+    {
+        var drive = new DriveDescriptor(@"\\?\Volume{96175894-8c86-41c9-b1d5-6fa9ddba8c34}\", "Test", "NTFS",
+            null, HasDriveLetter: false);
+        var tree = new FolderTree(drive.RootPath, [-1], [""], [23], [1], "Fixture", TimeSpan.Zero, [32]);
+        var results = new Dictionary<string, DriveScanResult>
+        {
+            [drive.RootPath] = new DriveScanResult(drive, tree, "Fixture", "")
+        };
+
+        var entry = Assert.Single(DiskUsage.BuildDriveSummarySection([drive], results).Entries);
+
+        Assert.True(entry.ExistsOnDisk);
+        Assert.Null(entry.SizeBytes);
+        Assert.Equal("Usage unavailable", entry.Usage);
+        Assert.Contains("Windows did not report space totals for this volume.", entry.Note);
+        Assert.Contains("Logical file size: 23 bytes", entry.Note);
+        Assert.Contains("32 bytes of allocation attributed by the scan.", entry.Note);
     }
 
     [Fact]

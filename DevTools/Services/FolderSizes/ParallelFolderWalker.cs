@@ -119,7 +119,7 @@ public sealed class ParallelFolderWalker
         {
             try
             {
-                var allocationReader = allocationIndex is null ? null : new DirectoryAllocationReader(allocationIndex, allocationUnitBytes);
+                var allocationReader = allocationIndex is null ? null : new DirectoryAllocationReader(allocationIndex, allocationUnitBytes, workers);
                 var subfolders = new List<string>();
                 foreach (var (node, directory, streams) in queue.GetConsumingEnumerable(scanToken))
                 {

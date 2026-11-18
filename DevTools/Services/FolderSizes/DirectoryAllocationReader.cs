@@ -6,11 +6,12 @@ using Microsoft.Win32.SafeHandles;
 namespace DevTools.Services.FolderSizes;
 
 /// <summary>Reads allocation for NTFS files, directory indexes and named data streams.</summary>
-internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identities, uint allocationUnitBytes)
+internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identities, uint allocationUnitBytes, int streamWorkers = 1)
 {
     // FILE_ID_EXTD_DIR_INFO. The variable-length UTF-16 name follows the fixed header.
     private const int EntryHeaderBytes = 88;
     private const int StreamBatchSize = 128;
+    private const int MinimumSharedStreamBatchSize = 16;
     private const int FileIdExtdDirectoryInfo = 19;
     private const int FileStandardInfo = 1;
     private const int StandardInfoBytes = 24;
@@ -94,6 +95,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
 
             var remaining = _buffer.AsSpan();
             var streamFileCount = 0;
+            var sharedFullBatch = false;
             while (remaining.Length >= EntryHeaderBytes)
             {
                 var nextOffset = BinaryPrimitives.ReadInt32LittleEndian(remaining);
@@ -141,7 +143,11 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                             _fileIds[streamFileCount++] = low;
                             if (streamFileCount == _fileIds.Length)
                             {
-                                if (scheduleStreams?.Invoke(node, handle, _fileIds) != true)
+                                if (scheduleStreams?.Invoke(node, handle, _fileIds) == true)
+                                {
+                                    sharedFullBatch = true;
+                                }
+                                else
                                 {
                                     allocatedBytes += ReadFileStreams(handle, _fileIds, cancellationToken, ref incompleteAllocation);
                                 }
@@ -170,7 +176,19 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                 remaining = remaining[nextOffset..];
             }
 
-            allocatedBytes += ReadFileStreams(handle, _fileIds.AsSpan(0, streamFileCount), cancellationToken, ref incompleteAllocation);
+            var tail = _fileIds.AsSpan(0, streamFileCount);
+            if (!sharedFullBatch && scheduleStreams is not null && tail.Length >= 2 * MinimumSharedStreamBatchSize)
+            {
+                // Leave a slice for the worker reading the directory and share the rest when the queue has room.
+                var sliceSize = Math.Max(MinimumSharedStreamBatchSize, (tail.Length + streamWorkers - 1) / streamWorkers);
+                while (tail.Length - sliceSize >= MinimumSharedStreamBatchSize &&
+                    scheduleStreams(node, handle, tail[..sliceSize]))
+                {
+                    tail = tail[sliceSize..];
+                }
+            }
+
+            allocatedBytes += ReadFileStreams(handle, tail, cancellationToken, ref incompleteAllocation);
         }
     }
 

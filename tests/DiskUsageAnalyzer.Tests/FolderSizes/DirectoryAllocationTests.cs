@@ -107,14 +107,15 @@ public sealed class DirectoryAllocationTests
         }
     }
 
-    [Fact]
-    public async Task Walker_ParallelStreamBatchesPreserveWideDirectoryTotals()
+    [Theory]
+    [InlineData(96)]
+    [InlineData(512)]
+    public async Task Walker_ParallelStreamBatchesPreserveWideDirectoryTotals(int fileCount)
     {
         var root = Directory.CreateTempSubdirectory("devtools-stream-batches-");
         try
         {
             var wide = root.CreateSubdirectory("wide");
-            const int fileCount = 512;
             const int streamStride = 31;
             var payload = new byte[8192];
             for (var i = 0; i < fileCount; i++)

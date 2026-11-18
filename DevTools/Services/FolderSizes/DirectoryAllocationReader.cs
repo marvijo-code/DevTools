@@ -5,13 +5,15 @@ using Microsoft.Win32.SafeHandles;
 
 namespace DevTools.Services.FolderSizes;
 
-/// <summary>Reads allocation for NTFS files, directory indexes and named data streams.</summary>
-internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identities, uint allocationUnitBytes, int streamWorkers = 1)
+/// <summary>Reads allocation for files and directories, including NTFS named data streams.</summary>
+internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identities, uint allocationUnitBytes, int streamWorkers = 1)
 {
-    // FILE_ID_EXTD_DIR_INFO. The variable-length UTF-16 name follows the fixed header.
-    private const int EntryHeaderBytes = 88;
+    // The variable-length UTF-16 name follows the fixed fields in each information class.
+    private const int FullEntryHeaderBytes = 68;
+    private const int ExtendedEntryHeaderBytes = 88;
     private const int StreamBatchSize = 128;
     private const int MinimumSharedStreamBatchSize = 16;
+    private const int FileFullDirectoryInfo = 14;
     private const int FileIdExtdDirectoryInfo = 19;
     private const int FileStandardInfo = 1;
     private const int StandardInfoBytes = 24;
@@ -34,6 +36,11 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
 
     internal delegate bool TryScheduleStreams(int node, SafeFileHandle hint, ReadOnlySpan<ulong> fileIds);
 
+    internal static bool SupportsAllocationWithoutFileIds(string fileSystem) =>
+        string.Equals(fileSystem, "FAT", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(fileSystem, "FAT32", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(fileSystem, "exFAT", StringComparison.OrdinalIgnoreCase);
+
     public bool TryRead(
         string path,
         int node,
@@ -48,7 +55,9 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
         logicalBytes = 0;
         allocatedBytes = 0;
         files = 0;
-        incompleteAllocation = allocationUnitBytes == 0;
+        incompleteAllocation = identities is not null && allocationUnitBytes == 0;
+        var entryHeaderBytes = identities is null ? FullEntryHeaderBytes : ExtendedEntryHeaderBytes;
+        var informationClass = identities is null ? FileFullDirectoryInfo : FileIdExtdDirectoryInfo;
 
         var nativePath = path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path : @"\\?\" + path;
         // List directory, share with other processes, open existing, and handle reparse points themselves.
@@ -61,10 +70,14 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                 // Windows can allow metadata access to the directory itself when it denies listing its children.
                 using var metadata = OpenDirectory(nativePath, 0, 7, IntPtr.Zero, 3,
                     BackupSemantics | OpenReparsePoint | OpenNoRecall, IntPtr.Zero);
-                if (!metadata.IsInvalid && TryReadDirectoryIndex(metadata, out var indexBytes, out var isMetadataDirectory) &&
+                if (!metadata.IsInvalid && TryReadOwnDirectoryAllocation(metadata, out var directoryBytes, out var isMetadataDirectory) &&
                     isMetadataDirectory)
                 {
-                    allocatedBytes = indexBytes + ReadNamedStreamAllocation(metadata, ref incompleteAllocation);
+                    allocatedBytes = directoryBytes;
+                    if (identities is not null)
+                    {
+                        allocatedBytes += ReadNamedStreamAllocation(metadata, ref incompleteAllocation);
+                    }
                 }
             }
 
@@ -72,7 +85,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             return false;
         }
 
-        if (TryReadDirectoryIndex(handle, out allocatedBytes, out var isDirectory))
+        if (TryReadOwnDirectoryAllocation(handle, out allocatedBytes, out var isDirectory))
         {
             if (!isDirectory)
             {
@@ -84,11 +97,15 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             incompleteAllocation = true;
         }
 
-        allocatedBytes += ReadNamedStreamAllocation(handle, ref incompleteAllocation);
+        if (identities is not null)
+        {
+            allocatedBytes += ReadNamedStreamAllocation(handle, ref incompleteAllocation);
+        }
+
         while (true)
         {
             ScanGate.Wait(cancellationToken);
-            if (!GetFileInformationByHandleEx(handle, FileIdExtdDirectoryInfo, _buffer, (uint)_buffer.Length))
+            if (!GetFileInformationByHandleEx(handle, informationClass, _buffer, (uint)_buffer.Length))
             {
                 return Marshal.GetLastWin32Error() == ErrorNoMoreFiles;
             }
@@ -96,14 +113,14 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             var remaining = _buffer.AsSpan();
             var streamFileCount = 0;
             var sharedFullBatch = false;
-            while (remaining.Length >= EntryHeaderBytes)
+            while (remaining.Length >= entryHeaderBytes)
             {
                 var nextOffset = BinaryPrimitives.ReadInt32LittleEndian(remaining);
                 var nameBytes = BinaryPrimitives.ReadInt32LittleEndian(remaining[60..]);
                 var entryLength = nextOffset == 0 ? remaining.Length : nextOffset;
-                if (entryLength < EntryHeaderBytes || entryLength > remaining.Length ||
-                    nameBytes <= 0 || (nameBytes & 1) != 0 || nameBytes > entryLength - EntryHeaderBytes ||
-                    (nextOffset != 0 && remaining.Length - entryLength < EntryHeaderBytes))
+                if (entryLength < entryHeaderBytes || entryLength > remaining.Length ||
+                    nameBytes <= 0 || (nameBytes & 1) != 0 || nameBytes > entryLength - entryHeaderBytes ||
+                    (nextOffset != 0 && remaining.Length - entryLength < entryHeaderBytes))
                 {
                     allocatedBytes += ReadFileStreams(handle, _fileIds.AsSpan(0, streamFileCount), cancellationToken, ref incompleteAllocation);
                     return false;
@@ -114,20 +131,30 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                 {
                     if ((attributes & ReparsePoint) == 0)
                     {
-                        var name = MemoryMarshal.Cast<byte, char>(remaining.Slice(EntryHeaderBytes, nameBytes));
+                        var name = MemoryMarshal.Cast<byte, char>(remaining.Slice(entryHeaderBytes, nameBytes));
                         if (!name.SequenceEqual(".") && !name.SequenceEqual(".."))
                         {
                             subfolders.Add(new string(name));
                         }
                     }
-                    else
+                    else if (identities is not null)
                     {
                         ScanGate.Wait(cancellationToken);
                         // Attribute the link's own storage to the containing folder. Its target stays outside this walk.
                         var low = BinaryPrimitives.ReadUInt64LittleEndian(remaining[72..]);
                         var high = BinaryPrimitives.ReadUInt64LittleEndian(remaining[80..]);
-                        allocatedBytes += ReadReparseDirectoryAllocation(handle, low, high, ref incompleteAllocation);
+                        allocatedBytes += ReadReparseDirectoryAllocation(identities, handle, low, high, ref incompleteAllocation);
                     }
+                    else
+                    {
+                        incompleteAllocation = true;
+                    }
+                }
+                else if (identities is null)
+                {
+                    logicalBytes += Math.Max(0, BinaryPrimitives.ReadInt64LittleEndian(remaining[40..]));
+                    allocatedBytes += Math.Max(0, BinaryPrimitives.ReadInt64LittleEndian(remaining[48..]));
+                    files++;
                 }
                 else
                 {
@@ -192,7 +219,8 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
         }
     }
 
-    private long ReadReparseDirectoryAllocation(SafeFileHandle hint, ulong low, ulong high, ref bool incompleteAllocation)
+    private long ReadReparseDirectoryAllocation(DirectoryAllocationIndex index,
+        SafeFileHandle hint, ulong low, ulong high, ref bool incompleteAllocation)
     {
         if (high != 0)
         {
@@ -200,7 +228,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             return 0;
         }
 
-        var claim = identities.Claim(low);
+        var claim = index.Claim(low);
         if (claim != DirectoryAllocationIndex.ClaimResult.New)
         {
             incompleteAllocation |= claim == DirectoryAllocationIndex.ClaimResult.Unavailable;
@@ -216,15 +244,15 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             return 0;
         }
 
-        incompleteAllocation |= !TryReadDirectoryIndex(directory, out var indexBytes, out var isDirectory) || !isDirectory;
-        return indexBytes + ReadNamedStreamAllocation(directory, ref incompleteAllocation);
+        incompleteAllocation |= !TryReadOwnDirectoryAllocation(directory, out var directoryBytes, out var isDirectory) || !isDirectory;
+        return directoryBytes + ReadNamedStreamAllocation(directory, ref incompleteAllocation);
     }
 
-    private bool TryReadDirectoryIndex(SafeFileHandle directory, out long allocatedBytes, out bool isDirectory)
+    private bool TryReadOwnDirectoryAllocation(SafeFileHandle directory, out long allocatedBytes, out bool isDirectory)
     {
         allocatedBytes = 0;
         isDirectory = false;
-        // The directory handle reports the index allocation separately from named data streams.
+        // The directory handle reports its own allocation separately from named data streams.
         // Use separate scratch space so querying a junction does not overwrite the parent listing.
         if (!GetFileInformationByHandleEx(directory, FileStandardInfo, _streamBuffer, StandardInfoBytes))
         {
@@ -235,7 +263,8 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
         isDirectory = _streamBuffer[21] != 0;
         if (isDirectory)
         {
-            allocatedBytes = PhysicalAllocation(BinaryPrimitives.ReadInt64LittleEndian(_streamBuffer));
+            var reported = BinaryPrimitives.ReadInt64LittleEndian(_streamBuffer);
+            allocatedBytes = identities is null ? Math.Max(0, reported) : PhysicalAllocation(reported);
         }
 
         return true;
@@ -386,27 +415,6 @@ internal sealed class DirectoryAllocationIndex
 
     public static DirectoryAllocationIndex? Create(string root, ScanResources resources, bool fullVolume)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return null;
-        }
-
-        try
-        {
-            var fileSystem = WindowsVolumePaths.GetVolumeGuid(root).HasValue
-                ? WindowsVolumePaths.ReadVolumeInformation(root).FileSystem
-                : new DriveInfo(root).DriveFormat;
-            // ReFS block clones can share physical clusters across different file IDs.
-            if (!string.Equals(fileSystem, "NTFS", StringComparison.OrdinalIgnoreCase))
-            {
-                return null;
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
-        {
-            return null;
-        }
-
         // Keep at least seven eighths of current memory headroom available to other work.
         var budget = resources.MemoryHeadroom.GetValueOrDefault() / 8;
         if (budget / 48 < ShardCount)

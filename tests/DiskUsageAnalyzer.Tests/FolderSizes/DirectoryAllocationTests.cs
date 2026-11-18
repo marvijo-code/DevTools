@@ -10,6 +10,48 @@ namespace DiskUsageAnalyzer.Tests.FolderSizes;
 
 public sealed class DirectoryAllocationTests
 {
+    [Theory]
+    [InlineData("FAT", true)]
+    [InlineData("FAT32", true)]
+    [InlineData("exFat", true)]
+    [InlineData("NTFS", false)]
+    [InlineData("ReFS", false)]
+    [InlineData("UDF", false)]
+    [InlineData("", false)]
+    public void SupportsAllocationWithoutFileIds_OnlySelectsTheFatFamily(string fileSystem, bool expected)
+    {
+        Assert.Equal(expected, DirectoryAllocationReader.SupportsAllocationWithoutFileIds(fileSystem));
+    }
+
+    [Fact]
+    public async Task Reader_MeasuresAllocationFromDirectoryRepliesWithoutFileIds()
+    {
+        var root = Directory.CreateTempSubdirectory("devtools-full-dir-info-");
+        try
+        {
+            root.CreateSubdirectory("résumé");
+            await File.WriteAllBytesAsync(Path.Combine(root.FullName, "payload.bin"), new byte[8193]);
+            await File.WriteAllBytesAsync(Path.Combine(root.FullName, "empty.bin"), []);
+            var clusterBytes = WindowsVolumePaths.GetAllocationUnitBytes(root.Root.FullName);
+            Assert.True(clusterBytes > 0);
+
+            var reader = new DirectoryAllocationReader(identities: null, allocationUnitBytes: 0);
+            var folders = new List<string>();
+            Assert.True(reader.TryRead(root.FullName, 0, folders, null, CancellationToken.None,
+                out var logical, out var allocated, out var files, out var incomplete));
+
+            Assert.Equal(["résumé"], folders);
+            Assert.Equal(2, files);
+            Assert.Equal(8193, logical);
+            Assert.Equal((1 + (logical - 1) / clusterBytes) * clusterBytes, allocated);
+            Assert.False(incomplete);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
     [Fact]
     public async Task Walker_ReportsLogicalLengthsAndCountsHardLinkAllocationOnce()
     {

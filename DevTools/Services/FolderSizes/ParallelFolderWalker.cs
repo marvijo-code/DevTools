@@ -36,9 +36,15 @@ public sealed class ParallelFolderWalker
         var stopwatch = Stopwatch.StartNew();
         var resources = ScanResources.Capture();
         var fullVolume = string.Equals(fullRoot, driveRoot, StringComparison.OrdinalIgnoreCase);
-        var allocationIndex = prioritize ? null : DirectoryAllocationIndex.Create(driveRoot, resources, fullVolume);
+        var fileSystem = !prioritize && OperatingSystem.IsWindows()
+            ? WindowsVolumePaths.ReadVolumeInformation(driveRoot).FileSystem
+            : string.Empty;
+        var allocationIndex = string.Equals(fileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)
+            ? DirectoryAllocationIndex.Create(driveRoot, resources, fullVolume)
+            : null;
+        var trackAllocation = allocationIndex is not null || DirectoryAllocationReader.SupportsAllocationWithoutFileIds(fileSystem);
         var allocationUnitBytes = allocationIndex is null ? 0 : WindowsVolumePaths.GetAllocationUnitBytes(driveRoot);
-        var builder = new FolderTreeBuilder(driveRoot, trackAllocation: allocationIndex is not null);
+        var builder = new FolderTreeBuilder(driveRoot, trackAllocation);
         var builderLock = new object();
         var startNode = builder.AddFolder(Path.TrimEndingDirectorySeparator(fullRoot));
 
@@ -119,7 +125,7 @@ public sealed class ParallelFolderWalker
         {
             try
             {
-                var allocationReader = allocationIndex is null ? null : new DirectoryAllocationReader(allocationIndex, allocationUnitBytes, workers);
+                var allocationReader = trackAllocation ? new DirectoryAllocationReader(allocationIndex, allocationUnitBytes, workers) : null;
                 var subfolders = new List<string>();
                 foreach (var (node, directory, streams) in queue.GetConsumingEnumerable(scanToken))
                 {

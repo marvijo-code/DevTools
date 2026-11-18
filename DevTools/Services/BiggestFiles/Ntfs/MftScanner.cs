@@ -28,7 +28,19 @@ public sealed class MftScanner
             stopwatch,
             cancellationToken).ConfigureAwait(false);
 
+        var result = RankFiles(table, root, request.TopCount, stopwatch, cancellationToken);
+        progress?.Report(new BiggestFilesProgress(
+            "Done", result.FilesSeen, result.BytesSeen, result.Elapsed,
+            ComputeRate(result.FilesSeen, result.Elapsed), result.Top, IsCompleted: true));
+
+        return result;
+    }
+
+    internal static BiggestFilesResult RankFiles(MftRecordTable table, string root, int topCount, Stopwatch stopwatch,
+        CancellationToken cancellationToken)
+    {
         cancellationToken.ThrowIfCancellationRequested();
+        ArgumentOutOfRangeException.ThrowIfLessThan(topCount, 1);
 
         // Ancestry filter for subtree scans (volume-root scans include everything).
         var isSubtree = !string.Equals(TrimTrailingSeparators(root), TrimTrailingSeparators(table.VolumeRoot), StringComparison.OrdinalIgnoreCase);
@@ -40,23 +52,21 @@ public sealed class MftScanner
 
         var ancestry = targetRecord is null ? null : new byte[table.RecordCount];
 
-        var topN = new TopNAccumulator<int>(request.TopCount);
+        var top = new PriorityQueue<int, long>(topCount);
+        var threshold = long.MinValue;
         long filesSeen = 0;
         long bytesSeen = 0;
 
-        for (var index = 0; index < table.RecordCount; index++)
+        for (var index = (int)MftRecordTable.FirstUserRecordNumber; index < table.RecordCount; index++)
         {
             if ((index & 4095) == 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
             }
 
-            if (!table.IsNamedFile(index))
-            {
-                continue;
-            }
-
-            if (index < MftRecordTable.FirstUserRecordNumber)
+            // Each file is visited once. Cache ancestry at its parent for reuse by all sibling files.
+            if (!table.IsNamedFile(index) ||
+                (targetRecord is uint target && !table.IsUnder((int)table.Parent[index], target, ancestry!)))
             {
                 continue;
             }
@@ -64,30 +74,38 @@ public sealed class MftScanner
             var size = table.RealSize[index];
             filesSeen++;
             bytesSeen += size;
-
-            if (targetRecord is not null && !table.IsUnder(index, targetRecord.Value, ancestry!))
+            if (size <= threshold)
             {
                 continue;
             }
 
-            topN.TryAdd(size, index);
+            if (top.Count < topCount)
+            {
+                top.Enqueue(index, size);
+            }
+            else
+            {
+                top.EnqueueDequeue(index, size);
+            }
+
+            if (top.Count == topCount)
+            {
+                top.TryPeek(out _, out threshold);
+            }
         }
 
-        var winners = topN.Snapshot();
+        var winners = top.UnorderedItems.ToList();
+        winners.Sort(static (left, right) => right.Priority.CompareTo(left.Priority));
         var pathCache = new Dictionary<uint, string>();
         var hits = new List<FileSizeHit>(winners.Count);
-        foreach (var (size, index) in winners)
+        foreach (var (index, size) in winners)
         {
             var fullPath = table.BuildPath(index, pathCache);
             hits.Add(new FileSizeHit(fullPath, size, table.AllocSize[index], ToModified(table.LastWrite[index])));
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         stopwatch.Stop();
-
-        progress?.Report(new BiggestFilesProgress(
-            "Done", filesSeen, bytesSeen, stopwatch.Elapsed,
-            ComputeRate(table.RecordCount, stopwatch.Elapsed), hits, IsCompleted: true));
-
         return new BiggestFilesResult(hits, filesSeen, bytesSeen, stopwatch.Elapsed, EngineName, Warning: null);
     }
 

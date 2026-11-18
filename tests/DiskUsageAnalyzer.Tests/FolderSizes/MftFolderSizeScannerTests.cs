@@ -113,6 +113,36 @@ public sealed class MftFolderSizeScannerTests
         Assert.Empty(hits);
     }
 
+    [Theory]
+    [InlineData(@"C:\", 4, 2100, @"C:\Other\outside.bin", 1500)]
+    [InlineData(@"C:\Target", 3, 600, @"C:\Target\Nested\largest.bin", 500)]
+    public void RankFiles_ReportsExactCountsAndRankingsForTheRequestedRoot(string root, int files, long bytes,
+        string topPath, long topSize)
+    {
+        var table = CreateTable(128);
+        AddDirectory(table, 24, Root, "Target");
+        AddDirectory(table, 25, 24, "Nested");
+        AddDirectory(table, 26, Root, "Other");
+        AddFile(table, 40, 24, "inside.bin", 100);
+        AddFile(table, 41, 25, "largest.bin", 500);
+        AddFile(table, 42, 24, "empty.bin", 0);
+        AddFile(table, 43, 26, "outside.bin", 1500);
+        AddFile(table, 44, 24, "extension.bin", 2000);
+        table.Flags[44] |= MftRecordTable.FlagExtension;
+        AddFile(table, 45, MftRecordTable.InvalidParentRecord, "unlinked.bin", 2000);
+        table.AllocSize[41] = 4096;
+        table.AllocSize[43] = 4096;
+
+        var result = MftScanner.RankFiles(table, root, 1, System.Diagnostics.Stopwatch.StartNew(), CancellationToken.None);
+
+        Assert.Equal(files, result.FilesSeen);
+        Assert.Equal(bytes, result.BytesSeen);
+        var top = Assert.Single(result.Top);
+        Assert.Equal(topPath, top.FullPath);
+        Assert.Equal(topSize, top.SizeBytes);
+        Assert.Equal(4096, top.AllocatedBytes);
+    }
+
     [Fact]
     public void RankChildFolders_SkipsZeroSizedAndNonChildRecords()
     {

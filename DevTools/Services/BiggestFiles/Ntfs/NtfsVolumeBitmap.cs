@@ -73,9 +73,10 @@ internal sealed class NtfsVolumeBitmap
         }
 
         Interlocked.Or(ref _observed[first], firstMask);
+        // A full word sets every bit, including any bits set by concurrent partial-word updates.
         for (var word = first + 1; word < last; word++)
         {
-            Interlocked.Exchange(ref _observed[word], -1L);
+            Volatile.Write(ref _observed[word], -1L);
         }
 
         Interlocked.Or(ref _observed[last], lastMask);

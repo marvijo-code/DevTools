@@ -51,13 +51,25 @@ public sealed class NtfsVolumeBitmapTests
     [Fact]
     public void Reconcile_PreservesBitsMarkedByConcurrentParsers()
     {
-        var map = Assert.IsType<NtfsVolumeBitmap>(NtfsVolumeBitmap.TryCreate(64, 1024 * 1024));
-        Parallel.For(0, 256, index => map.Mark(index % 64, 1));
-        var payload = new byte[8];
+        const int clusters = 256;
+        const uint clusterBytes = 512;
+        var map = Assert.IsType<NtfsVolumeBitmap>(NtfsVolumeBitmap.TryCreate(clusters, 1024 * 1024));
+        Parallel.For(0, 128, index =>
+        {
+            map.Mark(index % 32, 1);
+            map.Mark(224 + index % 32, 1);
+            map.Mark(96 + index % 32, 1);
+            if (index % 8 == 0)
+            {
+                map.Mark(32, 192);
+            }
+        });
+
+        var payload = new byte[clusters / 8];
         payload.AsSpan().Fill(byte.MaxValue);
 
-        Assert.Equal(new NtfsBitmapAllocation(32768, 32768, 0),
-            map.Reconcile(512, (_, output) => WriteReply(0, 64, payload, output), CancellationToken.None));
+        Assert.Equal(new NtfsBitmapAllocation(clusters * clusterBytes, clusters * clusterBytes, 0),
+            map.Reconcile(clusterBytes, (_, output) => WriteReply(0, clusters, payload, output), CancellationToken.None));
     }
 
     [Fact]

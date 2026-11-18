@@ -214,13 +214,19 @@ public sealed class DriveUsageService
     public Task<DriveScanResult> ScanDriveAsync(
         DriveDescriptor drive,
         IProgress<FolderScanProgress>? progress,
-        CancellationToken cancellationToken) => ScanDriveAsync(drive, progress, cancellationToken, concurrentWalks: 1);
+        CancellationToken cancellationToken) => ScanDriveAsync(drive, progress, cancellationToken, volumeShare: 1,
+            CanTryMft(drive, OperatingSystem.IsWindows() && ElevationService.IsProcessElevated()));
+
+    internal static bool CanTryMft(DriveDescriptor drive, bool elevated) =>
+        elevated && string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase) &&
+        WindowsVolumePaths.GetDevicePath(drive.RootPath) is not null;
 
     internal async Task<DriveScanResult> ScanDriveAsync(
         DriveDescriptor drive,
         IProgress<FolderScanProgress>? progress,
         CancellationToken cancellationToken,
-        int concurrentWalks)
+        int volumeShare,
+        bool tryMft)
     {
         var root = drive.RootPath;
         var notes = new List<string>();
@@ -228,9 +234,7 @@ public sealed class DriveUsageService
         void Report(string engine, string message) =>
             progress?.Report(new FolderScanProgress(root, engine, message, 0, TimeSpan.Zero));
 
-        var elevated = ElevationService.IsProcessElevated();
-        var ntfs = string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase);
-        if (elevated && ntfs)
+        if (tryMft)
         {
             Report("NTFS MFT", $"Reading the NTFS Master File Table of {root}...");
             using var mftCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -238,21 +242,23 @@ public sealed class DriveUsageService
             var mftProgress = new InlineProgress<FolderSizeProgress>(update => progress?.Report(new FolderScanProgress(
                 root, "NTFS MFT", $"Reading the NTFS Master File Table: {update.RecordsParsed:N0} of {update.RecordCount:N0} records.", update.RecordsParsed, update.Elapsed)));
             var tree = await TryEngineAsync(
-                () => _mft.ScanTreeAsync(root, mftProgress, mftCts.Token),
+                () => _mft.ScanTreeAsync(root, mftProgress, mftCts.Token, volumeShare),
                 "NTFS MFT", root, notes, cancellationToken).ConfigureAwait(false);
             if (tree is not null)
             {
                 return Done(drive, tree, notes);
             }
         }
-        else if (ntfs)
+        else if (string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase))
         {
-            notes.Add("Not running as administrator, so the NTFS Master File Table fast path is off.");
+            notes.Add(WindowsVolumePaths.GetDevicePath(root) is null
+                ? "The NTFS Master File Table fast path needs a local volume device."
+                : "Not running as administrator, so the NTFS Master File Table fast path is off.");
         }
 
         Report(ParallelFolderWalker.EngineName, $"Walking every folder on {root} (slow path)...");
         var walked = await TryEngineAsync(
-            () => _walker.ScanVolumeAsync(root, progress, cancellationToken, concurrentWalks),
+            () => _walker.ScanVolumeAsync(root, progress, cancellationToken, volumeShare),
             ParallelFolderWalker.EngineName, root, notes, cancellationToken).ConfigureAwait(false);
         return walked is not null
             ? Done(drive, walked, notes)

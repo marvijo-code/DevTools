@@ -247,6 +247,44 @@ public sealed class VolumeSpaceTests
     }
 
     [Fact]
+    public async Task VolumeScheduler_OverlapsOneMftWithADisjointWalk()
+    {
+        int[][] disks = [[0, 1], [2], [1], [3], []];
+        bool[] mftVolumes = [true, true, false, false, false];
+        var started = new List<int>();
+        var independentWalkStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        async Task<DriveScanResult> ScanAsync(int index, int workerShare, CancellationToken token)
+        {
+            started.Add(index);
+            if (index == 0)
+            {
+                Assert.Equal(3, workerShare);
+                await independentWalkStarted.Task.WaitAsync(token);
+            }
+            else if (index == 3)
+            {
+                Assert.Equal(3, workerShare);
+                Assert.Equal([0, 3], started);
+                independentWalkStarted.SetResult();
+            }
+
+            return VolumeResult(index);
+        }
+
+        var completed = new List<int>();
+        await foreach (var (index, result) in DiskUsage.ScanVolumesAsync(disks, 3, ScanAsync, deadline.Token, mftVolumes))
+        {
+            Assert.Equal(VolumeResult(index), result);
+            completed.Add(index);
+        }
+
+        Assert.Equal([0, 3, 1, 2, 4], started);
+        Assert.Equal([0, 1, 2, 3, 4], completed.Order().ToArray());
+    }
+
+    [Fact]
     public async Task VolumeScheduler_UsesTheFullWorkerBudgetWhenRemainingSpansOverlap()
     {
         int[][] disks = [[0, 1], [1, 2]];

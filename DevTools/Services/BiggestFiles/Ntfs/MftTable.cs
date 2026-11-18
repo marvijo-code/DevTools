@@ -379,9 +379,10 @@ internal static class MftTableLoader
         Action<long, long, TimeSpan>? reportProgress,
         Stopwatch stopwatch,
         CancellationToken cancellationToken,
-        bool keepFileNames = true) =>
+        bool keepFileNames = true,
+        int volumeShare = 1) =>
         UseVolumeAsync(scanRoot, reportProgress, stopwatch, cancellationToken, keepFileNames,
-            requestedLargestFiles: 0, static table => table);
+            requestedLargestFiles: 0, static table => table, volumeShare);
 
     internal static async Task<TResult> UseVolumeAsync<TResult>(
         string scanRoot,
@@ -390,7 +391,7 @@ internal static class MftTableLoader
         CancellationToken cancellationToken,
         bool keepFileNames,
         int requestedLargestFiles,
-        Func<MftRecordTable, TResult> consume)
+        Func<MftRecordTable, TResult> consume, int volumeShare = 1)
     {
         var root = Path.GetFullPath(scanRoot);
         var pathRoot = Path.GetPathRoot(root);
@@ -408,7 +409,8 @@ internal static class MftTableLoader
             ScanResources.CanDeferLargestFileNames(GetRecordCount(geometry), requestedLargestFiles) &&
             ScanResources.ReadSeekPenalty(volumeRoot) is false;
         var table = await LoadVolumeAsync(volume, volumeRoot, geometry, reportProgress, stopwatch, cancellationToken, keepFileNames,
-            keepFileNames ? null : (start, output) => NativeMethods.ReadVolumeBitmap(volume, start, output), deferFileNames)
+            keepFileNames ? null : (start, output) => NativeMethods.ReadVolumeBitmap(volume, start, output), deferFileNames,
+            volumeShare)
             .ConfigureAwait(false);
         return consume(table);
     }
@@ -422,12 +424,13 @@ internal static class MftTableLoader
         CancellationToken cancellationToken,
         bool keepFileNames,
         NtfsVolumeBitmap.Query? bitmapQuery = null,
-        bool deferFileNames = false)
+        bool deferFileNames = false,
+        int volumeShare = 1)
     {
         var recordCount = GetRecordCount(geometry);
         var recordSize = (int)geometry.BytesPerFileRecordSegment;
         var clusterBytes = (int)geometry.BytesPerCluster;
-        var resources = ScanResources.Capture();
+        var resources = ScanResources.Capture().ShareVolumeBudget(volumeShare);
         var (chunkBytes, parserCount, queueCapacity, carryBytes) = resources.MftPlan(
             recordCount, geometry.MftValidDataLength, clusterBytes, recordSize, keepFileNames, deferFileNames);
 

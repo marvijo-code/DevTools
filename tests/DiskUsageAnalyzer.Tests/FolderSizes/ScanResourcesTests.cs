@@ -62,6 +62,31 @@ public sealed class ScanResourcesTests
         Assert.Equal(expected, resources.WalkWorkerCount(seekPenalty, prioritize: false, volumeShare));
     }
 
+    [Theory]
+    [InlineData(4096L, 1_000_000, 4)]
+    [InlineData(4096L, 12_000_000, 2)]
+    [InlineData(4096L, 20_000_000, 1)]
+    [InlineData(8192L, 0, 1)]
+    [InlineData(null, 1_000_000, 1)]
+    public void LimitParallelFolderMft_LeavesRoomForTheLargestTable(long? memoryMiB, int records, int expected)
+    {
+        var resources = new ScanResources(16, memoryMiB * MiB);
+        Assert.Equal(expected, resources.LimitParallelFolderMft(4, records));
+    }
+
+    [Fact]
+    public void SharedMftPlan_CapsParserCountAndMemoryToItsVolumeShare()
+    {
+        var shared = new ScanResources(16, 4096 * MiB).ShareVolumeBudget(4);
+        Assert.Equal(4, shared.LogicalProcessors);
+        Assert.Equal(1024 * MiB, shared.MemoryHeadroom);
+
+        var plan = shared.MftPlan(200_000, 204_800_000, 4096, 1024, includeFileNames: false);
+        Assert.Equal(2, plan.Parsers);
+        Assert.Throws<InsufficientMemoryException>(() =>
+            shared.MftPlan(12_000_000, 12_288_000_000, 4096, 1024, includeFileNames: false));
+    }
+
     [Fact]
     public void SeekPenaltyFallback_UsesEveryDistinctBackingDiskUntilOneReportsSeeks()
     {

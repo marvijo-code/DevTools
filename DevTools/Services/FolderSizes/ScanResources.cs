@@ -8,6 +8,7 @@ namespace DevTools.Services.FolderSizes;
 internal readonly record struct ScanResources(int LogicalProcessors, long? MemoryHeadroom)
 {
     private const int MiB = 1024 * 1024;
+    private const int FolderMftBytesPerRecord = 50;
     private const uint StorageQueryProperty = 0x002D1400;
     private const int DeviceSeekPenaltyProperty = 7;
 
@@ -28,6 +29,21 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
         var byMemory = MemoryHeadroom.GetValueOrDefault() / (1024L * MiB);
         return (int)Math.Max(1, Math.Min(Math.Min(independentDisks, maximumConcurrentWalks), Math.Min(byCpu, byMemory)));
     }
+
+    internal int LimitParallelFolderMft(int parallelism, int largestRecordCount)
+    {
+        if (largestRecordCount <= 0 || MemoryHeadroom is not long available)
+        {
+            return 1;
+        }
+
+        // A shared MFT plan needs half its share free. Keep extra margin for the walk starting first.
+        var estimatedBytes = (long)largestRecordCount * FolderMftBytesPerRecord;
+        return (int)Math.Clamp(available / 3 / estimatedBytes, 1, parallelism);
+    }
+
+    internal ScanResources ShareVolumeBudget(int volumeShare) =>
+        new(Math.Max(1, LogicalProcessors / volumeShare), MemoryHeadroom / volumeShare);
 
     public int WalkWorkerCount(bool? seekPenalty, bool prioritize, int volumeShare = 1)
     {
@@ -51,7 +67,7 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
     {
         // Estimate the indexed columns, temporary tree indexes and decoded names. Leave half of the
         // available commit and physical memory alone so a drive refresh can coexist with other apps.
-        var bytesPerRecord = includeFileNames ? (deferFileNames ? 48 : 100) : 50;
+        var bytesPerRecord = includeFileNames ? (deferFileNames ? 48 : 100) : FolderMftBytesPerRecord;
         var estimatedTableBytes = (long)records * bytesPerRecord;
         if (MemoryHeadroom is long available && estimatedTableBytes > available / 2)
         {

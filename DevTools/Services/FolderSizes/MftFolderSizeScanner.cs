@@ -65,7 +65,14 @@ public sealed class MftFolderSizeScanner
     public Task<FolderTree> ScanTreeAsync(
         string driveRoot,
         IProgress<FolderSizeProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        ScanTreeAsync(driveRoot, progress, cancellationToken, volumeShare: 1);
+
+    internal Task<FolderTree> ScanTreeAsync(
+        string driveRoot,
+        IProgress<FolderSizeProgress>? progress,
+        CancellationToken cancellationToken,
+        int volumeShare)
     {
         return Task.Run(async () =>
         {
@@ -78,7 +85,7 @@ public sealed class MftFolderSizeScanner
                     "Reading MFT", parsed, total, elapsed, Array.Empty<FolderSizeHit>(), IsCompleted: false)),
                 stopwatch,
                 cancellationToken,
-                keepFileNames: false).ConfigureAwait(false);
+                keepFileNames: false, volumeShare: volumeShare).ConfigureAwait(false);
             return BuildTree(table, root, EngineName, stopwatch, cancellationToken);
         }, cancellationToken);
     }

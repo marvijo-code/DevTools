@@ -97,10 +97,10 @@ public sealed class DiskUsageAnalyzer
         var extents = DiskCapacityInventory.ReadVolumeTopology(drives, cancellationToken, out var backingDisks);
         var diskCount = backingDisks.SelectMany(disks => disks).Distinct().Count();
         var possibleParallelism = Math.Min(diskCount, drives.Count);
-        var useRawMft = possibleParallelism > 1 && OperatingSystem.IsWindows() && drives.Any(drive =>
-            string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)) && ElevationService.IsProcessElevated();
-        var concurrentWalks = possibleParallelism > 1 && !useRawMft
-            ? ScanResources.Capture().VolumeWalkParallelism(possibleParallelism)
+        var elevated = OperatingSystem.IsWindows() && ElevationService.IsProcessElevated();
+        var rawMftVolumes = drives.Select(drive => DriveUsageService.CanTryMft(drive, elevated)).ToArray();
+        var concurrentScans = possibleParallelism > 1
+            ? PlanVolumeParallelism(drives, rawMftVolumes, possibleParallelism, ScanResources.Capture(), cancellationToken)
             : 1;
 
         IReadOnlyList<DriveDescriptor> currentDrives = drives;
@@ -147,7 +147,8 @@ public sealed class DiskUsageAnalyzer
 
             try
             {
-                return await _driveUsage.ScanDriveAsync(drive, driveProgress, scanToken, workerShare).ConfigureAwait(false);
+                return await _driveUsage.ScanDriveAsync(drive, driveProgress, scanToken, workerShare, rawMftVolumes[sectionIndex])
+                    .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -162,7 +163,8 @@ public sealed class DiskUsageAnalyzer
 
         try
         {
-            await foreach (var (sectionIndex, result) in ScanVolumesAsync(backingDisks, concurrentWalks, ScanVolumeAsync, cancellationToken)
+            await foreach (var (sectionIndex, result) in ScanVolumesAsync(backingDisks, concurrentScans, ScanVolumeAsync,
+                cancellationToken, rawMftVolumes)
                 .ConfigureAwait(false))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -238,9 +240,44 @@ public sealed class DiskUsageAnalyzer
         return new DiskUsageSnapshot(capturedAt, headline, analysis, sections) { BrowseRoots = browseRoots };
     }
 
+    private static int PlanVolumeParallelism(IReadOnlyList<DriveDescriptor> drives, bool[] rawMftVolumes,
+        int independentDisks, ScanResources resources, CancellationToken cancellationToken)
+    {
+        var rawVolumeCount = rawMftVolumes.Count(raw => raw);
+        var parallelism = resources.VolumeWalkParallelism(independentDisks);
+        if (rawVolumeCount == 0 || parallelism == 1)
+        {
+            return parallelism;
+        }
+
+        parallelism = Math.Min(parallelism, drives.Count - rawVolumeCount + 1);
+        if (parallelism == 1)
+        {
+            return 1;
+        }
+
+        // Estimate the largest table before allowing any directory workers to compete with it.
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
+        for (var index = 0; index < drives.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (rawMftVolumes[index])
+            {
+                var records = NativeMethods.GetDirectoryRecordCapacity(drives[index].RootPath);
+                parallelism = resources.LimitParallelFolderMft(parallelism, records);
+                if (parallelism == 1)
+                {
+                    break;
+                }
+            }
+        }
+
+        return parallelism;
+    }
+
     internal static async IAsyncEnumerable<(int Index, DriveScanResult Result)> ScanVolumesAsync(
         IReadOnlyList<int[]> backingDisks, int parallelism, Func<int, int, CancellationToken, Task<DriveScanResult>> scan,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        [EnumeratorCancellation] CancellationToken cancellationToken, IReadOnlyList<bool>? rawMftVolumes = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(parallelism, 1);
         using var activeScans = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -253,7 +290,9 @@ public sealed class DiskUsageAnalyzer
         {
             var first = backingDisks[left];
             var second = backingDisks[right];
-            if (first.Length == 0 || second.Length == 0)
+            // Keep at most one memory-intensive MFT scan in flight, including its fallback.
+            if (first.Length == 0 || second.Length == 0 ||
+                (rawMftVolumes is not null && rawMftVolumes[left] && rawMftVolumes[right]))
             {
                 return false;
             }

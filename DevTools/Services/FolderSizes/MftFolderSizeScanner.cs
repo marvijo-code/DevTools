@@ -162,8 +162,8 @@ public sealed class MftFolderSizeScanner
         var files = new long[count];
         var recordAllocation = table.RecordAllocation;
         var allocated = recordAllocation is null ? null : new long[count];
-        long reservedBytes = 0;
-        long unlinkedBytes = 0;
+        long reservedClusters = 0;
+        long unlinkedClusters = 0;
         for (var r = 0; r < recordCount; r++)
         {
             WaitForTreeBatch(r, cancellationToken);
@@ -180,26 +180,27 @@ public sealed class MftFolderSizeScanner
                 }
             }
 
-            if (allocated is null || recordAllocation![r] <= 0)
+            var clusters = recordAllocation?.GetClusters(r) ?? 0;
+            if (clusters <= 0)
             {
                 continue;
             }
 
-            var bytes = recordAllocation[r];
             if (r < MftRecordTable.FirstUserRecordNumber)
             {
-                reservedBytes = checked(reservedBytes + bytes);
+                reservedClusters = checked(reservedClusters + clusters);
                 continue;
             }
 
             var allocationNode = recordLinks[r] < 0 ? ~recordLinks[r] : isUserFile ? parentNode : -1;
             if (allocationNode >= 0)
             {
-                allocated[allocationNode] = checked(allocated[allocationNode] + bytes);
+                ref var folderClusters = ref allocated![allocationNode];
+                folderClusters = checked(folderClusters + clusters);
             }
             else
             {
-                unlinkedBytes = checked(unlinkedBytes + bytes);
+                unlinkedClusters = checked(unlinkedClusters + clusters);
             }
         }
 
@@ -211,14 +212,24 @@ public sealed class MftFolderSizeScanner
             files[parent] += files[i];
             if (allocated is not null)
             {
+                // Both nodes are still in clusters. Convert the child after its total reaches its parent.
                 allocated[parent] = checked(allocated[parent] + allocated[i]);
+                allocated[i] = recordAllocation!.ToBytes(allocated[i]);
             }
+        }
+
+        NtfsRecordAllocation? allocation = null;
+        if (allocated is not null)
+        {
+            allocated[0] = recordAllocation!.ToBytes(allocated[0]);
+            allocation = new NtfsRecordAllocation(recordAllocation.ToBytes(reservedClusters),
+                recordAllocation.ToBytes(unlinkedClusters), table.BitmapAllocation);
         }
 
         ScanGate.Wait(cancellationToken);
         stopwatch.Stop();
         var tree = new FolderTree(rootPath, nodeParents, nodeNames, totals, files, engineName, stopwatch.Elapsed,
-            allocated, allocated is null ? null : new NtfsRecordAllocation(reservedBytes, unlinkedBytes, table.BitmapAllocation));
+            allocated, allocation);
         cancellationToken.ThrowIfCancellationRequested();
         return tree;
     }

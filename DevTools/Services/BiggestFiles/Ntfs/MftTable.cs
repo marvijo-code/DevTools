@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Channels;
@@ -35,7 +36,7 @@ internal sealed class MftRecordTable
         long[] allocSize,
         long[] lastWrite,
         string?[] names,
-        long[]? recordAllocation = null,
+        MftRecordAllocations? recordAllocation = null,
         NtfsBitmapAllocation? bitmapAllocation = null)
     {
         VolumeRoot = volumeRoot;
@@ -65,7 +66,7 @@ internal sealed class MftRecordTable
     public long[] LastWrite { get; }
 
     public string?[] Names { get; }
-    public long[]? RecordAllocation { get; }
+    public MftRecordAllocations? RecordAllocation { get; }
     public NtfsBitmapAllocation? BitmapAllocation { get; }
 
     /// <summary>True when the record is a base (non-extension) directory that carries a name.</summary>
@@ -244,6 +245,95 @@ internal sealed class MftRecordTable
 
 }
 
+internal sealed class MftRecordAllocations
+{
+    private readonly uint _bytesPerCluster;
+    private readonly uint[]? _compact;
+    private readonly long[]? _wide;
+    private Dictionary<int, long>? _overflow;
+
+    public MftRecordAllocations(int recordCount, uint bytesPerCluster, long volumeClusters)
+    {
+        _bytesPerCluster = bytesPerCluster;
+        if (volumeClusters <= uint.MaxValue)
+        {
+            _compact = new uint[recordCount];
+        }
+        else
+        {
+            _wide = new long[recordCount];
+        }
+    }
+
+    public long this[int record] => ToBytes(GetClusters(record));
+
+    internal long ToBytes(long clusters) => checked(clusters * _bytesPerCluster);
+
+    // A parsed record cannot reference more clusters than the whole volume.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void SetParsedClusters(int record, long clusters)
+    {
+        if (_compact is not null)
+        {
+            _compact[record] = (uint)clusters;
+        }
+        else
+        {
+            _wide![record] = clusters;
+        }
+    }
+
+    internal void Merge(int source, int target)
+    {
+        var sourceClusters = GetClusters(source);
+        if (sourceClusters == 0)
+        {
+            return;
+        }
+
+        var clusters = checked(GetClusters(target) + sourceClusters);
+        _ = ToBytes(clusters);
+
+        if (_compact is not null)
+        {
+            // A base record and its extensions may reference overlapping clusters.
+            if (clusters > uint.MaxValue)
+            {
+                _overflow ??= new();
+                _overflow[target] = clusters;
+                _compact[target] = uint.MaxValue;
+            }
+            else
+            {
+                _compact[target] = (uint)clusters;
+            }
+
+            _compact[source] = 0;
+            _overflow?.Remove(source);
+        }
+        else
+        {
+            _wide![target] = clusters;
+            _wide[source] = 0;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal long GetClusters(int record)
+    {
+        if (_compact is null)
+        {
+            return _wide![record];
+        }
+
+        var value = _compact[record];
+        return value == uint.MaxValue ? GetOverflowClusters(record) : value;
+    }
+
+    private long GetOverflowClusters(int record) =>
+        _overflow?.TryGetValue(record, out var larger) == true ? larger : uint.MaxValue;
+}
+
 /// <summary>
 /// Reads the Master File Table from a raw NTFS volume handle and materializes an
 /// <see cref="MftRecordTable"/>. Requires elevation; throws before allocating when the volume is
@@ -332,7 +422,7 @@ internal static class MftTableLoader
         var realSize = new long[recordCount];
         var allocSize = keepFileNames ? new long[recordCount] : [];
         var lastWrite = keepFileNames ? new long[recordCount] : [];
-        var recordAllocation = keepFileNames ? null : new long[recordCount];
+        var recordAllocation = keepFileNames ? null : new MftRecordAllocations(recordCount, geometry.BytesPerCluster, geometry.TotalClusters);
         var observedBitmap = bitmapQuery is not null && recordAllocation is not null
             ? NtfsVolumeBitmap.TryCreate(geometry.TotalClusters, resources.MemoryHeadroom, bitmapQuery, cancellationToken)
             : null;
@@ -497,7 +587,7 @@ internal static class MftTableLoader
         long[] lastWrite,
         string?[] names,
         bool keepFileNames,
-        long[]? recordAllocation,
+        MftRecordAllocations? recordAllocation,
         uint[] referenceSequences,
         NtfsVolumeBitmap? observedBitmap,
         Action<int> reportThrottled,
@@ -554,13 +644,8 @@ internal static class MftTableLoader
                 continue;
             }
 
-            if (recordAllocation is not null)
-            {
-                recordAllocation[baseNumber] = checked(recordAllocation[baseNumber] + recordAllocation[extension.RecordNumber]);
-                recordAllocation[extension.RecordNumber] = 0;
-            }
-
             var record = extension.RecordNumber;
+            recordAllocation?.Merge(record, baseNumber);
             if ((flags[record] & MftRecordTable.FlagHasName) != 0 &&
                 ((flags[baseNumber] & MftRecordTable.FlagHasName) == 0 || parent[baseNumber] == MftRecordTable.InvalidParentRecord) &&
                 IsCurrentParentReference(parent[record], baseNumber, (ushort)referenceSequences[record], flags, referenceSequences))
@@ -630,17 +715,15 @@ internal static class MftTableLoader
                     referencedClusters += (ulong)info.AllocatedClusters;
                 }
 
-                long allocated = 0;
-                if (recordAllocation is not null)
+                if (recordAllocation is not null && info.AllocatedClusters > 0)
                 {
-                    allocated = checked(info.AllocatedClusters * geometry.BytesPerCluster);
-                    recordAllocation[globalIndex] = allocated;
+                    recordAllocation.SetParsedClusters(globalIndex, info.AllocatedClusters);
                 }
 
                 if (info.IsExtension)
                 {
                     flag |= MftRecordTable.FlagExtension;
-                    if (info.BaseRecordNumber < (ulong)recordCount && (info.HasName || info.DataSizesValid || allocated > 0))
+                    if (info.BaseRecordNumber < (ulong)recordCount && (info.HasName || info.DataSizesValid || info.AllocatedClusters > 0))
                     {
                         localExtensions.Add(new ExtensionRecord(
                             globalIndex, (int)info.BaseRecordNumber, info.BaseRecordSequence,

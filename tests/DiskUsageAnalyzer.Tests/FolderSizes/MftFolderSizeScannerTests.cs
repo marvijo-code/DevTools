@@ -159,16 +159,16 @@ public sealed class MftFolderSizeScannerTests
     [Fact]
     public void BuildTree_AttachesChildrenOfLaterRecordsAndLeavesCyclesUnattributed()
     {
-        var table = CreateTable(80, new long[80]);
+        var table = CreateTable(80, includeAllocation: true);
         AddDirectory(table, 24, 30, "First");
         AddDirectory(table, 30, Root, "Parent");
         AddDirectory(table, 31, 32, "CycleStart");
         AddDirectory(table, 32, 31, "CycleEnd");
         AddFile(table, 40, 24, "attached.bin", 20);
         AddFile(table, 41, 31, "cycle.bin", 30);
-        table.RecordAllocation![40] = 4096;
-        table.RecordAllocation[41] = 8192;
-        table.RecordAllocation[32] = 4096;
+        table.RecordAllocation!.SetParsedClusters(40, 1);
+        table.RecordAllocation.SetParsedClusters(41, 2);
+        table.RecordAllocation.SetParsedClusters(32, 1);
 
         var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "NTFS MFT", System.Diagnostics.Stopwatch.StartNew());
 
@@ -183,12 +183,12 @@ public sealed class MftFolderSizeScannerTests
     [Fact]
     public void BuildTree_ReportsReservedRecordsApartFromFolderAllocation()
     {
-        var table = CreateTable(160, new long[160]);
+        var table = CreateTable(160, includeAllocation: true);
         AddDirectory(table, 24, Root, "Users");
         AddFile(table, 40, 24, "data.bin", 25);
-        table.RecordAllocation![0] = 8192;
-        table.RecordAllocation[24] = 4096;
-        table.RecordAllocation[40] = 8192;
+        table.RecordAllocation!.SetParsedClusters(0, 2);
+        table.RecordAllocation.SetParsedClusters(24, 1);
+        table.RecordAllocation.SetParsedClusters(40, 2);
 
         var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "NTFS MFT", System.Diagnostics.Stopwatch.StartNew());
 
@@ -201,7 +201,7 @@ public sealed class MftFolderSizeScannerTests
     [Fact]
     public void ValidateParentReferences_KeepsStaleAndInvalidLinksOutOfFolderTotals()
     {
-        var table = CreateTable(80, new long[80]);
+        var table = CreateTable(80, includeAllocation: true);
         AddDirectory(table, Root, Root, ".");
         AddDirectory(table, 24, Root, "Current");
         AddDirectory(table, 25, Root, "Old");
@@ -223,9 +223,9 @@ public sealed class MftFolderSizeScannerTests
         references[42] = 3;
         references[44] = 2;
         references[45] = 7;
-        table.RecordAllocation![40] = 4096;
-        table.RecordAllocation[41] = 8192;
-        table.RecordAllocation[44] = 8192;
+        table.RecordAllocation!.SetParsedClusters(40, 1);
+        table.RecordAllocation.SetParsedClusters(41, 2);
+        table.RecordAllocation.SetParsedClusters(44, 2);
 
         MftTableLoader.ValidateParentReferences(table.Parent, table.Flags, references, CancellationToken.None);
         var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "test", System.Diagnostics.Stopwatch.StartNew());
@@ -279,8 +279,31 @@ public sealed class MftFolderSizeScannerTests
         Assert.DoesNotContain((byte)3, state);
     }
 
-    private static MftRecordTable CreateTable(int recordCount, long[]? recordAllocation = null)
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RecordAllocations_PreserveLargeCountsAcrossExtensionMerges(bool useWideVolume)
     {
+        const uint clusterBytes = 4096;
+        var limit = useWideVolume ? (long)uint.MaxValue + 20 : uint.MaxValue;
+        var allocations = new MftRecordAllocations(4, clusterBytes, limit);
+        allocations.SetParsedClusters(0, limit);
+        allocations.SetParsedClusters(1, 9);
+        allocations.SetParsedClusters(2, 17);
+        allocations.SetParsedClusters(3, uint.MaxValue);
+
+        Assert.Equal(limit * clusterBytes, allocations[0]);
+        allocations.Merge(1, 0);
+        allocations.Merge(2, 0);
+        Assert.Equal((limit + 26) * clusterBytes, allocations[0]);
+        Assert.Equal(0, allocations[1]);
+        Assert.Equal(0, allocations[2]);
+        Assert.Equal((long)uint.MaxValue * clusterBytes, allocations[3]);
+    }
+
+    private static MftRecordTable CreateTable(int recordCount, bool includeAllocation = false)
+    {
+        var allocations = includeAllocation ? new MftRecordAllocations(recordCount, 4096, 1000) : null;
         return new MftRecordTable(
             @"C:\",
             recordCount,
@@ -289,7 +312,7 @@ public sealed class MftFolderSizeScannerTests
             new long[recordCount],
             new long[recordCount],
             new long[recordCount],
-            new string?[recordCount], recordAllocation);
+            new string?[recordCount], allocations);
     }
 
     private static void AddDirectory(MftRecordTable table, int index, uint parent, string name)

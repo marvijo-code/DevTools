@@ -14,8 +14,9 @@ internal static class FolderFileListing
         BufferSize = 16 * 1024
     };
 
-    public static IReadOnlyList<FolderFile> ReadLargest(string folder, int limit)
+    public static IReadOnlyList<FolderFile> ReadLargest(string folder, int limit, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var largest = new TopNAccumulator<string>(limit);
         string? directory = null;
         try
@@ -34,7 +35,11 @@ internal static class FolderFileListing
                     return (entry.FileName.ToString(), entry.Length);
                 },
                 ListingOptions);
-            entries.ShouldIncludePredicate = (ref FileSystemEntry entry) => !entry.IsDirectory && entry.Length > largest.Threshold;
+            entries.ShouldIncludePredicate = (ref FileSystemEntry entry) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return !entry.IsDirectory && entry.Length > largest.Threshold;
+            };
 
             foreach (var file in entries)
             {

@@ -5,6 +5,17 @@ namespace DiskUsageAnalyzer.Tests.FolderSizes;
 
 public sealed class FolderFileListingTests
 {
+    [Fact]
+    public void ReadLargest_HonoursCancellationBeforeAccessingTheFolder()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var error = Assert.Throws<OperationCanceledException>(() =>
+            FolderFileListing.ReadLargest(Path.GetTempPath(), 10, cts.Token));
+        Assert.Equal(cts.Token, error.CancellationToken);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

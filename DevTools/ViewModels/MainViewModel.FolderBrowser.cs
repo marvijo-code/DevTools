@@ -86,7 +86,7 @@ public sealed partial class MainViewModel
     private string _folderBrowserPath = string.Empty;
     private string _folderBrowserSummary = "The folder browser fills in when the first drive scan finishes.";
     private bool _canFolderBrowserGoUp;
-    private int _folderBrowserFileGeneration;
+    private CancellationTokenSource? _folderBrowserFileLoadCts;
     private CancellationTokenSource? _folderBrowserClickCts;
 
 
@@ -271,7 +271,9 @@ public sealed partial class MainViewModel
 
     private void ResetFolderBrowserFileCache()
     {
-        _folderBrowserFileGeneration++;
+        _folderBrowserFileLoadCts?.Cancel();
+        _folderBrowserFileLoadCts?.Dispose();
+        _folderBrowserFileLoadCts = null;
         _folderBrowserFiles.Clear();
         _folderBrowserFilesLoading.Clear();
     }
@@ -301,7 +303,8 @@ public sealed partial class MainViewModel
 
         if (pendingFolders.Count > 0)
         {
-            _ = LoadFolderFilesAsync(pendingFolders, _folderBrowserFileGeneration);
+            _folderBrowserFileLoadCts ??= new();
+            _ = LoadFolderFilesAsync(pendingFolders, _folderBrowserFileLoadCts.Token);
         }
     }
 
@@ -421,14 +424,18 @@ public sealed partial class MainViewModel
         }
     }
 
-    private async Task LoadFolderFilesAsync(List<string> folders, int generation)
+    private async Task LoadFolderFilesAsync(List<string> folders, CancellationToken cancellationToken)
     {
-        var loaded = await Task.Run(() => folders.ToDictionary(
-            folder => folder,
-            folder => FolderFileListing.ReadLargest(folder, FolderBrowserMaxFiles),
-            StringComparer.Ordinal));
-
-        if (generation != _folderBrowserFileGeneration)
+        Dictionary<string, IReadOnlyList<FolderFile>> loaded;
+        try
+        {
+            loaded = await Task.Run(() => folders.ToDictionary(
+                folder => folder,
+                folder => FolderFileListing.ReadLargest(folder, FolderBrowserMaxFiles, cancellationToken),
+                StringComparer.Ordinal), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             return;
         }

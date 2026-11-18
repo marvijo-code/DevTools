@@ -78,15 +78,16 @@ public sealed partial class MainViewModel
     private readonly ObservableCollection<FolderBrowserRow> _folderBrowserRows = [];
     private readonly ObservableCollection<string> _folderBrowserDrives = [];
     private readonly HashSet<string> _folderBrowserExpanded = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, List<FileEntry>> _folderBrowserFiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IReadOnlyList<FolderFile>> _folderBrowserFiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _folderBrowserFilesLoading = new(StringComparer.OrdinalIgnoreCase);
+    private FolderTree? _folderBrowserFileTree;
     private string _folderBrowserPath = string.Empty;
     private string _folderBrowserSummary = "The folder browser fills in when the first drive scan finishes.";
     private bool _canFolderBrowserGoUp;
-    private int _folderBrowserVersion;
+    private int _folderBrowserFileGeneration;
     private int _folderBrowserTreeCount;
     private CancellationTokenSource? _folderBrowserClickCts;
 
-    private readonly record struct FileEntry(string Name, string Path, long Bytes);
 
     /// <summary>Rows of the folder currently open in the browser, largest first at every level.</summary>
     public ObservableCollection<FolderBrowserRow> FolderBrowserRows => _folderBrowserRows;
@@ -112,7 +113,7 @@ public sealed partial class MainViewModel
         if (!string.Equals(normalized, _folderBrowserPath, StringComparison.OrdinalIgnoreCase))
         {
             _folderBrowserExpanded.Clear();
-            _folderBrowserFiles.Clear();
+            ResetFolderBrowserFileCache();
         }
 
         _folderBrowserPath = normalized;
@@ -239,9 +240,9 @@ public sealed partial class MainViewModel
 
     private void ShowPendingBrowserDrive(string path, bool scanCompleted = false)
     {
-        _folderBrowserVersion++;
         _folderBrowserExpanded.Clear();
-        _folderBrowserFiles.Clear();
+        ResetFolderBrowserFileCache();
+        _folderBrowserFileTree = null;
         _folderBrowserRows.Clear();
         _folderBrowserPath = path;
         _canFolderBrowserGoUp = false;
@@ -253,6 +254,13 @@ public sealed partial class MainViewModel
         RaisePropertyChanged(nameof(CanFolderBrowserGoUp));
     }
 
+    private void ResetFolderBrowserFileCache()
+    {
+        _folderBrowserFileGeneration++;
+        _folderBrowserFiles.Clear();
+        _folderBrowserFilesLoading.Clear();
+    }
+
     private void RebuildFolderBrowserRows()
     {
         if (!_diskUsageAnalyzer.TryFindNode(_folderBrowserPath, out var tree, out var node) || tree is null)
@@ -260,7 +268,12 @@ public sealed partial class MainViewModel
             return;
         }
 
-        var version = ++_folderBrowserVersion;
+        if (!ReferenceEquals(tree, _folderBrowserFileTree))
+        {
+            ResetFolderBrowserFileCache();
+            _folderBrowserFileTree = tree;
+        }
+
         var rows = new List<FolderBrowserRow>();
         var pendingFolders = new List<string>();
         AppendLevel(tree, node, 0, Math.Max(1, tree.GetTotalBytes(node)), rows, pendingFolders);
@@ -273,7 +286,7 @@ public sealed partial class MainViewModel
 
         if (pendingFolders.Count > 0)
         {
-            _ = LoadFolderFilesAsync(pendingFolders, version);
+            _ = LoadFolderFilesAsync(pendingFolders, _folderBrowserFileGeneration);
         }
     }
 
@@ -357,7 +370,11 @@ public sealed partial class MainViewModel
             else
             {
                 // Real file names load in the background; show the aggregate meanwhile.
-                pendingFolders.Add(folderPath);
+                if (_folderBrowserFilesLoading.Add(folderPath))
+                {
+                    pendingFolders.Add(folderPath);
+                }
+
                 entries.Add((directFiles, string.Empty, new FolderBrowserRow(
                     "[files in this folder]",
                     folderPath,
@@ -388,54 +405,24 @@ public sealed partial class MainViewModel
         }
     }
 
-    private async Task LoadFolderFilesAsync(List<string> folders, int version)
+    private async Task LoadFolderFilesAsync(List<string> folders, int generation)
     {
-        var loaded = await Task.Run(() =>
-        {
-            var result = new Dictionary<string, List<FileEntry>>(StringComparer.OrdinalIgnoreCase);
-            foreach (var folder in folders)
-            {
-                result[folder] = ReadLargestFiles(folder);
-            }
+        var loaded = await Task.Run(() => folders.ToDictionary(
+            folder => folder,
+            folder => FolderFileListing.ReadLargest(folder, FolderBrowserMaxFiles),
+            StringComparer.OrdinalIgnoreCase));
 
-            return result;
-        });
-
-        // A newer rebuild (another expand, or navigation) owns the rows now; keep the data for it anyway.
-        foreach (var pair in loaded)
+        if (generation != _folderBrowserFileGeneration)
         {
-            _folderBrowserFiles[pair.Key] = pair.Value;
+            return;
         }
 
-        if (version == _folderBrowserVersion)
+        foreach (var (folder, files) in loaded)
         {
-            RebuildFolderBrowserRows();
-        }
-    }
-
-    private static List<FileEntry> ReadLargestFiles(string folder)
-    {
-        var files = new List<FileEntry>();
-        try
-        {
-            foreach (var info in new DirectoryInfo(folder).EnumerateFiles())
-            {
-                try
-                {
-                    files.Add(new FileEntry(info.Name, info.FullName, info.Length));
-                }
-                catch (Exception)
-                {
-                    // A file that vanished or cannot be read is covered by the [other files] row.
-                }
-            }
-        }
-        catch (Exception)
-        {
-            // Folder not readable: the whole amount shows as [other files].
+            _folderBrowserFilesLoading.Remove(folder);
+            _folderBrowserFiles[folder] = files;
         }
 
-        files.Sort((a, b) => b.Bytes.CompareTo(a.Bytes));
-        return files.Count > FolderBrowserMaxFiles ? files.GetRange(0, FolderBrowserMaxFiles) : files;
+        RebuildFolderBrowserRows();
     }
 }

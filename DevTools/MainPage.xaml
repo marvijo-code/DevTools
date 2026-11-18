@@ -883,6 +883,10 @@
                               Tag="{Binding FolderBrowserPath}"
                               VerticalAlignment="Center" />
                     </Grid>
+                    <ToggleSwitch AutomationProperties.Name="Folder size measure"
+                                  OffContent="Logical file size"
+                                  OnContent="Attributed allocation"
+                                  IsOn="{Binding FolderBrowserUseAllocation, Mode=TwoWay}" />
                     <TextBlock Text="{Binding FolderBrowserSummary}"
                                TextWrapping="WrapWholeWords"
                                FontSize="12"

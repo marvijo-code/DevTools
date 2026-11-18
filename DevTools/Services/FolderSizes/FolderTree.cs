@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using DevTools.Services.BiggestFiles.Ntfs;
 
 namespace DevTools.Services.FolderSizes;
@@ -25,6 +26,8 @@ public sealed class FolderTree
     private readonly BitArray? _incompleteSubtrees;
     private readonly BitArray? _incompleteAllocationSubtrees;
     private ConcurrentDictionary<int, ChildNameIndex>? _childNameIndexes;
+    private Comparison<int>? _compareLogicalChildren;
+    private Comparison<int>? _compareAllocatedChildren;
 
     internal FolderTree(
         string rootPath,
@@ -128,12 +131,15 @@ public sealed class FolderTree
     public int GetChildFolderCount(int node) => _childStart[node + 1] - _childStart[node];
 
     /// <summary>Bytes held by files directly in this folder.</summary>
-    public long GetDirectFileBytes(int node) => GetDirectFileTotal(node, _totalBytes);
+    public long GetDirectFileBytes(int node) => GetDirectChildRemainder(node, _totalBytes);
 
     /// <summary>Number of files directly in this folder.</summary>
-    public long GetDirectFileCount(int node) => GetDirectFileTotal(node, _fileCount);
+    public long GetDirectFileCount(int node) => GetDirectChildRemainder(node, _fileCount);
 
-    private long GetDirectFileTotal(int node, long[] totals)
+    internal long? GetDirectAllocatedBytes(int node) =>
+        _allocatedBytes is null ? null : GetDirectChildRemainder(node, _allocatedBytes);
+
+    private long GetDirectChildRemainder(int node, long[] totals)
     {
         var total = totals[node];
         for (var i = _childStart[node]; i < _childStart[node + 1]; i++)
@@ -145,12 +151,18 @@ public sealed class FolderTree
     }
 
     /// <summary>Child folders of <paramref name="node"/>, largest first.</summary>
-    public IReadOnlyList<int> GetChildren(int node, int max = int.MaxValue)
+    public IReadOnlyList<int> GetChildren(int node, int max = int.MaxValue) =>
+        GetChildren(node, max, _totalBytes);
+
+    internal IReadOnlyList<int> GetChildrenByAllocation(int node, int max) =>
+        GetChildren(node, max, _allocatedBytes);
+
+    private IReadOnlyList<int> GetChildren(int node, int max, long[]? sizes)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(max);
         var start = _childStart[node];
         var count = GetChildFolderCount(node);
-        if (max == 0 || count == 0)
+        if (max == 0 || count == 0 || sizes is null)
         {
             return [];
         }
@@ -162,65 +174,77 @@ public sealed class FolderTree
             Array.Copy(_childIndex, start, heap, 0, max);
             for (var i = heap.Length / 2 - 1; i >= 0; i--)
             {
-                SiftWorstDown(heap, i, heap[i]);
+                SiftWorstDown(heap, i, heap[i], sizes);
             }
 
             var worst = heap[0];
-            var cutoff = _totalBytes[worst];
+            var cutoff = sizes[worst];
             for (var i = start + max; i < start + count; i++)
             {
                 var child = _childIndex[i];
-                var size = _totalBytes[child];
+                var size = sizes[child];
                 if (size > cutoff || (size == cutoff && CompareChildNames(child, worst) < 0))
                 {
-                    SiftWorstDown(heap, 0, child);
+                    SiftWorstDown(heap, 0, child, sizes);
                     worst = heap[0];
-                    cutoff = _totalBytes[worst];
+                    cutoff = sizes[worst];
                 }
             }
 
-            Array.Sort(heap, CompareChildren);
+            SortChildren(heap, sizes);
             return heap;
         }
 
         var children = new int[count];
         Array.Copy(_childIndex, start, children, 0, count);
-        Array.Sort(children, CompareChildren);
+        SortChildren(children, sizes);
         return count <= max ? children : children[..max];
     }
 
-    private void SiftWorstDown(int[] heap, int position, int node)
+    private void SiftWorstDown(int[] heap, int position, int node, long[] sizes)
     {
+        var nodeSize = sizes[node];
         while (position < heap.Length / 2)
         {
             var child = position * 2 + 1;
+            var worstChild = heap[child];
             var right = child + 1;
-            if (right < heap.Length && CompareChildren(heap[right], heap[child]) > 0)
+            if (right < heap.Length && CompareChildren(heap[right], worstChild, sizes) > 0)
             {
                 child = right;
+                worstChild = heap[child];
             }
 
-            if (CompareChildren(heap[child], node) <= 0)
+            var childSize = sizes[worstChild];
+            if (childSize > nodeSize || (childSize == nodeSize && CompareChildNames(worstChild, node) <= 0))
             {
                 break;
             }
 
-            heap[position] = heap[child];
+            heap[position] = worstChild;
             position = child;
         }
 
         heap[position] = node;
     }
 
-    private int CompareChildren(int left, int right)
+    private void SortChildren(int[] children, long[] sizes)
     {
-        var bySize = _totalBytes[right].CompareTo(_totalBytes[left]);
-        if (bySize != 0)
-        {
-            return bySize;
-        }
+        var compare = ReferenceEquals(sizes, _totalBytes)
+            ? _compareLogicalChildren ??= CompareLogicalChildren
+            : _compareAllocatedChildren ??= CompareAllocatedChildren;
+        Array.Sort(children, compare);
+    }
 
-        return CompareChildNames(left, right);
+    private int CompareLogicalChildren(int left, int right) => CompareChildren(left, right, _totalBytes);
+
+    private int CompareAllocatedChildren(int left, int right) => CompareChildren(left, right, _allocatedBytes!);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int CompareChildren(int left, int right, long[] sizes)
+    {
+        var bySize = sizes[right].CompareTo(sizes[left]);
+        return bySize != 0 ? bySize : CompareChildNames(left, right);
     }
 
     private int CompareChildNames(int left, int right)

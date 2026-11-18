@@ -28,6 +28,8 @@ public sealed class FolderTreeTests
         Assert.Equal(500, tree.GetTotalBytes(tree.Find(@"C:\dev\repo\node_modules")));
         Assert.Equal(10, tree.GetDirectFileBytes(tree.Find(@"C:\dev\repo")));
         Assert.Equal(1, tree.GetDirectFileBytes(0));
+        Assert.Null(tree.GetDirectAllocatedBytes(0));
+        Assert.Empty(tree.GetChildrenByAllocation(0, 2));
         Assert.Equal(-1, tree.Find(@"C:\missing"));
         Assert.Equal(-1, tree.Find(@"D:\dev"));
         Assert.Equal([@"C:\Users", @"C:\dev"], tree.GetChildren(0).Select(tree.GetPath).ToArray());
@@ -129,6 +131,35 @@ public sealed class FolderTreeTests
         section.UpdateFrom(new DiskUsageSection(section.Title, "", entries));
 
         Assert.Equal([@"C:\workspace\Source", @"C:\workspace\source"], section.Entries.Select(entry => entry.Path));
+    }
+
+    [Theory]
+    [InlineData(8)]
+    [InlineData(1200)]
+    public void AllocatedRanking_IncludesStorageWithNoLogicalFileBytes(int childCount)
+    {
+        var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);
+        var root = builder.AddFolder(@"C:\workspace");
+        var names = Enumerable.Range(0, childCount).Select(i => $"folder-{i:D4}").ToList();
+        names[0] = "logical";
+        names[^2] = "z-stream";
+        names[^1] = "a-stream";
+        var first = builder.AppendEnumeratedChildren(root, names);
+        var last = first + childCount - 1;
+        builder.AddFilesToFolder(root, 0, 0, 4096);
+        builder.AddFilesToFolder(first, 1024 * 1024, 1, 4096);
+        builder.AddFilesToFolder(last - 1, 0, 0, 16384);
+        builder.AddFilesToFolder(last, 0, 0, 16384);
+        var tree = builder.Build("fixture", TimeSpan.Zero);
+
+        Assert.Equal(first, Assert.Single(tree.GetChildren(root, 1)));
+        var largest = tree.GetChildrenByAllocation(root, 2);
+        Assert.Equal([last, last - 1], largest);
+        Assert.Equal(0L, tree.GetTotalBytes(last));
+        Assert.Equal(16384L, tree.GetDirectAllocatedBytes(last));
+        Assert.Equal(4096L, tree.GetDirectAllocatedBytes(root));
+        Assert.Equal(4096L, tree.GetAllocatedBytes(root) -
+            tree.GetDirectAllocatedBytes(root) - largest.Sum(child => tree.GetAllocatedBytes(child)));
     }
 
     [Fact]

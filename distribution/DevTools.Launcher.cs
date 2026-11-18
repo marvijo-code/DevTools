@@ -1,11 +1,12 @@
 using System;
-using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.Web.Script.Serialization;
+using System.Runtime.Serialization.Json;
+using System.Text;
 using System.Windows.Forms;
+using System.Xml;
 using DevTools.Infrastructure;
 
 internal static class Launcher
@@ -51,7 +52,8 @@ internal static class Launcher
 
             // Start the selected release before loading PowerShell for the background update.
             var app = new ProcessStartInfo(Path.Combine(versionDirectory, "DevTools.exe"));
-            app.UseShellExecute = true;
+            // The shell is needed only for the RunAs verb.
+            app.UseShellExecute = elevate;
             app.WorkingDirectory = versionDirectory;
             if (elevate)
             {
@@ -107,9 +109,7 @@ internal static class Launcher
         elevate = !noElevate;
         try
         {
-            var serializer = new JavaScriptSerializer();
-            var manifest = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(Path.Combine(root, "current.json")));
-            var version = ReadProperty(manifest, "directory") as string;
+            var version = ReadProperty(Path.Combine(root, "current.json"), "directory") as string;
             if (string.IsNullOrWhiteSpace(version))
             {
                 return false;
@@ -128,8 +128,7 @@ internal static class Launcher
                 var settingsPath = Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"), "DevTools", "settings.json");
                 if (File.Exists(settingsPath))
                 {
-                    var settings = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(settingsPath));
-                    var preference = ReadProperty(settings, "RunAsAdministrator");
+                    var preference = ReadProperty(settingsPath, "RunAsAdministrator");
                     if (preference != null)
                     {
                         if (!(preference is bool))
@@ -156,10 +155,8 @@ internal static class Launcher
     {
         try
         {
-            var state = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(
-                File.ReadAllText(Path.Combine(root, "update-state.json")));
             DateTimeOffset previous;
-            var checkedAt = ReadProperty(state, "checkedAt") as string;
+            var checkedAt = ReadProperty(Path.Combine(root, "update-state.json"), "checkedAt") as string;
             // Keep the interval in sync with Update-DevTools.ps1, which also runs directly.
             return !DateTimeOffset.TryParse(checkedAt, CultureInfo.InvariantCulture, DateTimeStyles.None, out previous) ||
                 now - previous >= TimeSpan.FromHours(6);
@@ -170,16 +167,42 @@ internal static class Launcher
         }
     }
 
-    private static object ReadProperty(Dictionary<string, object> values, string name)
+    private static object ReadProperty(string path, string name)
     {
-        object found = null;
-        var hasMatch = false;
-        if (values != null)
+        const int maxJsonLength = 2097152;
+        var json = File.ReadAllText(path);
+        if (json.Length > maxJsonLength)
         {
-            foreach (var value in values)
+            throw new InvalidDataException("The startup configuration is too large.");
+        }
+
+        json = json.Trim();
+        if (json == "null")
+        {
+            return null;
+        }
+
+        RequireSingleObject(json);
+        var quotas = new XmlDictionaryReaderQuotas
+        {
+            MaxDepth = 100,
+            MaxStringContentLength = maxJsonLength,
+            MaxNameTableCharCount = maxJsonLength
+        };
+        using (var reader = JsonReaderWriterFactory.CreateJsonReader(Encoding.UTF8.GetBytes(json), quotas))
+        {
+            // The JSON reader exposes object members as elements. Skip unrelated settings
+            // without creating a dictionary and allocating their values.
+            reader.ReadStartElement("root");
+            object value = null;
+            var hasMatch = false;
+            while (reader.MoveToContent() == XmlNodeType.Element)
             {
-                if (!string.Equals(value.Key, name, StringComparison.OrdinalIgnoreCase))
+                // Escaped JSON names can be exposed through the mapping's item attribute.
+                var propertyName = reader.NamespaceURI == "item" ? reader.GetAttribute("item") : reader.LocalName;
+                if (!string.Equals(propertyName, name, StringComparison.OrdinalIgnoreCase))
                 {
+                    reader.Skip();
                     continue;
                 }
 
@@ -189,11 +212,70 @@ internal static class Launcher
                 }
 
                 hasMatch = true;
-                found = value.Value;
+                switch (reader.GetAttribute("type"))
+                {
+                    case "string":
+                        value = reader.ReadElementContentAsString();
+                        break;
+                    case "boolean":
+                        value = reader.ReadElementContentAsBoolean();
+                        break;
+                    case "null":
+                        reader.Skip();
+                        break;
+                    default:
+                        throw new InvalidDataException("The startup configuration property has an unexpected value type.");
+                }
+            }
+
+            reader.ReadEndElement();
+            return value;
+        }
+    }
+
+    // The JSON reader stops at the end of the first value. Check the object boundary
+    // independently, then let the reader validate members and values.
+    private static void RequireSingleObject(string json)
+    {
+        if (json.Length >= 2 && json[0] == '{')
+        {
+            var depth = 0;
+            var inString = false;
+            for (var index = 0; index < json.Length; index++)
+            {
+                var character = json[index];
+                if (inString)
+                {
+                    if (character == '\\')
+                    {
+                        index++;
+                    }
+                    else if (character == '"')
+                    {
+                        inString = false;
+                    }
+                }
+                else if (character == '"')
+                {
+                    inString = true;
+                }
+                else if (character == '{')
+                {
+                    depth++;
+                }
+                else if (character == '}' && --depth == 0)
+                {
+                    if (index == json.Length - 1)
+                    {
+                        return;
+                    }
+
+                    break;
+                }
             }
         }
 
-        return found;
+        throw new InvalidDataException("The startup configuration must contain one JSON object.");
     }
 
     private static int StartWithPowerShell(string root, bool noElevate, bool forceElevation)

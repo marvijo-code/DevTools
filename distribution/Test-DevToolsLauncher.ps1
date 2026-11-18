@@ -13,9 +13,67 @@ $source = Join-Path $root 'LaunchProbe.cs'
 @'
 using System;
 using System.IO;
-class LaunchProbe {
-    static void Main() {
-        File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launched.txt"), "started");
+using System.Reflection;
+using System.Text;
+
+class LaunchProbe
+{
+    static int Main(string[] args)
+    {
+        try
+        {
+            if (args.Length == 1)
+            {
+                VerifyConfiguration(args[0]);
+            }
+            else
+            {
+                var proof = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launched.txt");
+                File.WriteAllText(proof + ".tmp", Environment.CurrentDirectory);
+                File.Move(proof + ".tmp", proof);
+            }
+
+            return 0;
+        }
+        catch (Exception error)
+        {
+            File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "probe-error.txt"), error.ToString());
+            return 1;
+        }
+    }
+
+    private static void VerifyConfiguration(string launcher)
+    {
+        var fixture = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "preferences");
+        var version = Path.Combine(fixture, @"versions\probe");
+        var settingsDirectory = Path.Combine(fixture, "DevTools");
+        Directory.CreateDirectory(version);
+        Directory.CreateDirectory(settingsDirectory);
+        Environment.SetEnvironmentVariable("LOCALAPPDATA", fixture);
+        File.WriteAllText(Path.Combine(version, "DevTools.exe"), "");
+        File.WriteAllText(Path.Combine(fixture, "current.json"), "{\"directory\":\"versions\\\\probe\"}");
+
+        var reader = Assembly.LoadFrom(launcher).GetType("Launcher", true)
+            .GetMethod("TryReadLaunchConfiguration", BindingFlags.Static | BindingFlags.NonPublic);
+        var settings = Path.Combine(settingsDirectory, "settings.json");
+        File.WriteAllText(settings, "{\"ProcessView\":{\"RunAsAdministrator\":true},\"\\u0052unAsAdministrator\":false}", Encoding.Unicode);
+        object[] arguments = { fixture, false, false, null, true };
+        if (!(bool)reader.Invoke(null, arguments) || (bool)arguments[4])
+        {
+            throw new InvalidOperationException("The escaped UTF-16 preference was ignored.");
+        }
+
+        File.WriteAllText(settings, "{\"RunAsAdministrator\":false}{\"extra\":true}");
+        if ((bool)reader.Invoke(null, arguments))
+        {
+            throw new InvalidOperationException("A second JSON object was accepted.");
+        }
+
+        File.WriteAllText(settings, "{\"RunAsAdministrator\":true,\"runasadministrator\":false}");
+        if ((bool)reader.Invoke(null, arguments))
+        {
+            throw new InvalidOperationException("Ambiguous preference names were accepted.");
+        }
     }
 }
 '@ | Set-Content -LiteralPath $source
@@ -27,6 +85,17 @@ $probe = Join-Path $root 'LaunchProbe.exe'
 dotnet $compiler /nologo /noconfig /nostdlib+ /target:winexe ("/reference:$framework\mscorlib.dll") ("/out:$probe") $source
 if ($LASTEXITCODE -ne 0) { throw 'Launch probe compilation failed.' }
 $initialHash = (Get-FileHash -LiteralPath $launcher).Hash
+$configurationProbe = Start-Process -FilePath $probe -ArgumentList ('"' + $launcher + '"') -WindowStyle Hidden -PassThru
+try {
+    if (-not $configurationProbe.WaitForExit(30000)) { throw 'The launcher configuration probe did not finish.' }
+    if ($configurationProbe.ExitCode -ne 0) {
+        throw [IO.File]::ReadAllText((Join-Path $root 'probe-error.txt'))
+    }
+}
+finally {
+    $configurationProbe.Dispose()
+}
+Write-Output 'PASS: launcher reads escaped preferences and rejects ambiguous or trailing data'
 
 function Invoke-HeadlessLaunch([string]$Directory) {
     # The fixture executable has no windows, and --no-admin suppresses elevation.
@@ -42,6 +111,7 @@ function Invoke-HeadlessLaunch([string]$Directory) {
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     while (-not (Test-Path -LiteralPath $proof) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
     if (-not (Test-Path -LiteralPath $proof)) { throw "Wrong launch target for $Directory" }
+    if ([IO.File]::ReadAllText($proof) -ne $Directory) { throw "Wrong working directory for $Directory" }
     if ((Get-FileHash -LiteralPath $launcher).Hash -ne $initialHash) { throw 'Launcher changed during version transition.' }
 }
 

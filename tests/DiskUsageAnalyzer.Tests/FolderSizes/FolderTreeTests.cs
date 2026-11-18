@@ -1,5 +1,9 @@
+using System.Buffers.Binary;
+using System.Runtime.InteropServices;
+using System.Text;
 using DevTools.Models;
 using DevTools.Services.FolderSizes;
+using Microsoft.Win32.SafeHandles;
 using Xunit;
 
 namespace DiskUsageAnalyzer.Tests.FolderSizes;
@@ -148,47 +152,99 @@ public sealed class FolderTreeTests
     }
 
     [Fact]
-    public async Task Walker_SizesNestedFoldersAndSkipsJunctions()
+    public async Task Walker_AccountsForJunctionStreamsWithoutScanningTheTarget()
     {
-        var root = Path.Combine(Path.GetTempPath(), "devtools-walk-" + Guid.NewGuid().ToString("N"));
+        var fixture = Directory.CreateTempSubdirectory("devtools-walk-");
+        var root = Path.Combine(fixture.FullName, "scan");
         var deep = Path.Combine(root, "a", "b", "c");
-        Directory.CreateDirectory(deep);
-        Directory.CreateDirectory(Path.Combine(root, "z"));
-        await File.WriteAllBytesAsync(Path.Combine(deep, "big.bin"), new byte[40000]);
-        await File.WriteAllBytesAsync(Path.Combine(root, "a", "small.bin"), new byte[100]);
-        await File.WriteAllBytesAsync(Path.Combine(root, "z", "z.bin"), new byte[5]);
-        var link = Path.Combine(root, "link-to-a");
-        // A junction needs no admin rights, unlike a symbolic link.
-        using (var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{Path.Combine(root, "a")}\"")
-        {
-            CreateNoWindow = true,
-            UseShellExecute = false,
-            RedirectStandardOutput = true
-        })!)
-        {
-            await mklink.WaitForExitAsync();
-        }
-
-        Assert.True(Directory.Exists(link));
-
+        var target = Path.Combine(fixture.FullName, "outside");
+        var link = Path.Combine(root, "junction");
         try
         {
-            var tree = await new ParallelFolderWalker().ScanAsync(root, null, CancellationToken.None, workerCount: 2);
+            Directory.CreateDirectory(deep);
+            Directory.CreateDirectory(Path.Combine(root, "z"));
+            Directory.CreateDirectory(target);
+            await File.WriteAllBytesAsync(Path.Combine(deep, "big.bin"), new byte[40000]);
+            await File.WriteAllBytesAsync(Path.Combine(root, "a", "small.bin"), new byte[100]);
+            await File.WriteAllBytesAsync(Path.Combine(root, "z", "z.bin"), new byte[5]);
+            var outsideFile = Path.Combine(target, "outside.bin");
+            await File.WriteAllBytesAsync(outsideFile, new byte[1024 * 1024]);
+            CreateJunction(link, target);
 
+            var walker = new ParallelFolderWalker();
+            var baseline = await walker.ScanAsync(root, null, CancellationToken.None, workerCount: 2);
+            var baselineBytes = Assert.IsType<long>(baseline.GetAllocatedBytes(baseline.Find(root)));
+            var payload = new byte[64 * 1024];
+            new Random(41).NextBytes(payload);
+            using (var stream = CreateFile(link + ":payload", 0x40000000, 7, IntPtr.Zero, 2, 0x02300000, IntPtr.Zero))
+            {
+                Assert.False(stream.IsInvalid, $"Could not create the junction stream. Windows error {Marshal.GetLastWin32Error()}.");
+                RandomAccess.Write(stream, payload, 0);
+            }
+
+            var clusterBytes = WindowsVolumePaths.GetAllocationUnitBytes(fixture.Root.FullName);
+            Assert.True(clusterBytes > 0);
+            var payloadAllocation = (1 + (payload.LongLength - 1) / clusterBytes) * clusterBytes;
+            var tree = await walker.ScanAsync(root, null, CancellationToken.None, workerCount: 2);
             var node = tree.Find(root);
             Assert.True(node >= 0);
             Assert.Equal(40105, tree.GetTotalBytes(node));
+            Assert.Equal(3, tree.GetFileCount(node));
             Assert.Equal(40100, tree.GetTotalBytes(tree.Find(Path.Combine(root, "a"))));
             Assert.Equal(40000, tree.GetTotalBytes(tree.Find(deep)));
             Assert.Equal(-1, tree.Find(link));
+            Assert.Equal(baselineBytes + payloadAllocation, tree.GetAllocatedBytes(node));
+            Assert.False(tree.HasIncompleteAllocation(node));
+            Assert.Equal(1024 * 1024, new FileInfo(outsideFile).Length);
         }
         finally
         {
-            // Remove the junction itself first (never its target), then the temp tree.
-            Directory.Delete(link);
-            Directory.Delete(root, recursive: true);
+            if (Directory.Exists(link))
+            {
+                Directory.Delete(link);
+            }
+
+            fixture.Delete(recursive: true);
         }
     }
+
+    private static void CreateJunction(string link, string target)
+    {
+        const uint mountPointTag = 0xA0000003;
+        const uint fsctlSetReparsePoint = 0x000900A4;
+        const int headerBytes = 8;
+        const int mountPointHeaderBytes = 8;
+        const int terminatorBytes = sizeof(char);
+        var substituteName = Encoding.Unicode.GetBytes(@"\??\" + target);
+        var printName = Encoding.Unicode.GetBytes(target);
+        var printNameOffset = substituteName.Length + terminatorBytes;
+        var pathOffset = headerBytes + mountPointHeaderBytes;
+        var data = new byte[pathOffset + printNameOffset + printName.Length + terminatorBytes];
+
+        BinaryPrimitives.WriteUInt32LittleEndian(data, mountPointTag);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(4), (ushort)(data.Length - headerBytes));
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(10), (ushort)substituteName.Length);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(12), (ushort)printNameOffset);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(14), (ushort)printName.Length);
+        substituteName.CopyTo(data.AsSpan(pathOffset));
+        printName.CopyTo(data.AsSpan(pathOffset + printNameOffset));
+
+        Directory.CreateDirectory(link);
+        using var directory = CreateFile(link, 0x40000000, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+        Assert.False(directory.IsInvalid, $"Could not open the junction fixture. Windows error {Marshal.GetLastWin32Error()}.");
+        Assert.True(DeviceIoControl(directory, fsctlSetReparsePoint, data, (uint)data.Length, IntPtr.Zero, 0, out _, IntPtr.Zero),
+            $"Could not create the fixture junction. Windows error {Marshal.GetLastWin32Error()}.");
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeviceIoControl(
+        SafeFileHandle file, uint code, byte[] input, uint inputSize, IntPtr output,
+        uint outputSize, out uint bytesReturned, IntPtr overlapped);
 
     [Fact]
     public async Task Walker_HonoursCancellation()

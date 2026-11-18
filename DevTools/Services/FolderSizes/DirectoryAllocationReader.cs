@@ -23,6 +23,9 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
     private const int ErrorMoreData = 234;
     private const uint Directory = 0x10;
     private const uint ReparsePoint = 0x400;
+    private const uint OpenNoRecall = 0x00100000;
+    private const uint OpenReparsePoint = 0x00200000;
+    private const uint BackupSemantics = 0x02000000;
     private readonly byte[] _buffer = GC.AllocateUninitializedArray<byte>(64 * 1024);
     private readonly ulong[] _fileIds = GC.AllocateUninitializedArray<ulong>(StreamBatchSize);
     private byte[] _streamBuffer = GC.AllocateUninitializedArray<byte>(1024);
@@ -47,23 +50,18 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
 
         var nativePath = path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path : @"\\?\" + path;
         // List directory, share with other processes, open existing, and handle reparse points themselves.
-        using var handle = OpenDirectory(nativePath, 1, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+        using var handle = OpenDirectory(nativePath, 1, 7, IntPtr.Zero, 3, BackupSemantics | OpenReparsePoint, IntPtr.Zero);
         if (handle.IsInvalid)
         {
             return false;
         }
 
-        // The parent listing reports zero for directories. The directory handle can report
-        // the allocation of its default index stream separately from its named data streams.
-        if (GetFileInformationByHandleEx(handle, FileStandardInfo, _buffer, StandardInfoBytes))
+        if (TryReadDirectoryIndex(handle, out allocatedBytes, out var isDirectory))
         {
-            // FILE_STANDARD_INFO.Directory is the byte after DeletePending.
-            if (_buffer[21] == 0)
+            if (!isDirectory)
             {
                 return false;
             }
-
-            allocatedBytes = PhysicalAllocation(BinaryPrimitives.ReadInt64LittleEndian(_buffer));
         }
         else
         {
@@ -104,6 +102,14 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                         {
                             subfolders.Add(new string(name));
                         }
+                    }
+                    else
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        // Attribute the link's own storage to the containing folder. Its target stays outside this walk.
+                        var low = BinaryPrimitives.ReadUInt64LittleEndian(remaining[72..]);
+                        var high = BinaryPrimitives.ReadUInt64LittleEndian(remaining[80..]);
+                        allocatedBytes += ReadReparseDirectoryAllocation(handle, low, high, ref incompleteAllocation);
                     }
                 }
                 else
@@ -153,6 +159,55 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
         }
     }
 
+    private long ReadReparseDirectoryAllocation(SafeFileHandle hint, ulong low, ulong high, ref bool incompleteAllocation)
+    {
+        if (high != 0)
+        {
+            incompleteAllocation = true;
+            return 0;
+        }
+
+        var claim = identities.Claim(low);
+        if (claim != DirectoryAllocationIndex.ClaimResult.New)
+        {
+            incompleteAllocation |= claim == DirectoryAllocationIndex.ClaimResult.Unavailable;
+            return 0;
+        }
+
+        var id = new FileIdDescriptor(low);
+        using var directory = OpenFileById(hint, in id, 0, 7, IntPtr.Zero,
+            BackupSemantics | OpenReparsePoint | OpenNoRecall);
+        if (directory.IsInvalid)
+        {
+            incompleteAllocation = true;
+            return 0;
+        }
+
+        incompleteAllocation |= !TryReadDirectoryIndex(directory, out var indexBytes, out var isDirectory) || !isDirectory;
+        return indexBytes + ReadNamedStreamAllocation(directory, ref incompleteAllocation);
+    }
+
+    private bool TryReadDirectoryIndex(SafeFileHandle directory, out long allocatedBytes, out bool isDirectory)
+    {
+        allocatedBytes = 0;
+        isDirectory = false;
+        // The directory handle reports the index allocation separately from named data streams.
+        // Use separate scratch space so querying a junction does not overwrite the parent listing.
+        if (!GetFileInformationByHandleEx(directory, FileStandardInfo, _streamBuffer, StandardInfoBytes))
+        {
+            return false;
+        }
+
+        // FILE_STANDARD_INFO.Directory is the byte after DeletePending.
+        isDirectory = _streamBuffer[21] != 0;
+        if (isDirectory)
+        {
+            allocatedBytes = PhysicalAllocation(BinaryPrimitives.ReadInt64LittleEndian(_streamBuffer));
+        }
+
+        return true;
+    }
+
     internal long ReadFileStreams(SafeFileHandle hint, ReadOnlySpan<ulong> fileIds, CancellationToken cancellationToken, ref bool incompleteAllocation)
     {
         long allocatedBytes = 0;
@@ -161,7 +216,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             cancellationToken.ThrowIfCancellationRequested();
             var id = new FileIdDescriptor(fileId);
             // Metadata access only. Prevent reparse resolution and remote file recall.
-            using var file = OpenFileById(hint, in id, 0, 7, IntPtr.Zero, 0x00300000);
+            using var file = OpenFileById(hint, in id, 0, 7, IntPtr.Zero, OpenReparsePoint | OpenNoRecall);
             if (file.IsInvalid)
             {
                 incompleteAllocation = true;

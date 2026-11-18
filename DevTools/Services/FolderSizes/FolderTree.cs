@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using DevTools.Services.BiggestFiles.Ntfs;
 
 namespace DevTools.Services.FolderSizes;
@@ -11,6 +12,8 @@ internal readonly record struct NtfsRecordAllocation(long ReservedBytes, long Un
 /// </summary>
 public sealed class FolderTree
 {
+    private const int MinimumIndexedChildren = 1024;
+
     private readonly int[] _parent;
     private readonly string[] _names;
     private readonly long[] _totalBytes;
@@ -18,6 +21,7 @@ public sealed class FolderTree
     private readonly long[]? _allocatedBytes;
     private readonly int[] _childStart;
     private readonly int[] _childIndex;
+    private ConcurrentDictionary<int, ChildNameIndex>? _childNameIndexes;
 
     internal FolderTree(
         string rootPath,
@@ -222,7 +226,10 @@ public sealed class FolderTree
                 continue;
             }
 
-            var next = FindChildByName(_childIndex.AsSpan(_childStart[current], GetChildFolderCount(current)), _names, part);
+            var children = _childIndex.AsSpan(_childStart[current], GetChildFolderCount(current));
+            var next = children.Length < MinimumIndexedChildren
+                ? FindChildByName(children, _names, part)
+                : FindIndexedChild(current, children, part);
             if (next < 0)
             {
                 return -1;
@@ -232,6 +239,66 @@ public sealed class FolderTree
         }
 
         return current;
+    }
+
+    private int FindIndexedChild(int parent, ReadOnlySpan<int> children, ReadOnlySpan<char> searchName)
+    {
+        var indexes = LazyInitializer.EnsureInitialized(ref _childNameIndexes);
+        var index = indexes.GetOrAdd(parent, static (node, tree) => new ChildNameIndex(tree, node), this);
+        if (index.GetHashes() is not { } hashes)
+        {
+            return FindChildByName(children, _names, searchName);
+        }
+
+        // The hash narrows the search. Verify the actual name, including case-sensitive siblings.
+        var wanted = string.GetHashCode(searchName, StringComparison.OrdinalIgnoreCase);
+        Span<int> candidates = stackalloc int[32];
+        var count = 0;
+        var start = 0;
+        while (true)
+        {
+            var offset = hashes.AsSpan(start).IndexOf(wanted);
+            if (offset < 0)
+            {
+                return FindChildByName(candidates[..count], _names, searchName);
+            }
+
+            start += offset;
+            var child = children[start++];
+            if (searchName.SequenceEqual(_names[child]))
+            {
+                return child;
+            }
+
+            if (count == candidates.Length)
+            {
+                return FindChildByName(children, _names, searchName);
+            }
+
+            candidates[count++] = child;
+        }
+    }
+
+    private int[] BuildChildNameHashes(int parent)
+    {
+        var children = _childIndex.AsSpan(_childStart[parent], GetChildFolderCount(parent));
+        var hashes = new int[children.Length];
+        for (var index = 0; index < hashes.Length; index++)
+        {
+            hashes[index] = string.GetHashCode(_names[children[index]].AsSpan(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        return hashes;
+    }
+
+    private sealed class ChildNameIndex(FolderTree tree, int parent)
+    {
+        private readonly Lazy<int[]> _hashes = new(() => tree.BuildChildNameHashes(parent));
+        private int _lookups;
+
+        // Let one-off path probes use the existing child span. The retained index costs four bytes per child.
+        public int[]? GetHashes() =>
+            _hashes.IsValueCreated || Interlocked.Increment(ref _lookups) >= 4 ? _hashes.Value : null;
     }
 
     internal static int FindChildByName(ReadOnlySpan<int> children, string?[] names, ReadOnlySpan<char> searchName)

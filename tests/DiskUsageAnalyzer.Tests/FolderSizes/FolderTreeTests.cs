@@ -69,6 +69,38 @@ public sealed class FolderTreeTests
     }
 
     [Fact]
+    public void Find_WideFolderKeepsExactAndAmbiguousCaseMatchesDuringConcurrentLookups()
+    {
+        var builder = new FolderTreeBuilder(@"C:\");
+        var parent = builder.AddFolder(@"C:\wide");
+        var names = Enumerable.Range(0, 1500).Select(i => $"child-{i:D4}").ToList();
+        for (var variant = 0; variant < 64; variant++)
+        {
+            var name = "folders".ToCharArray();
+            for (var position = 0; position < 6; position++)
+            {
+                if ((variant & (1 << position)) != 0)
+                {
+                    name[position] = char.ToUpperInvariant(name[position]);
+                }
+            }
+
+            names[variant] = new string(name);
+        }
+
+        var first = builder.AppendEnumeratedChildren(parent, names);
+        var tree = builder.Build("test", TimeSpan.Zero);
+
+        Parallel.For(0, 64, variant =>
+        {
+            Assert.Equal(first + variant, tree.Find($@"C:\wide\{names[variant]}"));
+            Assert.Equal(-1, tree.Find(@"C:\wide\FOLDERS"));
+            Assert.Equal(first + 1000, tree.Find(@"C:\WIDE\CHILD-1000"));
+            Assert.Equal(-1, tree.Find(@"C:\wide\missing"));
+        });
+    }
+
+    [Fact]
     public void EnumeratedSiblings_KeepDistinctNamesAndTotalsThroughRefresh()
     {
         var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);

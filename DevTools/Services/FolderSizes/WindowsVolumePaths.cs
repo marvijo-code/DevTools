@@ -102,7 +102,13 @@ internal static class WindowsVolumePaths
                 continue;
             }
 
-            foreach (var path in GetAccessPaths(volumeName).Append(volumeName))
+            var paths = GetAccessPaths(volumeName).Append(volumeName);
+            if (drive.DriveLetterRoot is { } driveLetter)
+            {
+                paths = paths.Append(driveLetter).Distinct(StringComparer.OrdinalIgnoreCase);
+            }
+
+            foreach (var path in paths)
             {
                 if (Path.IsPathFullyQualified(path) && Path.EndsInDirectorySeparator(path) &&
                     !path.Equals(drive.RootPath, StringComparison.OrdinalIgnoreCase))
@@ -172,7 +178,13 @@ internal static class WindowsVolumePaths
         }
     }
 
-    internal static IEnumerable<string> GetFixedVolumeNames()
+    internal static bool IsDiskVolumeType(DriveType type, bool includeRemovable) =>
+        type == DriveType.Fixed || (includeRemovable && type == DriveType.Removable);
+
+    internal static bool IsRemovable(string rootPath) =>
+        OperatingSystem.IsWindows() && GetDriveType(rootPath) == DriveType.Removable;
+
+    internal static IEnumerable<(string Name, DriveType Type)> GetDiskVolumeNames(bool includeRemovable)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -191,9 +203,10 @@ internal static class WindowsVolumePaths
             do
             {
                 var name = buffer.ToString();
-                if (GetDriveType(name) == DriveType.Fixed)
+                var type = GetDriveType(name);
+                if (IsDiskVolumeType(type, includeRemovable))
                 {
-                    yield return name;
+                    yield return (name, type);
                 }
 
                 buffer.Clear();
@@ -231,6 +244,40 @@ internal static class WindowsVolumePaths
             ? (label.ToString(), fileSystem.ToString())
             : (string.Empty, string.Empty);
     }
+
+    // A card reader can lose its media between any two metadata calls. Keep the
+    // thread's other error flags and let storage errors return through the API.
+    internal static CriticalErrorScope SuppressCriticalErrors()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return default;
+        }
+
+        const uint failCriticalErrors = 1;
+        var mode = GetThreadErrorMode();
+        return (mode & failCriticalErrors) == 0 && SetThreadErrorMode(mode | failCriticalErrors, out var previous)
+            ? new CriticalErrorScope(previous)
+            : default;
+    }
+
+    internal readonly struct CriticalErrorScope(uint? previousMode) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (previousMode is uint mode)
+            {
+                SetThreadErrorMode(mode, out _);
+            }
+        }
+    }
+
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    private static extern uint GetThreadErrorMode();
+
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetThreadErrorMode(uint mode, out uint previousMode);
 
     [DllImport("kernel32.dll", EntryPoint = "GetVolumeNameForVolumeMountPointW", ExactSpelling = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]

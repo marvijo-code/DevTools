@@ -26,6 +26,7 @@ internal readonly record struct DiskCapacity(
 internal static class DiskCapacityInventory
 {
     private const string PhysicalDrivePrefix = "PhysicalDrive";
+    private const int RemovableMedia = 11;
     private const int FixedMedia = 12;
     private const uint MbrPartitionStyle = 0;
     private const uint GptPartitionStyle = 1;
@@ -47,6 +48,7 @@ internal static class DiskCapacityInventory
             return [];
         }
 
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
         var buffer = new byte[4096];
         var extents = new List<VolumeDiskExtent>();
         for (var index = 0; index < volumes.Count; index++)
@@ -81,31 +83,38 @@ internal static class DiskCapacityInventory
             return [];
         }
 
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
         var buffer = new byte[4096];
         var disks = new List<DiskCapacity>();
         foreach (var disk in ReadDiskNumbers())
         {
             cancellationToken.ThrowIfCancellationRequested();
             using var handle = OpenMetadata(PhysicalDiskPath(disk));
-            if (Query(handle, GetDriveGeometry, ref buffer) < 32 ||
-                BinaryPrimitives.ReadInt32LittleEndian(buffer.AsSpan(8)) != FixedMedia)
+            var geometryBytes = Query(handle, GetDriveGeometry, ref buffer);
+            if (ReadDiskGeometry(buffer.AsSpan(0, geometryBytes)) is not { } geometry)
             {
                 continue;
             }
 
-            var total = BinaryPrimitives.ReadInt64LittleEndian(buffer.AsSpan(24));
-            if (total <= 0)
-            {
-                continue;
-            }
-
-            var sectorBytes = BinaryPrimitives.ReadUInt32LittleEndian(buffer.AsSpan(20));
+            var (total, sectorBytes) = geometry;
             var bytes = Query(handle, GetDriveLayout, ref buffer);
             var layout = ReadPartitionLayout(buffer.AsSpan(0, bytes), total, sectorBytes);
             disks.Add(Reconcile(disk, total, layout?.Ranges, extents, layout?.GptUsableRange, layout?.MbrSector));
         }
 
         return disks;
+    }
+
+    internal static (long TotalBytes, uint SectorBytes)? ReadDiskGeometry(ReadOnlySpan<byte> geometry)
+    {
+        if (geometry.Length < 32 ||
+            BinaryPrimitives.ReadInt32LittleEndian(geometry[8..]) is not (FixedMedia or RemovableMedia))
+        {
+            return null;
+        }
+
+        var total = BinaryPrimitives.ReadInt64LittleEndian(geometry[24..]);
+        return total > 0 ? (total, BinaryPrimitives.ReadUInt32LittleEndian(geometry[20..])) : null;
     }
 
     internal static int[] GetBackingDiskNumbers((int DiskNumber, DiskRange Range)[] extents) => extents.Length switch

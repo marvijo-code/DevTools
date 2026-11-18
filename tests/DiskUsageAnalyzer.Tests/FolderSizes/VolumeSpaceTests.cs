@@ -9,13 +9,13 @@ namespace DiskUsageAnalyzer.Tests.FolderSizes;
 public sealed class VolumeSpaceTests
 {
     [Fact]
-    public void FixedVolumeInventory_UsesOneEntryForTheSystemDrive()
+    public void LocalVolumeInventory_UsesOneEntryForTheSystemDrive()
     {
         var path = Path.GetPathRoot(Environment.SystemDirectory)!;
         var identity = WindowsVolumePaths.GetVolumeName(path);
         Assert.False(string.IsNullOrWhiteSpace(identity));
 
-        var all = DriveUsageService.GetFixedDrives(includeVolumesWithoutDriveLetters: true);
+        var all = DriveUsageService.GetLocalVolumes();
 
         var systemDrive = Assert.Single(all, drive => drive.RootPath.Equals(path, StringComparison.OrdinalIgnoreCase));
         Assert.True(systemDrive.HasDriveLetter);
@@ -26,6 +26,62 @@ public sealed class VolumeSpaceTests
         Assert.Equal(new VolumeMountAlias(identity!, path, identity!), resolved.Mount);
         Assert.Equal(Path.Combine(path, "Windows"), resolved.Path);
         Assert.DoesNotContain(all, drive => drive.RootPath.Equals(identity, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData(DriveType.Fixed, true, true)]
+    [InlineData(DriveType.Removable, false, true)]
+    [InlineData(DriveType.Network, false, false)]
+    [InlineData(DriveType.CDRom, false, false)]
+    [InlineData(DriveType.NoRootDirectory, false, false)]
+    public void VolumeInventory_SelectsOnlySupportedLocalDiskTypes(DriveType type, bool fixedOnly, bool includeRemovable)
+    {
+        Assert.Equal(fixedOnly, WindowsVolumePaths.IsDiskVolumeType(type, includeRemovable: false));
+        Assert.Equal(includeRemovable, WindowsVolumePaths.IsDiskVolumeType(type, includeRemovable: true));
+    }
+
+    [Fact]
+    public void RemovableVolume_KeepsItsDriveLabelAndUsesTheGuidForBrowsingAndAccounting()
+    {
+        const string letter = @"R:\";
+        const string volume = @"\\?\Volume{b9b6d0b5-6ffc-4088-b889-b293f453d90b}\";
+        var space = new VolumeSpace(4096, 1024, 3072, 0, 0, IsVolumeWide: true);
+        var drive = DriveDescriptor.FromDriveLetter(letter, DriveType.Removable, volume, "Backup", "exFAT", space);
+        var aliases = WindowsVolumePaths.GetMountAliases([drive], CancellationToken.None);
+        var aliased = Assert.IsType<ResolvedVolumeMount>(WindowsVolumePaths.ResolveMountAlias(letter + "Photos", aliases));
+
+        Assert.Equal(volume, drive.RootPath);
+        Assert.Equal(letter, drive.DisplayRoot);
+        Assert.Equal(volume + "Photos", aliased.Path);
+        Assert.False(DevTools.Models.DiskUsageEntry.IsClearableDirectory(aliased.Path));
+
+        var summary = DiskUsage.BuildDriveSummarySection([drive], new Dictionary<string, DriveScanResult>());
+        var row = Assert.Single(summary.Entries);
+        Assert.Equal(volume, row.Path);
+        Assert.Equal(@"R:\ (Backup, exFAT)", row.DisplayName);
+        Assert.Equal(3072, row.SizeBytes);
+    }
+
+    [Theory]
+    [InlineData(11, 65536, true)]
+    [InlineData(12, 65536, true)]
+    [InlineData(0, 65536, false)]
+    [InlineData(11, 0, false)]
+    public void ReadDiskGeometry_AccountsForReadyRemovableAndFixedMedia(int media, long bytes, bool expected)
+    {
+        var reply = new byte[32];
+        BinaryPrimitives.WriteInt32LittleEndian(reply.AsSpan(8), media);
+        BinaryPrimitives.WriteUInt32LittleEndian(reply.AsSpan(20), 4096);
+        BinaryPrimitives.WriteInt64LittleEndian(reply.AsSpan(24), bytes);
+
+        var geometry = DiskCapacityInventory.ReadDiskGeometry(reply);
+        Assert.Equal(expected, geometry.HasValue);
+        if (geometry is { } parsed)
+        {
+            Assert.Equal((bytes, 4096U), parsed);
+        }
+
+        Assert.Null(DiskCapacityInventory.ReadDiskGeometry(reply.AsSpan(0, 31)));
     }
 
     [Fact]

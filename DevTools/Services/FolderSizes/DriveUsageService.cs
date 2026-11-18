@@ -4,10 +4,24 @@ using DevTools.Services.BiggestFiles;
 
 namespace DevTools.Services.FolderSizes;
 
-/// <summary>One fixed drive as the scan sees it.</summary>
+/// <summary>One local volume as the scan sees it.</summary>
 public sealed record DriveDescriptor(string RootPath, string Label, string FileSystem, VolumeSpace? Space, bool HasDriveLetter = true)
 {
     internal string? VolumeName { get; init; }
+    internal string? DriveLetterRoot { get; init; }
+    internal string DisplayRoot => DriveLetterRoot ?? RootPath;
+
+    internal static DriveDescriptor FromDriveLetter(string rootPath, DriveType type, string? volumeName,
+        string label, string fileSystem, VolumeSpace? space)
+    {
+        // Keep removable scans tied to the volume if its letter is reassigned.
+        var useVolumeName = type == DriveType.Removable && WindowsVolumePaths.GetVolumeGuid(volumeName).HasValue;
+        return new DriveDescriptor(useVolumeName ? volumeName! : rootPath, label, fileSystem, space)
+        {
+            VolumeName = volumeName,
+            DriveLetterRoot = useVolumeName ? rootPath : null
+        };
+    }
 }
 
 /// <summary>Byte counts reported by Windows for one volume.</summary>
@@ -26,7 +40,7 @@ public readonly record struct VolumeSpace(
 public sealed record DriveScanResult(DriveDescriptor Drive, FolderTree? Tree, string EngineName, string Note);
 
 /// <summary>
-/// Sizes every folder on every fixed drive with the fastest engine that works, in this order:
+/// Sizes folders on local fixed and removable volumes with the fastest engine that works, in this order:
 /// <list type="number">
 /// <item>NTFS Master File Table when DevTools runs as administrator (measured 48 s for C:).</item>
 /// <item>A low-priority folder walk (slowest: gdu, dua and diskus each took over 15 minutes for C:).</item>
@@ -41,8 +55,15 @@ public sealed class DriveUsageService
     private readonly MftFolderSizeScanner _mft = new();
     private readonly ParallelFolderWalker _walker = new();
 
-    public static IReadOnlyList<DriveDescriptor> GetFixedDrives(bool includeVolumesWithoutDriveLetters = false)
+    public static IReadOnlyList<DriveDescriptor> GetFixedDrives(bool includeVolumesWithoutDriveLetters = false) =>
+        GetVolumes(includeVolumesWithoutDriveLetters, includeRemovable: false);
+
+    internal static IReadOnlyList<DriveDescriptor> GetLocalVolumes() =>
+        GetVolumes(includeVolumesWithoutDriveLetters: true, includeRemovable: true);
+
+    private static IReadOnlyList<DriveDescriptor> GetVolumes(bool includeVolumesWithoutDriveLetters, bool includeRemovable)
     {
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
         var drives = new List<DriveDescriptor>();
         var volumeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var systemRoot = FolderTree.NormalizeRoot(Environment.SystemDirectory);
@@ -53,20 +74,28 @@ public sealed class DriveUsageService
         {
             try
             {
-                if (drive.DriveType != DriveType.Fixed || !drive.IsReady)
+                var type = drive.DriveType;
+                if (!WindowsVolumePaths.IsDiskVolumeType(type, includeRemovable) || !drive.IsReady)
                 {
                     continue;
                 }
 
                 var rootPath = FolderTree.NormalizeRoot(drive.RootDirectory.FullName);
                 var volumeName = WindowsVolumePaths.GetVolumeName(rootPath);
-                var descriptor = new DriveDescriptor(rootPath, drive.VolumeLabel, drive.DriveFormat, ReadVolumeSpace(rootPath))
+                var stableRoot = type == DriveType.Removable && WindowsVolumePaths.GetVolumeGuid(volumeName).HasValue
+                    ? volumeName! : rootPath;
+                var (label, fileSystem) = type == DriveType.Fixed
+                    ? (drive.VolumeLabel, drive.DriveFormat)
+                    : WindowsVolumePaths.ReadVolumeInformation(stableRoot);
+                var space = ReadVolumeSpace(stableRoot);
+                if (type == DriveType.Removable && fileSystem.Length == 0 && space is null)
                 {
-                    VolumeName = volumeName
-                };
+                    continue;
+                }
+
                 if (volumeName is null || volumeNames.Add(volumeName))
                 {
-                    drives.Add(descriptor);
+                    drives.Add(DriveDescriptor.FromDriveLetter(rootPath, type, volumeName, label, fileSystem, space));
                 }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -77,7 +106,8 @@ public sealed class DriveUsageService
 
         if (includeVolumesWithoutDriveLetters)
         {
-            foreach (var volumeName in WindowsVolumePaths.GetFixedVolumeNames().Order(StringComparer.OrdinalIgnoreCase))
+            foreach (var (volumeName, type) in WindowsVolumePaths.GetDiskVolumeNames(includeRemovable)
+                .OrderBy(volume => volume.Name, StringComparer.OrdinalIgnoreCase))
             {
                 if (!volumeNames.Add(volumeName))
                 {
@@ -85,8 +115,13 @@ public sealed class DriveUsageService
                 }
 
                 var (label, fileSystem) = WindowsVolumePaths.ReadVolumeInformation(volumeName);
-                drives.Add(new DriveDescriptor(volumeName, label, fileSystem,
-                    ReadVolumeSpace(volumeName), HasDriveLetter: false)
+                var space = ReadVolumeSpace(volumeName);
+                if (type == DriveType.Removable && fileSystem.Length == 0 && space is null)
+                {
+                    continue;
+                }
+
+                drives.Add(new DriveDescriptor(volumeName, label, fileSystem, space, HasDriveLetter: false)
                 {
                     VolumeName = volumeName
                 });
@@ -96,8 +131,11 @@ public sealed class DriveUsageService
         return drives;
     }
 
-    internal static VolumeSpace? ReadVolumeSpace(string rootPath) =>
-        TryReadWindowsVolumeSpace(rootPath) ?? TryReadCallerVolumeSpace(rootPath);
+    internal static VolumeSpace? ReadVolumeSpace(string rootPath)
+    {
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
+        return TryReadWindowsVolumeSpace(rootPath) ?? TryReadCallerVolumeSpace(rootPath);
+    }
 
     internal static VolumeSpace? TryReadCallerVolumeSpace(string rootPath)
     {
@@ -106,27 +144,16 @@ public sealed class DriveUsageService
             return null;
         }
 
-        const uint failCriticalErrors = 0x0001;
-        var restoreErrorMode = SetThreadErrorMode(failCriticalErrors, out var previousMode);
-        try
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
+        // Read both quota-sensitive counters in a single call, also for volume GUID paths.
+        if (!GetDiskFreeSpaceEx(rootPath, out var free, out var total, IntPtr.Zero) ||
+            total > long.MaxValue || free > long.MaxValue)
         {
-            // Read both quota-sensitive counters in a single call, also for volume GUID paths.
-            if (!GetDiskFreeSpaceEx(rootPath, out var free, out var total, IntPtr.Zero) ||
-                total > long.MaxValue || free > long.MaxValue)
-            {
-                return null;
-            }
+            return null;
+        }
 
-            return new VolumeSpace((long)total, (long)free, Math.Max(0, (long)total - (long)free),
-                0, 0, IsVolumeWide: false);
-        }
-        finally
-        {
-            if (restoreErrorMode)
-            {
-                SetThreadErrorMode(previousMode, out _);
-            }
-        }
+        return new VolumeSpace((long)total, (long)free, Math.Max(0, (long)total - (long)free),
+            0, 0, IsVolumeWide: false);
     }
 
     private static VolumeSpace? TryReadWindowsVolumeSpace(string rootPath)
@@ -165,9 +192,6 @@ public sealed class DriveUsageService
     private static extern bool GetDiskFreeSpaceEx(string rootPath, out ulong freeToCaller, out ulong callerTotal,
         IntPtr volumeFree);
 
-    [DllImport("kernel32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetThreadErrorMode(uint mode, out uint previousMode);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct DiskSpaceInformation

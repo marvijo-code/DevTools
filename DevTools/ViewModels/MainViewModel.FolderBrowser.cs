@@ -301,13 +301,13 @@ public sealed partial class MainViewModel
             return;
         }
 
-        if (!roots.SequenceEqual(_folderBrowserDrives.Select(drive => drive.Path), StringComparer.OrdinalIgnoreCase))
+        var drives = roots.Select(root => new FolderBrowserDrive(root, _diskUsageAnalyzer.GetFolderBrowserDriveLabel(root)));
+        if (!drives.SequenceEqual(_folderBrowserDrives))
         {
             _folderBrowserDrives.Clear();
-            foreach (var root in roots)
+            foreach (var drive in drives)
             {
-                var label = WindowsVolumePaths.GetVolumeGuid(root) is { } id ? $"Volume {id.ToString("N")[..8]}" : root;
-                _folderBrowserDrives.Add(new FolderBrowserDrive(root, label));
+                _folderBrowserDrives.Add(drive);
             }
         }
 
@@ -340,7 +340,7 @@ public sealed partial class MainViewModel
         _canFolderBrowserGoUp = false;
         _showFolderBrowserVolumeSummary = true;
         _folderBrowserSummary = string.IsNullOrEmpty(path)
-            ? "No fixed volumes are available."
+            ? "No local volumes are available."
             : scanCompleted
                 ? $"Folder sizes for {path} are unavailable."
                 : $"Waiting for the drive scan of {path}.";

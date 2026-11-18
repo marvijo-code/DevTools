@@ -252,7 +252,8 @@ public sealed class DiskUsageEntry : ObservableObject
             var absolutePath = System.IO.Path.GetFullPath(rawPath);
             var root = System.IO.Path.GetPathRoot(absolutePath);
             var fullPath = NormalizePath(absolutePath);
-            if (fullPath.Length <= 3 || WindowsVolumePaths.GetVolumeGuid(root).HasValue)
+            if (fullPath.Length <= 3 || WindowsVolumePaths.GetVolumeGuid(root).HasValue ||
+                (root is not null && WindowsVolumePaths.IsRemovable(root)))
             {
                 return false;
             }

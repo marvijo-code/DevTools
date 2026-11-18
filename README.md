@@ -92,7 +92,7 @@ Tabs sharing a process are listed together against that process's memory once. T
 
 ## Storage and largest folders
 
-The Storage workspace sizes **every folder on every fixed drive** once, in the background, and keeps the result in memory as a folder tree. From that one scan it shows:
+The Storage workspace sizes **folders on local fixed and removable volumes** once, in the background, and keeps the result in memory as a folder tree. From that one scan it shows:
 
 - **Largest Folders - X:\\** for each drive: the 25 largest top-level folders, each with its 15 largest subfolders behind the **+** button.
 - **Folder Browser (all drives)**: pick a drive, click any folder to open it, **Up** to go back. Every level comes from the in-memory tree, so it opens instantly.
@@ -100,7 +100,7 @@ The Storage workspace sizes **every folder on every fixed drive** once, in the b
 
 The app scans in the background using its built-in NTFS Master File Table reader when elevated. It falls back to a folder walk on volumes where the NTFS reader is unavailable. Each drive section names the engine and elapsed scan time.
 
-Drive Summary shows Windows' total, used, free, reserved and pool-unavailable bytes. Folder Browser can also scan fixed volumes without drive letters using their Windows volume paths. Cleanup is disabled for those paths. The summary reports logical file lengths, folder allocation and any remaining used space. The raw NTFS scan also reports allocation in reserved entries and records without a verified folder. Where Windows supplies a volume bitmap, the summary compares the occupied clusters with the physical runs seen in the MFT. A live volume can change between those reads.
+Drive Summary shows Windows' total, used, free, reserved and pool-unavailable bytes. Folder Browser also scans local volumes without drive letters. Removable volumes use Windows volume paths when available so reassigning a drive letter cannot redirect a scan. Clear Folder is disabled for removable volumes and Windows volume paths. The summary reports logical file lengths, folder allocation and any remaining used space. The raw NTFS scan also reports allocation in reserved entries and records without a verified folder. Where Windows supplies a volume bitmap, the summary compares the occupied clusters with the physical runs seen in the MFT. A live volume can change between those reads.
 
 The **Biggest Files** card below it lists the largest individual files. It uses the same fast NTFS path when elevated.
 

@@ -10,7 +10,8 @@ internal readonly record struct NtfsVolumeData(
     uint BytesPerCluster,
     uint BytesPerFileRecordSegment,
     long MftValidDataLength,
-    long MftStartLcn);
+    long MftStartLcn,
+    long TotalClusters);
 
 internal static class NativeMethods
 {
@@ -66,17 +67,23 @@ internal static class NativeMethods
     internal static NtfsVolumeData GetVolumeData(SafeFileHandle volume)
     {
         var buffer = new byte[128];
-        if (!DeviceIoControl(volume, FsctlGetNtfsVolumeData, IntPtr.Zero, 0, buffer, (uint)buffer.Length, out _, IntPtr.Zero))
+        if (!DeviceIoControl(volume, FsctlGetNtfsVolumeData, IntPtr.Zero, 0, buffer, (uint)buffer.Length, out var returned, IntPtr.Zero))
         {
             throw new Win32Exception(Marshal.GetLastWin32Error(), "FSCTL_GET_NTFS_VOLUME_DATA failed.");
         }
 
-        var span = buffer.AsSpan();
+        if (returned < 0x48 || returned > buffer.Length)
+        {
+            throw new IOException("FSCTL_GET_NTFS_VOLUME_DATA returned an incomplete geometry.");
+        }
+
+        var span = buffer.AsSpan(0, (int)returned);
+        var totalClusters = BinaryPrimitives.ReadInt64LittleEndian(span.Slice(0x10, 8));
         var bytesPerCluster = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(0x2C, 4));
         var bytesPerFileRecordSegment = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(0x30, 4));
         var mftValidDataLength = BinaryPrimitives.ReadInt64LittleEndian(span.Slice(0x38, 8));
         var mftStartLcn = BinaryPrimitives.ReadInt64LittleEndian(span.Slice(0x40, 8));
 
-        return new NtfsVolumeData(bytesPerCluster, bytesPerFileRecordSegment, mftValidDataLength, mftStartLcn);
+        return new NtfsVolumeData(bytesPerCluster, bytesPerFileRecordSegment, mftValidDataLength, mftStartLcn, totalClusters);
     }
 }

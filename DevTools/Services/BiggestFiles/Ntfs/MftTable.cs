@@ -282,20 +282,13 @@ internal static class MftTableLoader
 
         using var volume = NativeMethods.OpenVolume(driveLetter);
         var geometry = NativeMethods.GetVolumeData(volume);
+        var recordCount = GetRecordCount(geometry);
         var recordSize = (int)geometry.BytesPerFileRecordSegment;
-        if (recordSize <= 0 || geometry.BytesPerCluster == 0)
-        {
-            throw new NotSupportedException("Invalid NTFS geometry reported by the volume.");
-        }
-
-        var recordCountLong = geometry.MftValidDataLength / recordSize;
-        if (recordCountLong is <= 0 or > int.MaxValue)
-        {
-            throw new NotSupportedException($"Unsupported MFT record count: {recordCountLong}.");
-        }
-
-        var recordCount = (int)recordCountLong;
         var (chunkBytes, parserCount, queueCapacity) = ScanResources.Capture().MftPlan(recordCount, keepFileNames);
+
+        // Check the full MFT mapping before allocating its in-memory columns.
+        var extents = ReadMftExtents(volume, geometry);
+        ValidateMftExtents(geometry, extents);
 
         // Structure-of-arrays table, indexed by MFT record number.
         var parent = new uint[recordCount];
@@ -307,12 +300,6 @@ internal static class MftTableLoader
         var sequences = recordAllocation is null ? null : new ushort[recordCount];
         var names = new string?[recordCount];
 
-        // Locate the MFT's own clusters from record 0.
-        var extents = ReadMftExtents(volume, geometry);
-        if (extents.Count == 0)
-        {
-            throw new NotSupportedException("Could not locate the MFT data runs.");
-        }
 
         var lastReportTicks = Stopwatch.GetTimestamp();
         void OnParsed(int parsed)
@@ -344,12 +331,83 @@ internal static class MftTableLoader
         return new MftRecordTable(volumeRoot, recordCount, parent, flags, realSize, allocSize, lastWrite, names, recordAllocation);
     }
 
+    internal static int GetRecordCount(NtfsVolumeData geometry)
+    {
+        var clusterBytes = geometry.BytesPerCluster;
+        var recordBytes = geometry.BytesPerFileRecordSegment;
+        if (clusterBytes is 0 or > int.MaxValue || recordBytes is 0 or > int.MaxValue ||
+            geometry.TotalClusters <= 0 || geometry.TotalClusters > long.MaxValue / clusterBytes ||
+            geometry.MftStartLcn < 0 || geometry.MftStartLcn >= geometry.TotalClusters ||
+            geometry.MftValidDataLength <= 0 ||
+            geometry.MftValidDataLength > geometry.TotalClusters * clusterBytes ||
+            geometry.MftValidDataLength % recordBytes != 0)
+        {
+            throw new NotSupportedException("Invalid NTFS geometry reported by the volume.");
+        }
+
+        var requiredClustersForFirstRecord = ((long)recordBytes - 1) / clusterBytes + 1;
+        if (requiredClustersForFirstRecord > geometry.TotalClusters - geometry.MftStartLcn ||
+            requiredClustersForFirstRecord * clusterBytes > int.MaxValue)
+        {
+            throw new NotSupportedException("Record zero extends beyond the readable volume range.");
+        }
+
+        var count = geometry.MftValidDataLength / recordBytes;
+        if (count <= MftRecordTable.RootRecordNumber || count > int.MaxValue)
+        {
+            throw new NotSupportedException($"Unsupported MFT record count: {count}.");
+        }
+
+        return (int)count;
+    }
+
+    internal static void ValidateMftExtents(NtfsVolumeData geometry, List<(long Lcn, long ClusterCount)> extents)
+    {
+        if (extents.Count == 0 || extents[0].Lcn != geometry.MftStartLcn)
+        {
+            throw new IOException("The NTFS master file table has an invalid starting extent.");
+        }
+
+        var covered = 0L;
+        foreach (var (lcn, clusterCount) in extents)
+        {
+            if (lcn < 0 || lcn >= geometry.TotalClusters || clusterCount <= 0 ||
+                clusterCount > geometry.TotalClusters - lcn || clusterCount > geometry.TotalClusters - covered)
+            {
+                throw new IOException("An NTFS master file table extent lies outside the volume.");
+            }
+
+            covered += clusterCount;
+        }
+
+        var minimumClusters = (geometry.MftValidDataLength - 1) / geometry.BytesPerCluster + 1;
+        if (covered < minimumClusters)
+        {
+            throw new IOException("The NTFS extent map does not cover the valid master file table data.");
+        }
+
+        // Keep the original virtual cluster order for the reader. Sort a copy to detect repeated physical clusters.
+        if (extents.Count > 1)
+        {
+            var physicalOrder = extents.ToArray();
+            Array.Sort(physicalOrder, static (left, right) => left.Lcn.CompareTo(right.Lcn));
+            for (var i = 1; i < physicalOrder.Length; i++)
+            {
+                var previous = physicalOrder[i - 1];
+                if (physicalOrder[i].Lcn < previous.Lcn + previous.ClusterCount)
+                {
+                    throw new IOException("The NTFS master file table extents overlap.");
+                }
+            }
+        }
+    }
+
     private static List<(long Lcn, long ClusterCount)> ReadMftExtents(Microsoft.Win32.SafeHandles.SafeFileHandle volume, NtfsVolumeData geometry)
     {
         var clusterBytes = (int)geometry.BytesPerCluster;
         var recordSize = (int)geometry.BytesPerFileRecordSegment;
         // Read enough whole clusters to cover record 0 (handles cluster sizes smaller than the record).
-        var bytesToRead = ((recordSize + clusterBytes - 1) / clusterBytes) * clusterBytes;
+        var bytesToRead = ((recordSize - 1) / clusterBytes + 1) * clusterBytes;
         var buffer = ArrayPool<byte>.Shared.Rent(bytesToRead);
         try
         {

@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 
 namespace DevTools.Services.BiggestFiles.Ntfs;
 
@@ -307,36 +308,35 @@ public static class MftRecordParser
     };
 
     /// <summary>Applies the update-sequence array fixups in place. Returns false on a torn record.</summary>
+
     private static bool ApplyFixups(Span<byte> record)
     {
+        const int wordsPerSector = SectorSize / sizeof(ushort);
+        const int headerBytes = 8;
         var usaOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(4, 2));
         var usaCount = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(6, 2));
-        if (usaCount < 1)
+        if (record.Length % SectorSize != 0 || usaCount != record.Length / SectorSize + 1 ||
+            usaOffset < headerBytes || (usaOffset & 1) != 0 ||
+            usaOffset + usaCount * sizeof(ushort) > SectorSize - sizeof(ushort))
         {
             return false;
         }
 
-        var sectorCount = usaCount - 1;
-        if (usaOffset + usaCount * 2 > record.Length ||
-            sectorCount * SectorSize > record.Length)
+        // The sequence and sector tails use the same on-disk byte order.
+        var words = MemoryMarshal.Cast<byte, ushort>(record);
+        var fixups = words.Slice(usaOffset / sizeof(ushort), usaCount);
+        var sequence = fixups[0];
+        for (var sector = 1; sector < fixups.Length; sector++)
         {
-            return false;
-        }
-
-        var updateSequenceNumber = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(usaOffset, 2));
-
-        for (var sector = 0; sector < sectorCount; sector++)
-        {
-            var tail = sector * SectorSize + (SectorSize - 2);
-            var current = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(tail, 2));
-            if (current != updateSequenceNumber)
+            if (words[sector * wordsPerSector - 1] != sequence)
             {
                 return false;
             }
+        }
 
-            var replacement = record.Slice(usaOffset + 2 + sector * 2, 2);
-            record[tail] = replacement[0];
-            record[tail + 1] = replacement[1];
+        for (var sector = 1; sector < fixups.Length; sector++)
+        {
+            words[sector * wordsPerSector - 1] = fixups[sector];
         }
 
         return true;

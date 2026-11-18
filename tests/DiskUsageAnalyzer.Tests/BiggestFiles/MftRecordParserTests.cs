@@ -28,9 +28,57 @@ public sealed class MftRecordParserTests
             .Build();
 
         MftRecordBuilder.CorruptSectorTail(record, sector: 1);
+        var original = (byte[])record.Clone();
 
         var info = new MftRecordInfo();
         Assert.False(MftRecordParser.TryParseRecord(record, ref info));
+        Assert.Equal(original, record);
+    }
+
+    [Theory]
+    [InlineData(0x30, 1)]
+    [InlineData(0x30, 2)]
+    [InlineData(0x1fe, 3)]
+    public void TryParseRecord_RejectsIncompleteOrMisplacedFixups(int offset, int count)
+    {
+        var record = new MftRecordBuilder().ResidentData(5).Build();
+        BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(4), (ushort)offset);
+        BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(6), (ushort)count);
+
+        var info = new MftRecordInfo();
+        Assert.False(MftRecordParser.TryParseRecord(record, ref info));
+    }
+
+    [Theory]
+    [InlineData(512)]
+    [InlineData(4096)]
+    public void TryParseRecord_RestoresEveryProtectedSector(int size)
+    {
+        const int sectorSize = 512;
+        const int usaOffset = 0x30;
+        const ushort sequence = 0x1020;
+        var record = new byte[size];
+        "FILE"u8.CopyTo(record);
+        var sectors = size / sectorSize;
+        BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(4), usaOffset);
+        BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(6), (ushort)(sectors + 1));
+        BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(0x14), 0x80);
+        BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(0x16), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(0x18), 0x80);
+        BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(usaOffset), sequence);
+        for (var sector = 1; sector <= sectors; sector++)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(usaOffset + 2 * sector), (ushort)(0xCC00 + sector));
+            BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(sector * sectorSize - 2), sequence);
+        }
+
+        var info = new MftRecordInfo();
+        Assert.True(MftRecordParser.TryParseRecord(record, ref info));
+        for (var sector = 1; sector <= sectors; sector++)
+        {
+            Assert.Equal((ushort)(0xCC00 + sector),
+                BinaryPrimitives.ReadUInt16LittleEndian(record.AsSpan(sector * sectorSize - 2)));
+        }
     }
 
     [Fact]

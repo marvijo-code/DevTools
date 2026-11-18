@@ -95,70 +95,56 @@ public sealed class MftFolderSizeScanner
         var recordCount = table.RecordCount;
         var root = (int)MftRecordTable.RootRecordNumber;
 
-        // Child-directory index by parent record (counting sort).
-        var childStart = new int[recordCount + 1];
-        for (var r = 0; r < recordCount; r++)
+        // Positive entries point to the first child edge. Once a directory is attached
+        // to the tree, the same entry stores the bitwise complement of its node number.
+        var recordLinks = new int[recordCount];
+        var directoryCount = 0;
+        for (var record = 0; record < recordCount; record++)
         {
-            if (r == root || !table.IsNamedDirectory(r))
+            directoryCount += table.IsNamedDirectory(record) ? 1 : 0;
+        }
+
+        var children = new List<(int Record, int Next)>(directoryCount);
+        for (var record = recordCount - 1; record >= 0; record--)
+        {
+            if (record == root || !table.IsNamedDirectory(record))
             {
                 continue;
             }
 
-            var p = (int)table.Parent[r];
-            if (p >= 0 && p < recordCount && p != r)
+            var parent = table.Parent[record];
+            if (parent < (uint)recordCount && parent != record)
             {
-                childStart[p + 1]++;
-            }
-        }
-
-        for (var i = 0; i < recordCount; i++)
-        {
-            childStart[i + 1] += childStart[i];
-        }
-
-        var children = new int[childStart[recordCount]];
-        // Use the record-to-node map as the counting-sort cursor until numbering starts.
-        var recordToNode = new int[recordCount];
-        Array.Copy(childStart, recordToNode, recordCount);
-        for (var r = 0; r < recordCount; r++)
-        {
-            if (r == root || !table.IsNamedDirectory(r))
-            {
-                continue;
-            }
-
-            var p = (int)table.Parent[r];
-            if (p >= 0 && p < recordCount && p != r)
-            {
-                children[recordToNode[p]++] = r;
+                children.Add((record, recordLinks[parent]));
+                recordLinks[parent] = children.Count;
             }
         }
 
         // Breadth-first numbering so every parent node index is lower than its children.
-        Array.Fill(recordToNode, -1);
-        var capacity = children.Length + 1;
+        var capacity = children.Count + 1;
         var nodeParents = new int[capacity];
         var nodeNames = new string[capacity];
-        var nodeRecords = new int[capacity];
+        var nodeChildHeads = new int[capacity];
         nodeNames[0] = string.Empty;
-        nodeRecords[0] = root;
-        recordToNode[root] = 0;
+        nodeChildHeads[0] = recordLinks[root];
+        recordLinks[root] = ~0;
         var count = 1;
         for (var head = 0; head < count; head++)
         {
-            var record = nodeRecords[head];
-            for (var i = childStart[record]; i < childStart[record + 1]; i++)
+            for (var edge = nodeChildHeads[head]; edge > 0;)
             {
-                var child = children[i];
-                if (recordToNode[child] >= 0)
+                var (child, next) = children[edge - 1];
+                edge = next;
+                var childHead = recordLinks[child];
+                if (childHead < 0)
                 {
                     continue;
                 }
 
-                recordToNode[child] = count;
+                recordLinks[child] = ~count;
                 nodeParents[count] = head;
                 nodeNames[count] = table.Names[child] ?? "<unnamed>";
-                nodeRecords[count] = child;
+                nodeChildHeads[count] = childHead;
                 count++;
             }
         }
@@ -179,7 +165,7 @@ public sealed class MftFolderSizeScanner
         for (var r = 0; r < recordCount; r++)
         {
             var parent = table.Parent[r];
-            var parentNode = parent < (uint)recordCount ? recordToNode[parent] : -1;
+            var parentNode = parent < (uint)recordCount && recordLinks[parent] < 0 ? ~recordLinks[parent] : -1;
             var isUserFile = r >= MftRecordTable.FirstUserRecordNumber && table.IsNamedFile(r);
             if (isUserFile && parentNode >= 0)
             {
@@ -199,7 +185,7 @@ public sealed class MftFolderSizeScanner
                 continue;
             }
 
-            var allocationNode = recordToNode[r] >= 0 ? recordToNode[r] : isUserFile ? parentNode : -1;
+            var allocationNode = recordLinks[r] < 0 ? ~recordLinks[r] : isUserFile ? parentNode : -1;
             if (allocationNode >= 0)
             {
                 allocated[allocationNode] = checked(allocated[allocationNode] + bytes);

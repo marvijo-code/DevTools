@@ -138,6 +138,30 @@ public sealed class MftFolderSizeScannerTests
     }
 
     [Fact]
+    public void BuildTree_AttachesChildrenOfLaterRecordsAndLeavesCyclesUnattributed()
+    {
+        var table = CreateTable(80, new long[80]);
+        AddDirectory(table, 24, 30, "First");
+        AddDirectory(table, 30, Root, "Parent");
+        AddDirectory(table, 31, 32, "CycleStart");
+        AddDirectory(table, 32, 31, "CycleEnd");
+        AddFile(table, 40, 24, "attached.bin", 20);
+        AddFile(table, 41, 31, "cycle.bin", 30);
+        table.RecordAllocation![40] = 4096;
+        table.RecordAllocation[41] = 8192;
+        table.RecordAllocation[32] = 4096;
+
+        var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "NTFS MFT", System.Diagnostics.Stopwatch.StartNew());
+
+        var child = tree.Find(@"C:\Parent\First");
+        Assert.Equal(3, tree.FolderCount);
+        Assert.Equal(20, tree.TotalBytes);
+        Assert.Equal(20, tree.GetTotalBytes(child));
+        Assert.Equal(4096, tree.GetAllocatedBytes(0));
+        Assert.Equal(new NtfsRecordAllocation(0, 12_288), tree.NtfsAllocation);
+    }
+
+    [Fact]
     public void BuildTree_ReportsReservedRecordsApartFromFolderAllocation()
     {
         var table = CreateTable(160, new long[160]);

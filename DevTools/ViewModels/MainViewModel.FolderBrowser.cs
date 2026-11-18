@@ -134,12 +134,23 @@ public sealed partial class MainViewModel
     /// </summary>
     public async Task BrowseFolderAsync(string? path)
     {
-        if (BrowseFolder(path) || string.IsNullOrWhiteSpace(path))
+        if (string.IsNullOrWhiteSpace(path))
         {
             return;
         }
 
         _folderBrowserClickCts?.Cancel();
+        if (BrowseFolder(path))
+        {
+            return;
+        }
+
+        if (IsDiskUsageRefreshing && _folderBrowserDrives.Contains(path, StringComparer.OrdinalIgnoreCase))
+        {
+            ShowPendingBrowserDrive(path);
+            return;
+        }
+
         var cts = _folderBrowserClickCts = new CancellationTokenSource();
         _folderBrowserSummary = $"Sizing {path} first. The all-drive scan pauses until this finishes.";
         RaisePropertyChanged(nameof(FolderBrowserSummary));
@@ -156,8 +167,20 @@ public sealed partial class MainViewModel
         catch (Exception ex)
         {
             AppLog.Error($"Sizing clicked folder '{path}' failed.", ex);
-            _folderBrowserSummary = $"Could not size {path}: {ex.Message}";
-            RaisePropertyChanged(nameof(FolderBrowserSummary));
+            if (!cts.IsCancellationRequested)
+            {
+                _folderBrowserSummary = $"Could not size {path}: {ex.Message}";
+                RaisePropertyChanged(nameof(FolderBrowserSummary));
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_folderBrowserClickCts, cts))
+            {
+                _folderBrowserClickCts = null;
+            }
+
+            cts.Dispose();
         }
     }
 
@@ -188,9 +211,9 @@ public sealed partial class MainViewModel
     }
 
     /// <summary>Called on the UI thread whenever a drive tree is added or replaced.</summary>
-    private void RefreshFolderBrowserDrives()
+    private void RefreshFolderBrowserDrives(bool scanCompleted = false)
     {
-        // List every fixed drive at once; a drive that has no tree yet is sized when it is clicked.
+        // List each fixed drive before its folder tree is ready.
         _folderBrowserTreeCount = _diskUsageAnalyzer.Trees.Count;
         var roots = DriveUsageService.GetFixedDrives().Select(drive => drive.RootPath).ToList();
         if (!roots.SequenceEqual(_folderBrowserDrives))
@@ -202,11 +225,29 @@ public sealed partial class MainViewModel
             }
         }
 
-        // Keep the open folder if it still exists in the new tree, else open the first drive.
-        if (!BrowseFolder(_folderBrowserPath) && roots.Count > 0 && string.IsNullOrEmpty(_folderBrowserPath))
+        var path = string.IsNullOrEmpty(_folderBrowserPath) && roots.Count > 0
+            ? roots[0]
+            : _folderBrowserPath;
+        if (!BrowseFolder(path) && roots.Contains(path, StringComparer.OrdinalIgnoreCase))
         {
-            _ = BrowseFolderAsync(roots[0]);
+            ShowPendingBrowserDrive(path, scanCompleted);
         }
+    }
+
+    private void ShowPendingBrowserDrive(string path, bool scanCompleted = false)
+    {
+        _folderBrowserVersion++;
+        _folderBrowserExpanded.Clear();
+        _folderBrowserFiles.Clear();
+        _folderBrowserRows.Clear();
+        _folderBrowserPath = path;
+        _canFolderBrowserGoUp = false;
+        _folderBrowserSummary = scanCompleted
+            ? $"Folder sizes for {path} are unavailable."
+            : $"Waiting for the drive scan of {path}.";
+        RaisePropertyChanged(nameof(FolderBrowserPath));
+        RaisePropertyChanged(nameof(FolderBrowserSummary));
+        RaisePropertyChanged(nameof(CanFolderBrowserGoUp));
     }
 
     private void RebuildFolderBrowserRows()

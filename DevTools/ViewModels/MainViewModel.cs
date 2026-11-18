@@ -554,7 +554,7 @@ public sealed partial class MainViewModel : ObservableObject
             // The cleanup options are quick to check, so they fill in while the slower full scan runs.
             var cleanupTask = RefreshCleanupOptionsAsync(cancellationToken);
 
-            // Show the drives and open the system drive at once; sizing it on demand beats waiting for the scan.
+            // Select the system drive now and populate its tree when the drive scan finishes.
             RefreshFolderBrowserDrives();
 
             var progress = new Progress<DiskUsageProgress>(update =>
@@ -579,7 +579,7 @@ public sealed partial class MainViewModel : ObservableObject
             SetDiskUsageStatus($"Last disk refresh: {snapshot.CapturedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}");
             SetDiskUsageActivityText("Snapshot ready");
             RaiseDiskUsageProperties();
-            RefreshFolderBrowserDrives();
+            RefreshFolderBrowserDrives(scanCompleted: true);
             await cleanupTask;
 
             StatusMessage = "Disk usage snapshot refreshed.";

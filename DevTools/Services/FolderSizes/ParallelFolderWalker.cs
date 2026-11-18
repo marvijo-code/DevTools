@@ -143,9 +143,13 @@ public sealed class ParallelFolderWalker
             thread.Start();
         }
 
-        while (threads.Any(thread => thread.IsAlive))
+        while (threads.FirstOrDefault(thread => thread.IsAlive) is { } worker)
         {
-            threads.First(thread => thread.IsAlive).Join(TimeSpan.FromMilliseconds(500));
+            if (worker.Join(TimeSpan.FromMilliseconds(500)))
+            {
+                continue;
+            }
+
             progress?.Report(new FolderScanProgress(
                 driveRoot,
                 EngineName,

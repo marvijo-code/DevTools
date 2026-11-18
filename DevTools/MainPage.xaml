@@ -830,6 +830,122 @@
                           VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled">
               <StackPanel Spacing="10">
+                <Border x:Name="FolderBrowserCard"
+                        Padding="12"
+                        CornerRadius="14"
+                        HorizontalAlignment="Stretch"
+                        Background="{ThemeResource LayerFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1">
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="Folder Browser (all drives)"
+                               FontSize="16"
+                               FontWeight="SemiBold" />
+                    <ItemsControl ItemsSource="{Binding FolderBrowserDrives}">
+                      <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                          <StackPanel Orientation="Horizontal"
+                                      Spacing="6" />
+                        </ItemsPanelTemplate>
+                      </ItemsControl.ItemsPanel>
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="x:String">
+                          <Button Content="{Binding}"
+                                  Tag="{Binding}"
+                                  Click="BrowseDrive_Click"
+                                  Padding="10,2"
+                                  ToolTipService.ToolTip="Open this drive in the folder browser" />
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Grid ColumnSpacing="8">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                      </Grid.ColumnDefinitions>
+                      <Button Content="Up"
+                              Click="BrowseUp_Click"
+                              IsEnabled="{Binding CanFolderBrowserGoUp}"
+                              VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="1"
+                                 Text="{Binding FolderBrowserPath}"
+                                 FontFamily="Consolas"
+                                 VerticalAlignment="Center"
+                                 TextTrimming="CharacterEllipsis"
+                                 IsTextSelectionEnabled="True" />
+                      <Button Grid.Column="2"
+                              Content="Open in Explorer"
+                              Click="OpenPath_Click"
+                              Tag="{Binding FolderBrowserPath}"
+                              VerticalAlignment="Center" />
+                    </Grid>
+                    <TextBlock Text="{Binding FolderBrowserSummary}"
+                               TextWrapping="WrapWholeWords"
+                               FontSize="12"
+                               Opacity="0.72" />
+                    <ScrollViewer MaxHeight="420"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                      <ItemsControl ItemsSource="{Binding FolderBrowserRows}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="vm:FolderBrowserRow">
+                            <Grid ColumnSpacing="10"
+                                  Margin="0,0,0,4">
+                              <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="140" />
+                                <ColumnDefinition Width="90" />
+                              </Grid.ColumnDefinitions>
+                              <Grid Margin="{Binding Indent}"
+                                    ColumnSpacing="4">
+                                <Grid.ColumnDefinitions>
+                                  <ColumnDefinition Width="24" />
+                                  <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Button Tag="{Binding Path}"
+                                        Click="ToggleFolderRow_Click"
+                                        Visibility="{Binding ExpandVisibility}"
+                                        Padding="0"
+                                        Width="24"
+                                        Height="24"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        ToolTipService.ToolTip="Expand or collapse this folder">
+                                  <FontIcon Glyph="{Binding ExpandGlyph}"
+                                            FontSize="11" />
+                                </Button>
+                                <StackPanel Grid.Column="1">
+                                  <HyperlinkButton Content="{Binding Name}"
+                                                   Tag="{Binding Path}"
+                                                   IsEnabled="{Binding CanOpen}"
+                                                   Click="BrowseFolder_Click"
+                                                   Padding="0"
+                                                   FontSize="13"
+                                                   ToolTipService.ToolTip="{Binding Path}" />
+                                  <TextBlock Text="{Binding DetailText}"
+                                             FontFamily="Consolas"
+                                             FontSize="11"
+                                             Opacity="0.66" />
+                                </StackPanel>
+                              </Grid>
+                              <ProgressBar Grid.Column="1"
+                                           Value="{Binding SharePercent}"
+                                           Maximum="100"
+                                           VerticalAlignment="Center" />
+                              <TextBlock Grid.Column="2"
+                                         Text="{Binding SizeText}"
+                                         FontWeight="SemiBold"
+                                         HorizontalAlignment="Right"
+                                         VerticalAlignment="Center" />
+                            </Grid>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </ScrollViewer>
+                  </StackPanel>
+                </Border>
+
                 <Border x:Name="CleanupOptionsCard"
                         Padding="12"
                         CornerRadius="10"
@@ -1047,122 +1163,6 @@
                 <TextBlock Text="{Binding DiskUsageAnalysis}"
                            TextWrapping="WrapWholeWords"
                            Opacity="0.82" />
-
-                <Border x:Name="FolderBrowserCard"
-                        Padding="12"
-                        CornerRadius="14"
-                        HorizontalAlignment="Stretch"
-                        Background="{ThemeResource LayerFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                        BorderThickness="1">
-                  <StackPanel Spacing="8">
-                    <TextBlock Text="Folder Browser (all drives)"
-                               FontSize="16"
-                               FontWeight="SemiBold" />
-                    <ItemsControl ItemsSource="{Binding FolderBrowserDrives}">
-                      <ItemsControl.ItemsPanel>
-                        <ItemsPanelTemplate>
-                          <StackPanel Orientation="Horizontal"
-                                      Spacing="6" />
-                        </ItemsPanelTemplate>
-                      </ItemsControl.ItemsPanel>
-                      <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="x:String">
-                          <Button Content="{Binding}"
-                                  Tag="{Binding}"
-                                  Click="BrowseDrive_Click"
-                                  Padding="10,2"
-                                  ToolTipService.ToolTip="Open this drive in the folder browser" />
-                        </DataTemplate>
-                      </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                    <Grid ColumnSpacing="8">
-                      <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                      </Grid.ColumnDefinitions>
-                      <Button Content="Up"
-                              Click="BrowseUp_Click"
-                              IsEnabled="{Binding CanFolderBrowserGoUp}"
-                              VerticalAlignment="Center" />
-                      <TextBlock Grid.Column="1"
-                                 Text="{Binding FolderBrowserPath}"
-                                 FontFamily="Consolas"
-                                 VerticalAlignment="Center"
-                                 TextTrimming="CharacterEllipsis"
-                                 IsTextSelectionEnabled="True" />
-                      <Button Grid.Column="2"
-                              Content="Open in Explorer"
-                              Click="OpenPath_Click"
-                              Tag="{Binding FolderBrowserPath}"
-                              VerticalAlignment="Center" />
-                    </Grid>
-                    <TextBlock Text="{Binding FolderBrowserSummary}"
-                               TextWrapping="WrapWholeWords"
-                               FontSize="12"
-                               Opacity="0.72" />
-                    <ScrollViewer MaxHeight="420"
-                                  VerticalScrollBarVisibility="Auto"
-                                  HorizontalScrollBarVisibility="Disabled">
-                      <ItemsControl ItemsSource="{Binding FolderBrowserRows}">
-                        <ItemsControl.ItemTemplate>
-                          <DataTemplate x:DataType="vm:FolderBrowserRow">
-                            <Grid ColumnSpacing="10"
-                                  Margin="0,0,0,4">
-                              <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="140" />
-                                <ColumnDefinition Width="90" />
-                              </Grid.ColumnDefinitions>
-                              <Grid Margin="{Binding Indent}"
-                                    ColumnSpacing="4">
-                                <Grid.ColumnDefinitions>
-                                  <ColumnDefinition Width="24" />
-                                  <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <Button Tag="{Binding Path}"
-                                        Click="ToggleFolderRow_Click"
-                                        Visibility="{Binding ExpandVisibility}"
-                                        Padding="0"
-                                        Width="24"
-                                        Height="24"
-                                        Background="Transparent"
-                                        BorderThickness="0"
-                                        ToolTipService.ToolTip="Expand or collapse this folder">
-                                  <FontIcon Glyph="{Binding ExpandGlyph}"
-                                            FontSize="11" />
-                                </Button>
-                                <StackPanel Grid.Column="1">
-                                  <HyperlinkButton Content="{Binding Name}"
-                                                   Tag="{Binding Path}"
-                                                   IsEnabled="{Binding CanOpen}"
-                                                   Click="BrowseFolder_Click"
-                                                   Padding="0"
-                                                   FontSize="13"
-                                                   ToolTipService.ToolTip="{Binding Path}" />
-                                  <TextBlock Text="{Binding DetailText}"
-                                             FontFamily="Consolas"
-                                             FontSize="11"
-                                             Opacity="0.66" />
-                                </StackPanel>
-                              </Grid>
-                              <ProgressBar Grid.Column="1"
-                                           Value="{Binding SharePercent}"
-                                           Maximum="100"
-                                           VerticalAlignment="Center" />
-                              <TextBlock Grid.Column="2"
-                                         Text="{Binding SizeText}"
-                                         FontWeight="SemiBold"
-                                         HorizontalAlignment="Right"
-                                         VerticalAlignment="Center" />
-                            </Grid>
-                          </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                      </ItemsControl>
-                    </ScrollViewer>
-                  </StackPanel>
-                </Border>
 
                 <ItemsControl ItemsSource="{Binding DiskUsageSections}">
                   <ItemsControl.ItemTemplate>

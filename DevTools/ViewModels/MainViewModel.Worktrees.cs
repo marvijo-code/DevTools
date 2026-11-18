@@ -24,7 +24,7 @@ public sealed partial class MainViewModel
         "Repository, then branch"
     ];
 
-    private readonly WorktreeAnalyzer _worktreeAnalyzer;
+    private readonly Lazy<WorktreeAnalyzer> _worktreeAnalyzer;
     private readonly SemaphoreSlim _worktreeRefreshGate = new(1, 1);
     private readonly List<WorktreeItem> _allWorktrees = [];
     private string _worktreeHeadline = "Worktrees have not been scanned yet.";
@@ -148,7 +148,7 @@ public sealed partial class MainViewModel
                 UpdateWorktreeHeadline();
             });
 
-            var snapshot = await _worktreeAnalyzer.CaptureAsync(progress, cancellationToken);
+            var snapshot = await _worktreeAnalyzer.Value.CaptureAsync(progress, cancellationToken);
             SetWorktrees(snapshot.Items);
             _hasWorktreeSnapshot = true;
             RaisePropertyChanged(nameof(HasWorktreeSnapshot));
@@ -191,7 +191,7 @@ public sealed partial class MainViewModel
         item.SetRemoving(true);
         try
         {
-            var (success, message) = await _worktreeAnalyzer.RemoveAsync(item, item.IsDirty, cancellationToken);
+            var (success, message) = await _worktreeAnalyzer.Value.RemoveAsync(item, item.IsDirty, cancellationToken);
             StatusMessage = message;
             SetWorktreeStatus(message);
 
@@ -229,7 +229,7 @@ public sealed partial class MainViewModel
             var cleared = 0;
             foreach (var missing in listedMissing)
             {
-                var (success, _) = await _worktreeAnalyzer.RemoveAsync(missing, false, cancellationToken);
+                var (success, _) = await _worktreeAnalyzer.Value.RemoveAsync(missing, false, cancellationToken);
                 if (success)
                 {
                     cleared++;
@@ -238,7 +238,7 @@ public sealed partial class MainViewModel
                 }
             }
 
-            var pruned = cleared + await _worktreeAnalyzer.PruneAllAsync(cancellationToken);
+            var pruned = cleared + await _worktreeAnalyzer.Value.PruneAllAsync(cancellationToken);
             var message = pruned == 0 ? "No stale worktree records to prune." : $"Pruned {pruned} stale worktree record(s).";
             StatusMessage = message;
             SetWorktreeStatus(message);

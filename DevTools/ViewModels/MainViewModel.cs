@@ -48,7 +48,7 @@ public sealed partial class MainViewModel : ObservableObject
     private DateTimeOffset _nextTimedRefreshAt = DateTimeOffset.MinValue;
     private readonly ProcessKillCatalog _processKillCatalog = new();
     private readonly ProcessKiller _processKiller = new();
-    private readonly GitHubApiClient _gitHubApiClient = new();
+    private readonly Lazy<GitHubApiClient> _gitHubApiClient;
     private readonly SemaphoreSlim _diskUsageRefreshGate = new(1, 1);
     private readonly SemaphoreSlim _killProcessesRefreshGate = new(1, 1);
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
@@ -120,7 +120,8 @@ public sealed partial class MainViewModel : ObservableObject
 
     internal MainViewModel(Task<AppSettings?>? startupSettingsRead)
     {
-        _worktreeAnalyzer = new WorktreeAnalyzer(_gitHubApiClient, _diskUsageAnalyzer);
+        _gitHubApiClient = new Lazy<GitHubApiClient>(CreateGitHubApiClient);
+        _worktreeAnalyzer = new Lazy<WorktreeAnalyzer>(() => new WorktreeAnalyzer(_gitHubApiClient.Value, _diskUsageAnalyzer));
         _cleanupAdvisor = new CleanupAdvisor(_diskUsageAnalyzer);
         Repositories = [];
         Runs = [];
@@ -469,7 +470,7 @@ public sealed partial class MainViewModel : ObservableObject
         AppLog.Info("InitializeAsync started.");
         EnsureRepositoriesLoaded();
 
-        AuthMessage = await _gitHubApiClient.GetAuthSummaryAsync(cancellationToken);
+        AuthMessage = await _gitHubApiClient.Value.GetAuthSummaryAsync(cancellationToken);
         await RefreshAsync(cancellationToken);
         AppLog.Info("InitializeAsync completed.");
     }
@@ -479,14 +480,14 @@ public sealed partial class MainViewModel : ObservableObject
         AppLog.Info("ReloadAuthAsync started.");
         EnsureRepositoriesLoaded();
         AuthMessage = "Checking GitHub auth...";
-        AuthMessage = await _gitHubApiClient.ReloadAuthAsync(cancellationToken);
+        AuthMessage = await _gitHubApiClient.Value.ReloadAuthAsync(cancellationToken);
         AppLog.Info("ReloadAuthAsync completed.");
     }
 
     public bool LaunchGhLogin()
     {
         AppLog.Info("LaunchGhLogin requested.");
-        var launched = _gitHubApiClient.TryLaunchGhLogin();
+        var launched = _gitHubApiClient.Value.TryLaunchGhLogin();
         StatusMessage = launched
             ? "Opened gh auth login in a terminal window. Complete the browser sign-in, then click Reload Auth."
             : "GitHub CLI was not found. Install GitHub CLI first.";
@@ -502,7 +503,7 @@ public sealed partial class MainViewModel : ObservableObject
             return false;
         }
 
-        _gitHubApiClient.SetPersonalAccessToken(trimmed);
+        _gitHubApiClient.Value.SetPersonalAccessToken(trimmed);
         _encryptedPersonalAccessToken = ProtectSecret(trimmed);
         SaveSettings();
         AuthMessage = "Using manual PAT (default).";
@@ -513,7 +514,7 @@ public sealed partial class MainViewModel : ObservableObject
     public bool ClearPersonalAccessToken()
     {
         _encryptedPersonalAccessToken = null;
-        _gitHubApiClient.ClearPersonalAccessToken();
+        _gitHubApiClient.Value.ClearPersonalAccessToken();
         SaveSettings();
         AuthMessage = "No token configured. Paste a PAT and click Use PAT, or click Use gh Token for a temporary session token.";
         StatusMessage = "Manual PAT cleared.";
@@ -522,7 +523,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     public async Task UseGhTokenAsync(CancellationToken cancellationToken)
     {
-        AuthMessage = await _gitHubApiClient.UseGhTokenAsync(cancellationToken);
+        AuthMessage = await _gitHubApiClient.Value.UseGhTokenAsync(cancellationToken);
         StatusMessage = "Using gh token for this session. Manual PAT remains preferred when set.";
     }
 
@@ -697,7 +698,7 @@ public sealed partial class MainViewModel : ObservableObject
             StatusMessage = "Refreshing workflow runs...";
 
             var fetchTasks = Repositories
-                .Select(repository => _gitHubApiClient.GetWorkflowRunsAsync(repository, 25, cancellationToken))
+                .Select(repository => _gitHubApiClient.Value.GetWorkflowRunsAsync(repository, 25, cancellationToken))
                 .ToList();
             AppLog.Info($"Refreshing {Repositories.Count} repositories.");
 
@@ -794,7 +795,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         AppLog.Info($"ResolveSelectedRunAsync started for run {run.Id}.");
-        await _gitHubApiClient.ResolveRunDetailsAsync(run, cancellationToken);
+        await _gitHubApiClient.Value.ResolveRunDetailsAsync(run, cancellationToken);
         if (ReferenceEquals(SelectedRun, run) && !string.IsNullOrWhiteSpace(RunFilterText))
         {
             ApplyRunFilter();
@@ -1741,12 +1742,6 @@ public sealed partial class MainViewModel : ObservableObject
                 ? settings.ResourceIntervalSeconds
                 : 1;
             _runAsAdministrator = settings.RunAsAdministrator;
-
-            var persistedPat = UnprotectSecret(_encryptedPersonalAccessToken);
-            if (!string.IsNullOrWhiteSpace(persistedPat))
-            {
-                _gitHubApiClient.SetPersonalAccessToken(persistedPat);
-            }
         }
         catch (Exception ex)
         {
@@ -1756,6 +1751,18 @@ public sealed partial class MainViewModel : ObservableObject
         {
             _isLoadingSettings = false;
         }
+    }
+
+    private GitHubApiClient CreateGitHubApiClient()
+    {
+        var client = new GitHubApiClient();
+        var persistedPat = UnprotectSecret(_encryptedPersonalAccessToken);
+        if (!string.IsNullOrWhiteSpace(persistedPat))
+        {
+            client.SetPersonalAccessToken(persistedPat);
+        }
+
+        return client;
     }
 
     private void SaveSettings()

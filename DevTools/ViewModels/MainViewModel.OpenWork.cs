@@ -115,7 +115,7 @@ public sealed partial class MainViewModel
     {
         try
         {
-            var pullRequests = await _gitHubApiClient.GetOpenPullRequestsAsync(owners, cancellationToken);
+            var pullRequests = await _gitHubApiClient.Value.GetOpenPullRequestsAsync(owners, cancellationToken);
             var approvedCount = pullRequests.Count(item => item.ReviewState == PullRequestReviewState.Approved);
             SetOpenWorkPullRequestSummary($"{pullRequests.Count} open, {approvedCount} approved");
             return pullRequests;

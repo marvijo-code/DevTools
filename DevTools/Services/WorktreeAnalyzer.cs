@@ -25,13 +25,16 @@ public sealed class WorktreeAnalyzer
     public async Task<WorktreeSnapshot> CaptureAsync(IProgress<WorktreeProgress>? progress, CancellationToken cancellationToken)
     {
         var capturedAt = DateTimeOffset.Now;
-        var rootPath = ResolveRepositoryRootPath();
+        var (rootPath, repositoryPaths) = await Task.Run(() =>
+        {
+            var root = ResolveRepositoryRootPath();
+            return (root, EnumerateRepositoryPaths(root));
+        }, cancellationToken);
         var repositories = new List<RepositoryWorktrees>();
         var items = new List<WorktreeItem>();
-        var repositoryPaths = EnumerateRepositoryPaths(rootPath);
         AppLog.Info($"Worktree scan: root '{rootPath}', {repositoryPaths.Count} repositories with a .git folder.");
 
-        foreach (var repositoryPath in EnumerateRepositoryPaths(rootPath))
+        foreach (var repositoryPath in repositoryPaths)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var listing = await RunGitAsync(repositoryPath, ["worktree", "list", "--porcelain"], cancellationToken);

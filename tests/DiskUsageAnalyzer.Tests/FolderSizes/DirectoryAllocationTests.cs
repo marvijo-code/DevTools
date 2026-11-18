@@ -106,6 +106,49 @@ public sealed class DirectoryAllocationTests
     }
 
     [Fact]
+    public async Task Walker_ParallelStreamBatchesPreserveWideDirectoryTotals()
+    {
+        var root = Directory.CreateTempSubdirectory("devtools-stream-batches-");
+        try
+        {
+            var wide = root.CreateSubdirectory("wide");
+            const int fileCount = 512;
+            const int streamStride = 31;
+            var payload = new byte[8192];
+            for (var i = 0; i < fileCount; i++)
+            {
+                var path = Path.Combine(wide.FullName, $"file-{i:D4}.bin");
+                using (File.Create(path))
+                {
+                }
+
+                if (i % streamStride == 0)
+                {
+                    WriteNamedStream(path + ":payload", payload);
+                }
+            }
+
+            var original = Path.Combine(wide.FullName, "file-0000.bin");
+            Assert.True(CreateHardLink(Path.Combine(wide.FullName, "link.bin"), original, IntPtr.Zero));
+            var walker = new ParallelFolderWalker();
+            var sequential = await walker.ScanAsync(root.FullName, null, CancellationToken.None, workerCount: 1);
+            var parallel = await walker.ScanAsync(root.FullName, null, CancellationToken.None, workerCount: 4);
+            var sequentialNode = sequential.Find(wide.FullName);
+            var parallelNode = parallel.Find(wide.FullName);
+
+            Assert.Equal(fileCount + 1, parallel.GetFileCount(parallelNode));
+            Assert.Equal(0, parallel.GetTotalBytes(parallelNode));
+            var streamCount = (fileCount - 1) / streamStride + 1;
+            Assert.True(sequential.GetAllocatedBytes(sequentialNode) >= streamCount * payload.Length);
+            Assert.Equal(sequential.GetAllocatedBytes(sequentialNode), parallel.GetAllocatedBytes(parallelNode));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Walker_DoesNotCountResidentDataAsSeparateClusters()
     {
         var root = Directory.CreateTempSubdirectory("devtools-resident-");

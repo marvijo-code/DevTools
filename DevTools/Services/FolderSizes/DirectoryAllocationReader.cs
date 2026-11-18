@@ -10,6 +10,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
 {
     // FILE_ID_EXTD_DIR_INFO. The variable-length UTF-16 name follows the fixed header.
     private const int EntryHeaderBytes = 88;
+    private const int StreamBatchSize = 128;
     private const int FileIdExtdDirectoryInfo = 19;
     private const int FileStandardInfo = 1;
     private const int StandardInfoBytes = 24;
@@ -22,11 +23,16 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
     private const uint Directory = 0x10;
     private const uint ReparsePoint = 0x400;
     private readonly byte[] _buffer = GC.AllocateUninitializedArray<byte>(64 * 1024);
+    private readonly ulong[] _fileIds = GC.AllocateUninitializedArray<ulong>(StreamBatchSize);
     private byte[] _streamBuffer = GC.AllocateUninitializedArray<byte>(1024);
+
+    internal delegate bool TryScheduleStreams(int node, SafeFileHandle hint, ReadOnlySpan<ulong> fileIds);
 
     public bool TryRead(
         string path,
+        int node,
         List<string> subfolders,
+        TryScheduleStreams? scheduleStreams,
         CancellationToken cancellationToken,
         out long logicalBytes,
         out long allocatedBytes,
@@ -67,6 +73,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             }
 
             var remaining = _buffer.AsSpan();
+            var streamFileCount = 0;
             while (remaining.Length >= EntryHeaderBytes)
             {
                 var nextOffset = BinaryPrimitives.ReadInt32LittleEndian(remaining);
@@ -76,6 +83,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                     nameBytes <= 0 || (nameBytes & 1) != 0 || nameBytes > entryLength - EntryHeaderBytes ||
                     (nextOffset != 0 && remaining.Length - entryLength < EntryHeaderBytes))
                 {
+                    allocatedBytes += ReadFileStreams(handle, _fileIds.AsSpan(0, streamFileCount), cancellationToken);
                     return false;
                 }
 
@@ -101,12 +109,15 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                         allocatedBytes += PhysicalAllocation(BinaryPrimitives.ReadInt64LittleEndian(remaining[48..]));
                         if (high == 0)
                         {
-                            var id = new FileIdDescriptor(low);
-                            // Metadata access only. Prevent reparse resolution and remote file recall.
-                            using var file = OpenFileById(handle, in id, 0, 7, IntPtr.Zero, 0x00300000);
-                            if (!file.IsInvalid)
+                            _fileIds[streamFileCount++] = low;
+                            if (streamFileCount == _fileIds.Length)
                             {
-                                allocatedBytes += ReadNamedStreamAllocation(file);
+                                if (scheduleStreams?.Invoke(node, handle, _fileIds) != true)
+                                {
+                                    allocatedBytes += ReadFileStreams(handle, _fileIds, cancellationToken);
+                                }
+
+                                streamFileCount = 0;
                             }
                         }
                     }
@@ -121,7 +132,40 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
 
                 remaining = remaining[nextOffset..];
             }
+
+            allocatedBytes += ReadFileStreams(handle, _fileIds.AsSpan(0, streamFileCount), cancellationToken);
         }
+    }
+
+    internal long ReadFileStreams(SafeFileHandle hint, ReadOnlySpan<ulong> fileIds, CancellationToken cancellationToken)
+    {
+        long allocatedBytes = 0;
+        foreach (var fileId in fileIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var id = new FileIdDescriptor(fileId);
+            // Metadata access only. Prevent reparse resolution and remote file recall.
+            using var file = OpenFileById(hint, in id, 0, 7, IntPtr.Zero, 0x00300000);
+            if (!file.IsInvalid)
+            {
+                allocatedBytes += ReadNamedStreamAllocation(file);
+            }
+        }
+
+        return allocatedBytes;
+    }
+
+    internal static SafeFileHandle? DuplicateVolumeHint(SafeFileHandle hint)
+    {
+        const uint duplicateSameAccess = 2;
+        var process = GetCurrentProcess();
+        if (DuplicateHandle(process, hint, process, out var copy, 0, false, duplicateSameAccess))
+        {
+            return copy;
+        }
+
+        copy?.Dispose();
+        return null;
     }
 
     // A resident stream can report positive bytes stored inside its MFT record. Only
@@ -181,6 +225,15 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
         private readonly ulong _fileId = fileId;
         private readonly ulong _reserved = 0;
     }
+
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DuplicateHandle(
+        IntPtr sourceProcess, SafeFileHandle source, IntPtr targetProcess, out SafeFileHandle target,
+        uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint options);
 
     [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
     private static extern SafeFileHandle OpenFileById(

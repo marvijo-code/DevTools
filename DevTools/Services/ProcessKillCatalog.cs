@@ -8,7 +8,10 @@ public sealed class ProcessKillCatalog
     private readonly RunningProcessCollector _runningProcessCollector = new();
     private readonly ClaudeSessionCatalog _claudeSessions = new();
 
-    public IReadOnlyList<ProcessKillSection> CaptureSections(CodexSessionCatalog? sessionCatalog = null)
+    public IReadOnlyList<ProcessKillSection> CaptureSections(CodexSessionCatalog? sessionCatalog = null) =>
+        ProcessKillFilter.Apply(CaptureUnfilteredSections(sessionCatalog), filterText: null);
+
+    internal IReadOnlyList<ProcessKillSection> CaptureUnfilteredSections(CodexSessionCatalog? sessionCatalog = null)
     {
         sessionCatalog ??= CodexSessionCatalog.LoadDefault();
         var processes = _runningProcessCollector.Capture(sessionCatalog);
@@ -23,8 +26,7 @@ public sealed class ProcessKillCatalog
             : FirefoxSessionReader.ReadCurrentSessions();
         if (processes.Count == 0) return [];
 
-        return ProcessKillFilter.Apply(
-            processes
+        return processes
             .GroupBy(ResolveSessionGroupTitle, StringComparer.OrdinalIgnoreCase)
             .Select(group =>
             {
@@ -77,8 +79,7 @@ public sealed class ProcessKillCatalog
                     sectionStartPath,
                     entries, activities, heading, status) { IsExpanded = heading.Length > 0 };
             })
-            .ToList(),
-            filterText: null);
+            .ToList();
     }
 
     private static string ResolveGroupTitle(string displayName)

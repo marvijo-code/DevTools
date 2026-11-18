@@ -54,6 +54,28 @@ public sealed class ProcessKillFilterTests
         Assert.Equal(10, filtered[0].Entries[0].ProcessId);
     }
 
+    [Theory]
+    [InlineData("workspace\r\nHELPER 8411", true)]
+    [InlineData("workspace helper 8412", false)]
+    [InlineData("queuedworker", false)]
+    public void Apply_MatchesTermsAcrossFieldsIncludingParentPid(string filter, bool shouldMatch)
+    {
+        var entry = new ProcessKillEntry(1234, 8411, "Worker", "app.exe --helper", "app.exe", "app.exe", 512,
+            "worker", "queued");
+        var section = new ProcessKillSection("Build server", "1 process", @"C:\Workspace", [entry]);
+
+        var filtered = ProcessKillFilter.Apply([section], filter);
+
+        if (shouldMatch)
+        {
+            Assert.Same(entry, Assert.Single(Assert.Single(filtered).Entries));
+        }
+        else
+        {
+            Assert.Empty(filtered);
+        }
+    }
+
     private static ProcessKillSection CreateSection(string title, params ProcessKillEntry[] entries)
     {
         return new ProcessKillSection(title, $"{entries.Length} process(es)", string.Empty, entries);

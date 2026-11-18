@@ -1184,7 +1184,7 @@ public sealed partial class MainViewModel : ObservableObject
             RaiseKillProcessesProperties();
             StatusMessage = "Refreshing process list...";
 
-            var sections = await Task.Run(() => _processKillCatalog.CaptureSections(), cancellationToken);
+            var sections = await Task.Run(() => _processKillCatalog.CaptureUnfilteredSections(), cancellationToken);
             _allKillProcessSections.Clear();
             _allKillProcessSections.AddRange(sections);
             ApplyProcessFilter();

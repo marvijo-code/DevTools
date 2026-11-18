@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using DevTools.Services.BiggestFiles.Ntfs;
 using Xunit;
 
@@ -154,6 +155,77 @@ public sealed class MftRecordParserTests
     }
 
     [Fact]
+    public void TryParseRecord_RejectsANameBeyondItsDeclaredValueAndKeepsTheValidDataSize()
+    {
+        var record = new MftRecordBuilder()
+            .FileName("valid-layout.txt", parent: 42, nameNamespace: 1)
+            .ResidentData(32)
+            .Build();
+        var offset = BinaryPrimitives.ReadUInt16LittleEndian(record.AsSpan(0x14));
+        BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(offset + 0x10), 0x42);
+        var info = new MftRecordInfo();
+
+        Assert.True(MftRecordParser.TryParseRecord(record, ref info));
+        Assert.False(info.HasName);
+        Assert.Equal(32, info.DataRealSize);
+    }
+
+    [Fact]
+    public void TryParseRecord_IgnoresAResidentValueOutsideItsAttribute()
+    {
+        var record = new MftRecordBuilder().ResidentData(16).Build();
+        var offset = BinaryPrimitives.ReadUInt16LittleEndian(record.AsSpan(0x14));
+        BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(offset + 0x10), uint.MaxValue);
+        var info = new MftRecordInfo();
+
+        Assert.True(MftRecordParser.TryParseRecord(record, ref info));
+        Assert.False(info.DataSizesValid);
+    }
+
+    [Fact]
+    public void TryParseRecord_IgnoresANonResidentAttributeWithATruncatedHeader()
+    {
+        var record = new MftRecordBuilder().NonResidentData(4096, 4096).Build();
+        var offset = BinaryPrimitives.ReadUInt16LittleEndian(record.AsSpan(0x14));
+        BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(offset + 4), 0x20);
+        BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(offset + 0x20), uint.MaxValue);
+        var info = new MftRecordInfo();
+
+        Assert.True(MftRecordParser.TryParseRecord(record, ref info));
+        Assert.False(info.DataSizesValid);
+    }
+
+    [Fact]
+    public void TryParseRecord_DoesNotReadUnusedSpaceInAnMftRecord()
+    {
+        var record = new MftRecordBuilder()
+            .NonResidentData(4096, 4096, runs: [0x11, 1, 8, 0]).Build();
+        var offset = BinaryPrimitives.ReadUInt16LittleEndian(record.AsSpan(0x14));
+        BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(0x18), (uint)(offset + 8));
+        var info = new MftRecordInfo();
+
+        Assert.False(MftRecordParser.TryReadUnnamedDataRuns(record.ToArray(), []));
+        Assert.True(MftRecordParser.TryParseRecord(record, ref info));
+        Assert.False(info.DataSizesValid);
+    }
+
+    [Theory]
+    [InlineData(0xff, 0)]
+    [InlineData(98, 2)]
+    [InlineData(99, 0)]
+    public void TryParseRecord_IgnoresAllocationOutsideTheVolume(byte relativeLcn, long expected)
+    {
+        var record = new MftRecordBuilder()
+            .NonResidentData(4096, 8192, runs: [0x11, 2, relativeLcn, 0]).Build();
+        var info = new MftRecordInfo();
+
+        Assert.True(MftRecordParser.TryParseRecord(record, ref info, requireInUse: true,
+            readLastWrite: false, countAllocation: true, volumeClusters: 100));
+        Assert.Equal(4096, info.DataRealSize);
+        Assert.Equal(expected, info.AllocatedClusters);
+    }
+
+    [Fact]
     public void TryParseRecord_NeverUsesFileNameSizes()
     {
         // The builder stamps 999_999 into the stale $FILE_NAME size fields; the parser must ignore them.
@@ -253,6 +325,32 @@ public sealed class MftRecordParserTests
         var extents = new List<(long Lcn, long ClusterCount)>();
 
         Assert.False(MftRecordParser.TryReadUnnamedDataRuns(record, extents));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
+    public void TryDecodeRunList_ReadsEverySupportedFieldWidth(int width)
+    {
+        var runBytes = 1 + 2 * width;
+        var bytes = new byte[2 * runBytes + 1];
+        bytes[0] = bytes[runBytes] = (byte)((width << 4) | width);
+        var clusterCount = (1L << (8 * (width - 1))) + 1;
+        var firstLcn = (1L << (8 * width - 2)) + 16;
+        BitConverter.GetBytes(clusterCount).AsSpan(0, width).CopyTo(bytes.AsSpan(1));
+        BitConverter.GetBytes(firstLcn).AsSpan(0, width).CopyTo(bytes.AsSpan(1 + width));
+        BitConverter.GetBytes(1L).AsSpan(0, width).CopyTo(bytes.AsSpan(runBytes + 1));
+        BitConverter.GetBytes(-7L).AsSpan(0, width).CopyTo(bytes.AsSpan(runBytes + 1 + width));
+        var extents = new List<(long Lcn, long ClusterCount)>();
+
+        Assert.True(MftRecordParser.TryDecodeRunList(bytes, extents));
+        Assert.Equal([(firstLcn, clusterCount), (firstLcn - 7, 1L)], extents);
     }
 
     [Fact]

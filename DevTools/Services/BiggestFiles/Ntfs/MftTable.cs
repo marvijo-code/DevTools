@@ -481,7 +481,8 @@ internal static class MftTableLoader
                                 var globalIndex = block.StartRecordIndex + r;
                                 var recordSpan = span.Slice(r * recordSize, recordSize);
                                 if (!MftRecordParser.TryParseRecord(recordSpan, ref info,
-                                    requireInUse: true, readLastWrite: keepFileNames, countAllocation: recordAllocation is not null))
+                                    requireInUse: true, readLastWrite: keepFileNames, countAllocation: recordAllocation is not null,
+                                    volumeClusters: geometry.TotalClusters))
                                 {
                                     continue;
                                 }

@@ -72,7 +72,8 @@ public static class MftRecordParser
         ref MftRecordInfo info,
         bool requireInUse,
         bool readLastWrite,
-        bool countAllocation = false)
+        bool countAllocation = false,
+        long volumeClusters = long.MaxValue)
     {
         info = default;
 
@@ -95,6 +96,13 @@ public static class MftRecordParser
             return false;
         }
 
+        var usedBytes = GetUsedRecordLength(record);
+        if (usedBytes == 0)
+        {
+            return false;
+        }
+
+        record = record[..usedBytes];
         info.InUse = inUse;
         info.IsDirectory = (flags & 0x0002) != 0;
         info.SequenceNumber = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x10, 2));
@@ -127,27 +135,30 @@ public static class MftRecordParser
                 break;
             }
 
-            var nonResident = record[offset + 8] != 0;
-            var nameLength = record[offset + 9];
+            var attribute = record.Slice(offset, attributeLength);
+            var form = attribute[8];
+            var nonResident = form == 1;
             if (countAllocation && nonResident &&
-                TryCountAttributeClusters(record.Slice(offset, attributeLength), out var allocated))
+                TryGetMappingPairs(attribute, out var runs) &&
+                TryDecodeRunList(runs, null, out var allocated, volumeClusters: volumeClusters) &&
+                allocated <= volumeClusters - info.AllocatedClusters)
             {
-                info.AllocatedClusters = checked(info.AllocatedClusters + allocated);
+                info.AllocatedClusters += allocated;
             }
 
             switch (attributeType)
             {
-                case AttrStandardInformation when readLastWrite && !nonResident:
-                    ReadStandardInformation(record, offset, ref info);
+                case AttrStandardInformation when readLastWrite && form == 0:
+                    ReadStandardInformation(attribute, ref info);
                     break;
-                case AttrAttributeList:
+                case AttrAttributeList when form is 0 or 1:
                     info.HasAttributeList = true;
                     break;
-                case AttrFileName when !nonResident:
-                    ReadFileName(record, offset, ref info, ref bestNamespaceRank);
+                case AttrFileName when form == 0:
+                    ReadFileName(attribute, offset, ref info, ref bestNamespaceRank);
                     break;
-                case AttrData when nameLength == 0:
-                    ReadUnnamedData(record, offset, nonResident, ref info);
+                case AttrData when form is 0 or 1 && attribute[9] == 0:
+                    ReadUnnamedData(attribute, nonResident, ref info);
                     break;
             }
 
@@ -157,45 +168,68 @@ public static class MftRecordParser
         return true;
     }
 
-    private static bool TryCountAttributeClusters(ReadOnlySpan<byte> attribute, out long clusters)
+    private static int GetUsedRecordLength(ReadOnlySpan<byte> record)
     {
-        clusters = 0;
+        var length = BinaryPrimitives.ReadUInt32LittleEndian(record[0x18..]);
+        return length >= 0x30 && length <= (uint)record.Length ? (int)length : 0;
+    }
+
+    private static bool TryGetMappingPairs(ReadOnlySpan<byte> attribute, out ReadOnlySpan<byte> runs)
+    {
+        runs = default;
         if (attribute.Length < 0x40)
         {
             return false;
         }
 
-        var runOffset = BinaryPrimitives.ReadUInt16LittleEndian(attribute[0x20..]);
-        return runOffset >= 0x40 && runOffset < attribute.Length &&
-               TryDecodeRunList(attribute[runOffset..], null, out clusters);
+        var offset = BinaryPrimitives.ReadUInt16LittleEndian(attribute[0x20..]);
+        if (offset < 0x40 || offset >= attribute.Length)
+        {
+            return false;
+        }
+
+        runs = attribute[offset..];
+        return true;
     }
 
-    private static void ReadStandardInformation(ReadOnlySpan<byte> record, int attributeOffset, ref MftRecordInfo info)
+    private static bool TryGetResidentValue(ReadOnlySpan<byte> attribute, out ReadOnlySpan<byte> value, out int offset)
     {
-        var contentOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(attributeOffset + 0x14, 2));
-        var start = attributeOffset + contentOffset;
-        if (start + 0x18 > record.Length)
+        value = default;
+        offset = 0;
+        if (attribute.Length < 0x18)
+        {
+            return false;
+        }
+
+        offset = BinaryPrimitives.ReadUInt16LittleEndian(attribute[0x14..]);
+        var length = BinaryPrimitives.ReadUInt32LittleEndian(attribute[0x10..]);
+        if (offset < 0x18 || offset > attribute.Length || length > (uint)(attribute.Length - offset))
+        {
+            return false;
+        }
+
+        value = attribute.Slice(offset, (int)length);
+        return true;
+    }
+
+    private static void ReadStandardInformation(ReadOnlySpan<byte> attribute, ref MftRecordInfo info)
+    {
+        if (TryGetResidentValue(attribute, out var value, out _) && value.Length >= 0x10)
+        {
+            info.LastWriteFileTime = BinaryPrimitives.ReadInt64LittleEndian(value[0x08..]);
+        }
+    }
+
+    private static void ReadFileName(ReadOnlySpan<byte> attribute, int attributeOffset, ref MftRecordInfo info, ref int bestNamespaceRank)
+    {
+        if (!TryGetResidentValue(attribute, out var value, out var contentOffset) || value.Length < 0x42)
         {
             return;
         }
 
-        // Offset 0x08 within $STANDARD_INFORMATION is the last data-modification time (FILETIME).
-        info.LastWriteFileTime = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(start + 0x08, 8));
-    }
-
-    private static void ReadFileName(ReadOnlySpan<byte> record, int attributeOffset, ref MftRecordInfo info, ref int bestNamespaceRank)
-    {
-        var contentOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(attributeOffset + 0x14, 2));
-        var start = attributeOffset + contentOffset;
-        if (start + 0x42 > record.Length)
-        {
-            return;
-        }
-
-        var nameLengthChars = record[start + 0x40];
-        var nameNamespace = record[start + 0x41];
-        var nameStart = start + 0x42;
-        if (nameStart + nameLengthChars * 2 > record.Length)
+        var nameLengthChars = value[0x40];
+        var nameNamespace = value[0x41];
+        if (nameLengthChars == 0 || nameLengthChars * 2 > value.Length - 0x42)
         {
             return;
         }
@@ -208,36 +242,47 @@ public static class MftRecordParser
 
         bestNamespaceRank = rank;
         info.HasName = true;
-        info.ParentRecordNumber = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(start, 8)) & 0x0000FFFFFFFFFFFFUL;
-        info.NameOffsetInRecord = nameStart;
+        info.ParentRecordNumber = BinaryPrimitives.ReadUInt64LittleEndian(value) & 0x0000FFFFFFFFFFFFUL;
+        info.NameOffsetInRecord = attributeOffset + contentOffset + 0x42;
         info.NameLengthChars = nameLengthChars;
         info.FileNameNamespace = nameNamespace;
     }
 
-    private static void ReadUnnamedData(ReadOnlySpan<byte> record, int attributeOffset, bool nonResident, ref MftRecordInfo info)
+    private static void ReadUnnamedData(ReadOnlySpan<byte> attribute, bool nonResident, ref MftRecordInfo info)
     {
         if (!nonResident)
         {
-            var contentLength = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(attributeOffset + 0x10, 4));
-            info.HasUnnamedData = true;
-            info.DataSizesValid = true;
-            info.DataRealSize = contentLength;
-            info.DataAllocatedSize = contentLength;
+            if (TryGetResidentValue(attribute, out var value, out _))
+            {
+                info.HasUnnamedData = true;
+                info.DataSizesValid = true;
+                info.DataRealSize = value.Length;
+                info.DataAllocatedSize = value.Length;
+            }
+
             return;
         }
 
-        var lowestVcn = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(attributeOffset + 0x10, 8));
-        info.HasUnnamedData = true;
+        if (attribute.Length < 0x40)
+        {
+            return;
+        }
 
-        // Only the first fragment (LowestVCN == 0) carries valid allocated/real sizes.
+        info.HasUnnamedData = true;
+        var lowestVcn = BinaryPrimitives.ReadUInt64LittleEndian(attribute[0x10..]);
         if (lowestVcn != 0 || info.DataSizesValid)
         {
             return;
         }
 
-        info.DataSizesValid = true;
-        info.DataAllocatedSize = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(attributeOffset + 0x28, 8));
-        info.DataRealSize = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(attributeOffset + 0x30, 8));
+        var allocated = BinaryPrimitives.ReadInt64LittleEndian(attribute[0x28..]);
+        var logical = BinaryPrimitives.ReadInt64LittleEndian(attribute[0x30..]);
+        if (allocated >= 0 && logical >= 0)
+        {
+            info.DataSizesValid = true;
+            info.DataAllocatedSize = allocated;
+            info.DataRealSize = logical;
+        }
     }
 
     private static int NamespaceRank(byte fileNameNamespace) => fileNameNamespace switch
@@ -303,11 +348,13 @@ public static class MftRecordParser
             return false;
         }
 
-        if (!ApplyFixups(record))
+        var usedBytes = GetUsedRecordLength(record);
+        if (usedBytes == 0 || !ApplyFixups(record))
         {
             return false;
         }
 
+        record = record[..usedBytes];
         var firstAttributeOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x14, 2));
         var offset = (int)firstAttributeOffset;
 
@@ -325,24 +372,10 @@ public static class MftRecordParser
                 break;
             }
 
-            var nonResident = record[offset + 8] != 0;
-            var nameLength = record[offset + 9];
-
-            if (attributeType == AttrData && nameLength == 0 && nonResident)
+            if (attributeType == AttrData && record[offset + 9] == 0 && record[offset + 8] == 1)
             {
-                if (attributeLength < 0x40)
-                {
-                    return false;
-                }
-
-                var runListOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(offset + 0x20, 2));
-                if (runListOffset < 0x40 || offset + runListOffset > offset + attributeLength)
-                {
-                    return false;
-                }
-
-                var runs = record.Slice(offset + runListOffset, attributeLength - runListOffset);
-                return TryDecodeRunList(runs, extents, out _, allowSparse: false);
+                return TryGetMappingPairs(record.Slice(offset, attributeLength), out var runs) &&
+                    TryDecodeRunList(runs, extents, out _, allowSparse: false);
             }
 
             offset += attributeLength;
@@ -359,7 +392,8 @@ public static class MftRecordParser
         TryDecodeRunList(runList, extents, out _);
 
     private static bool TryDecodeRunList(
-        ReadOnlySpan<byte> runList, List<(long Lcn, long ClusterCount)>? extents, out long allocatedClusters, bool allowSparse = true)
+        ReadOnlySpan<byte> runList, List<(long Lcn, long ClusterCount)>? extents, out long allocatedClusters,
+        bool allowSparse = true, long volumeClusters = long.MaxValue)
     {
         extents?.Clear();
         allocatedClusters = 0;
@@ -400,24 +434,20 @@ public static class MftRecordParser
                 continue;
             }
 
-            if (long.MaxValue - allocatedClusters < clusterCount)
+            if (clusterCount > volumeClusters - allocatedClusters)
             {
                 return false;
             }
 
-            allocatedClusters += clusterCount;
-            if (extents is not null)
+            var deltaLcn = ReadSignedLittleEndian(runList.Slice(index, offsetSize));
+            if (deltaLcn < -currentLcn || deltaLcn > volumeClusters - clusterCount - currentLcn)
             {
-                var deltaLcn = ReadSignedLittleEndian(runList.Slice(index, offsetSize));
-                if (deltaLcn < -currentLcn || (deltaLcn > 0 && currentLcn > long.MaxValue - deltaLcn))
-                {
-                    return false;
-                }
-
-                currentLcn += deltaLcn;
-                extents.Add((currentLcn, clusterCount));
+                return false;
             }
 
+            currentLcn += deltaLcn;
+            allocatedClusters += clusterCount;
+            extents?.Add((currentLcn, clusterCount));
             index += offsetSize;
         }
 
@@ -426,8 +456,22 @@ public static class MftRecordParser
 
     private static long ReadUnsignedLittleEndian(ReadOnlySpan<byte> bytes)
     {
-        long value = 0;
-        for (var i = 0; i < bytes.Length; i++)
+        switch (bytes.Length)
+        {
+            case 1:
+                return bytes[0];
+            case 2:
+                return BinaryPrimitives.ReadUInt16LittleEndian(bytes);
+            case 3:
+                return (uint)bytes[2] << 16 | BinaryPrimitives.ReadUInt16LittleEndian(bytes);
+            case 4:
+                return BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+            case 8:
+                return BinaryPrimitives.ReadInt64LittleEndian(bytes);
+        }
+
+        long value = BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+        for (var i = 4; i < bytes.Length; i++)
         {
             value |= (long)bytes[i] << (8 * i);
         }
@@ -437,19 +481,7 @@ public static class MftRecordParser
 
     private static long ReadSignedLittleEndian(ReadOnlySpan<byte> bytes)
     {
-        long value = 0;
-        for (var i = 0; i < bytes.Length; i++)
-        {
-            value |= (long)bytes[i] << (8 * i);
-        }
-
-        // Sign-extend from the top bit of the most significant byte.
-        var signBit = 1L << (8 * bytes.Length - 1);
-        if (bytes.Length < sizeof(long) && (value & signBit) != 0)
-        {
-            value -= 1L << (8 * bytes.Length);
-        }
-
-        return value;
+        var shift = (sizeof(long) - bytes.Length) * 8;
+        return (ReadUnsignedLittleEndian(bytes) << shift) >> shift;
     }
 }

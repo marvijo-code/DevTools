@@ -23,7 +23,7 @@ public sealed partial class MainPage : Page
     private bool _isConfirmationDialogOpen;
     private bool _startupRenderRecorded;
 
-    public MainViewModel ViewModel { get; } = new();
+    public MainViewModel ViewModel { get; } = new((Application.Current as App)?.TakeStartupSettingsRead());
 
     public MainPage()
     {

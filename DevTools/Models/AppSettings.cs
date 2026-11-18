@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace DevTools.Models;
@@ -26,6 +27,10 @@ internal sealed class AppSettings
 
     /// <summary>Read by Start-DevTools.ps1: start DevTools with administrator rights.</summary>
     public bool RunAsAdministrator { get; set; } = true;
+
+    internal static AppSettings? Read(string path) => File.Exists(path)
+        ? JsonSerializer.Deserialize(File.ReadAllText(path), AppSettingsJsonContext.Default.AppSettings)
+        : null;
 }
 
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = true, WriteIndented = true)]

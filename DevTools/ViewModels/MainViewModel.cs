@@ -112,13 +112,17 @@ public sealed partial class MainViewModel : ObservableObject
     private string? _encryptedPersonalAccessToken;
     private int _diskUsageAnimationFrame;
 
-    public MainViewModel()
+    public MainViewModel() : this(null)
+    {
+    }
+
+    internal MainViewModel(Task<AppSettings?>? startupSettingsRead)
     {
         _worktreeAnalyzer = new WorktreeAnalyzer(_gitHubApiClient, _diskUsageAnalyzer);
         _cleanupAdvisor = new CleanupAdvisor(_diskUsageAnalyzer);
         Repositories = [];
         Runs = [];
-        LoadSettings();
+        LoadSettings(startupSettingsRead);
     }
 
     public ObservableCollection<RepositoryDefinition> Repositories { get; }
@@ -1676,18 +1680,15 @@ public sealed partial class MainViewModel : ObservableObject
         return -1;
     }
 
-    private void LoadSettings()
+    internal static AppSettings? ReadSettings() => AppSettings.Read(SettingsFilePath);
+
+    private void LoadSettings(Task<AppSettings?>? startupSettingsRead)
     {
         _isLoadingSettings = true;
 
         try
         {
-            if (!File.Exists(SettingsFilePath))
-            {
-                return;
-            }
-
-            var settings = JsonSerializer.Deserialize(File.ReadAllText(SettingsFilePath), AppSettingsJsonContext.Default.AppSettings);
+            var settings = startupSettingsRead is null ? ReadSettings() : startupSettingsRead.GetAwaiter().GetResult();
 
             if (settings is null)
             {

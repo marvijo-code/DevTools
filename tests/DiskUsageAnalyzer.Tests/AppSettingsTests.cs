@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using DevTools.Models;
 using Xunit;
@@ -6,8 +7,10 @@ namespace DiskUsageAnalyzer.Tests;
 
 public sealed class AppSettingsTests
 {
-    [Fact]
-    public void GeneratedMetadata_PreservesLegacyKeysAndLauncherSettings()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Read_PreservesLegacyKeysAndLauncherSettings(bool useLegacyEncoding)
     {
         const string existing = """
             {
@@ -19,7 +22,17 @@ public sealed class AppSettingsTests
             """;
 
         var metadata = AppSettingsJsonContext.Default.AppSettings;
-        var settings = Assert.IsType<AppSettings>(JsonSerializer.Deserialize(existing, metadata));
+        var file = Path.GetTempFileName();
+        AppSettings settings;
+        try
+        {
+            File.WriteAllText(file, existing, useLegacyEncoding ? Encoding.Unicode : Encoding.UTF8);
+            settings = Assert.IsType<AppSettings>(AppSettings.Read(file));
+        }
+        finally
+        {
+            File.Delete(file);
+        }
         Assert.True(settings.IsDiskUsageVisible);
         Assert.Equal(30, settings.RefreshIntervalSeconds);
         Assert.False(settings.RunAsAdministrator);

@@ -1,12 +1,16 @@
 using System;
 using System.Diagnostics;
 using DevTools.Infrastructure;
+using DevTools.Models;
+using DevTools.ViewModels;
 using Uno.Resizetizer;
 
 namespace DevTools;
 
 public partial class App : Application
 {
+    private Task<AppSettings?>? _startupSettingsRead;
+
     /// <summary>
     /// Initializes the singleton application object. This is the first line of authored code
     /// executed, and as such is the logical equivalent of main() or WinMain().
@@ -14,6 +18,8 @@ public partial class App : Application
     public App()
     {
         StartupTimestamp = Stopwatch.GetTimestamp();
+        // Start the read before XAML initialization. The page needs its saved tab before layout.
+        _startupSettingsRead = Task.Run(MainViewModel.ReadSettings);
         try { ShellIdentity.ConfigureProcess(); }
         catch (Exception ex) { AppLog.Error("Setting Windows app identity failed.", ex); }
         this.InitializeComponent();
@@ -21,6 +27,8 @@ public partial class App : Application
     }
 
     internal static long StartupTimestamp { get; private set; }
+
+    internal Task<AppSettings?>? TakeStartupSettingsRead() => Interlocked.Exchange(ref _startupSettingsRead, null);
 
     protected Window? MainWindow { get; private set; }
 

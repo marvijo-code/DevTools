@@ -527,26 +527,25 @@ internal static class MftTableLoader
                                     referencedClusters += (ulong)info.AllocatedClusters;
                                 }
 
-                                var allocated = recordAllocation is null
-                                    ? 0
-                                    : checked(info.AllocatedClusters * geometry.BytesPerCluster);
+                                long allocated = 0;
+                                if (recordAllocation is not null)
+                                {
+                                    allocated = checked(info.AllocatedClusters * geometry.BytesPerCluster);
+                                    recordAllocation[globalIndex] = allocated;
+                                }
+
                                 if (info.IsExtension)
                                 {
                                     flag |= MftRecordTable.FlagExtension;
                                     if (info.BaseRecordNumber < (ulong)recordCount && (info.DataSizesValid || allocated > 0))
                                     {
                                         localExtensions.Add(new ExtensionAllocation(
-                                            (int)info.BaseRecordNumber, info.BaseRecordSequence,
-                                            info.DataSizesValid, info.DataRealSize, info.DataAllocatedSize, allocated));
+                                            globalIndex, (int)info.BaseRecordNumber, info.BaseRecordSequence,
+                                            info.DataSizesValid, info.DataRealSize, info.DataAllocatedSize));
                                     }
                                 }
                                 else
                                 {
-                                    if (recordAllocation is not null)
-                                    {
-                                        recordAllocation[globalIndex] = allocated;
-                                    }
-
                                     if (info.DataSizesValid)
                                     {
                                         flag |= MftRecordTable.FlagHasSize;
@@ -710,7 +709,7 @@ internal static class MftTableLoader
 
         ValidateParentReferences(parent, flags, referenceSequences, cancellationToken);
 
-        // Merge extension-record sizes into their base records.
+        // Keep an extension's allocation on its own record until its base reference is verified.
         foreach (var extension in extensionSizes)
         {
             var baseNumber = extension.BaseNumber;
@@ -722,7 +721,8 @@ internal static class MftTableLoader
 
             if (recordAllocation is not null)
             {
-                recordAllocation[baseNumber] = checked(recordAllocation[baseNumber] + extension.RecordBytes);
+                recordAllocation[baseNumber] = checked(recordAllocation[baseNumber] + recordAllocation[extension.RecordNumber]);
+                recordAllocation[extension.RecordNumber] = 0;
             }
 
             if (extension.HasLogicalSize && (flags[baseNumber] & MftRecordTable.FlagHasSize) == 0)
@@ -793,7 +793,7 @@ internal static class MftTableLoader
     }
 
     private readonly record struct ExtensionAllocation(
-        int BaseNumber, ushort BaseSequence, bool HasLogicalSize, long LogicalBytes, long UnnamedDataAllocation, long RecordBytes);
+        int RecordNumber, int BaseNumber, ushort BaseSequence, bool HasLogicalSize, long LogicalBytes, long UnnamedDataAllocation);
 
     private readonly record struct Block(byte[] Buffer, int StartRecordIndex, int RecordCount);
 }

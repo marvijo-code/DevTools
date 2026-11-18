@@ -98,6 +98,58 @@ public sealed class MftExtentMapReaderTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LoadVolumeAsync_KeepsUnverifiedExtensionAllocationOutOfFolderTotals(bool suppliesBitmap)
+    {
+        var directory = Directory.CreateTempSubdirectory("devtools-mft-extensions-");
+        var path = Path.Combine(directory.FullName, "image.bin");
+        try
+        {
+            var disk = BuildDisk(nonResidentList: true);
+            AddExtension(99, (1UL << 48) | 25, 112); // Verified base record.
+            AddExtension(101, (2UL << 48) | 25, 113); // Reused base record.
+            AddExtension(103, (1UL << 48) | 99, 114); // Base outside the MFT.
+            AddExtension(105, (1UL << 48) | 31, 115); // Empty base record.
+            AddExtension(107, (1UL << 48) | 27, 116); // Base refers to an extension.
+
+            void AddExtension(int recordOffset, ulong baseReference, byte allocationCluster)
+            {
+                new MftRecordBuilder().BaseRecord(baseReference)
+                    .NamedData([0x11, 1, allocationCluster, 0]).Build().CopyTo(disk, recordOffset * ClusterSize);
+            }
+
+            await File.WriteAllBytesAsync(path, disk);
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var allocated = new byte[25];
+            NtfsVolumeBitmapTests.SetBits(allocated, 10, 3);
+            NtfsVolumeBitmapTests.SetBits(allocated, 30, 1);
+            NtfsVolumeBitmapTests.SetBits(allocated, 40, 4);
+            NtfsVolumeBitmapTests.SetBits(allocated, 55, 56);
+            NtfsVolumeBitmapTests.SetBits(allocated, 150, 1);
+            NtfsVolumeBitmapTests.SetBits(allocated, 120, 16);
+            NtfsVolumeBitmapTests.SetBits(allocated, 112, 5);
+
+            var table = await MftTableLoader.LoadVolumeAsync(handle, @"C:\", Geometry, null, Stopwatch.StartNew(),
+                CancellationToken.None, keepFileNames: false,
+                bitmapQuery: suppliesBitmap
+                    ? (start, output) => NtfsVolumeBitmapTests.WriteReply(start, Geometry.TotalClusters, allocated, output)
+                    : null);
+            var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "fixture", Stopwatch.StartNew());
+
+            Assert.Equal(4130, tree.TotalBytes);
+            Assert.Equal(17 * ClusterSize, tree.GetAllocatedBytes(tree.Find(@"C:\Folder")));
+            var bitmap = suppliesBitmap ? new NtfsBitmapAllocation(86 * ClusterSize, 86 * ClusterSize, 0) : (NtfsBitmapAllocation?)null;
+            Assert.Equal(new NtfsRecordAllocation(65 * ClusterSize, 4 * ClusterSize, bitmap), tree.NtfsAllocation);
+        }
+        finally
+        {
+            File.Delete(path);
+            directory.Delete();
+        }
+    }
+
     private static byte[] BuildDisk(bool nonResidentList, ushort firstSequence = 7, ushort firstRecordNumber = 1,
         bool includeOverlappingRun = false)
     {

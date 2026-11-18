@@ -48,14 +48,11 @@ internal static class DiskCapacityInventory
             }
 
             using var handle = OpenMetadata(device);
-            if (Query(handle, GetVolumeExtents, ref buffer) >= 32 &&
-                BinaryPrimitives.ReadUInt32LittleEndian(buffer) == 1)
+            var volumeExtents = ReadVolumeExtents(handle, ref buffer);
+            if (volumeExtents.Length == 1)
             {
-                // VOLUME_DISK_EXTENTS contains an aligned array of DISK_EXTENT records.
-                var disk = BinaryPrimitives.ReadInt32LittleEndian(buffer.AsSpan(8));
-                var start = BinaryPrimitives.ReadInt64LittleEndian(buffer.AsSpan(16));
-                var length = BinaryPrimitives.ReadInt64LittleEndian(buffer.AsSpan(24));
-                extents.Add(new VolumeDiskExtent(disk, new DiskRange(start, length), space.TotalBytes));
+                var (disk, range) = volumeExtents[0];
+                extents.Add(new VolumeDiskExtent(disk, range, space.TotalBytes));
             }
         }
 
@@ -63,7 +60,7 @@ internal static class DiskCapacityInventory
         foreach (var disk in ReadDiskNumbers())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            using var handle = OpenMetadata(@"\\.\" + PhysicalDrivePrefix + disk.ToString(CultureInfo.InvariantCulture));
+            using var handle = OpenMetadata(PhysicalDiskPath(disk));
             if (Query(handle, GetDriveGeometry, ref buffer) < 32 ||
                 BinaryPrimitives.ReadInt32LittleEndian(buffer.AsSpan(8)) != FixedMedia)
             {
@@ -84,6 +81,47 @@ internal static class DiskCapacityInventory
         }
 
         return disks;
+    }
+
+    internal static (int DiskNumber, DiskRange Range)[] ReadVolumeExtents(SafeFileHandle volume, ref byte[] buffer)
+    {
+        var bytes = Query(volume, GetVolumeExtents, ref buffer);
+        return ParseVolumeExtents(buffer.AsSpan(0, bytes));
+    }
+
+    internal static (int DiskNumber, DiskRange Range)[] ParseVolumeExtents(ReadOnlySpan<byte> reply)
+    {
+        // VOLUME_DISK_EXTENTS has a four-byte count followed by an aligned array of DISK_EXTENT records.
+        const int headerBytes = 8;
+        const int extentBytes = 24;
+        if (reply.Length < headerBytes)
+        {
+            return [];
+        }
+
+        var count = BinaryPrimitives.ReadInt32LittleEndian(reply);
+        if (count < 1 || count > (reply.Length - headerBytes) / extentBytes)
+        {
+            return [];
+        }
+
+        var extents = new (int DiskNumber, DiskRange Range)[count];
+        for (var i = 0; i < count; i++)
+        {
+            var extent = reply[(headerBytes + i * extentBytes)..];
+            var disk = BinaryPrimitives.ReadInt32LittleEndian(extent);
+            var range = new DiskRange(
+                BinaryPrimitives.ReadInt64LittleEndian(extent[8..]),
+                BinaryPrimitives.ReadInt64LittleEndian(extent[16..]));
+            if (disk < 0 || !range.FitsInside(long.MaxValue))
+            {
+                return [];
+            }
+
+            extents[i] = (disk, range);
+        }
+
+        return extents;
     }
 
     internal static HashSet<DiskRange>? ReadPartitionRanges(ReadOnlySpan<byte> layout, long total)
@@ -214,8 +252,11 @@ internal static class DiskCapacityInventory
         }
     }
 
-    // Desired access zero permits metadata queries without opening the disk or volume for data access.
-    private static SafeFileHandle OpenMetadata(string path) => CreateFile(path, 0, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+    internal static string PhysicalDiskPath(int number) =>
+        @"\\.\" + PhysicalDrivePrefix + number.ToString(CultureInfo.InvariantCulture);
+
+    // Desired access zero permits disk and volume metadata queries.
+    internal static SafeFileHandle OpenMetadata(string path) => CreateFile(path, 0, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
 
     [DllImport("kernel32.dll", EntryPoint = "QueryDosDeviceW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint QueryDosDevice(string? device, [Out] char[] targets, uint targetChars);

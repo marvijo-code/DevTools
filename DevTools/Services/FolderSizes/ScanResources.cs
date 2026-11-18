@@ -69,12 +69,42 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
             return null;
         }
 
-        using var volume = OpenVolume(path, 0, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
-        if (volume.IsInvalid)
+        using var volume = DiskCapacityInventory.OpenMetadata(path);
+        return volume.IsInvalid ? null : ReadDeviceSeekPenalty(volume) ?? ReadBackingDiskSeekPenalty(volume);
+    }
+
+    private static bool? ReadBackingDiskSeekPenalty(SafeFileHandle volume)
+    {
+        var buffer = new byte[4096];
+        var disks = DiskCapacityInventory.ReadVolumeExtents(volume, ref buffer).Select(extent => extent.DiskNumber);
+        return ResolveBackingDiskSeekPenalty(disks, static number =>
         {
-            return null;
+            using var disk = DiskCapacityInventory.OpenMetadata(DiskCapacityInventory.PhysicalDiskPath(number));
+            return disk.IsInvalid ? null : ReadDeviceSeekPenalty(disk);
+        });
+    }
+
+    internal static bool? ResolveBackingDiskSeekPenalty(IEnumerable<int> diskNumbers, Func<int, bool?> query)
+    {
+        var found = false;
+        var unknown = false;
+        foreach (var number in diskNumbers.Distinct())
+        {
+            var result = query(number);
+            if (result is true)
+            {
+                return true;
+            }
+
+            found = true;
+            unknown |= result is null;
         }
 
+        return found && !unknown ? false : null;
+    }
+
+    private static bool? ReadDeviceSeekPenalty(SafeFileHandle volume)
+    {
         var query = new StoragePropertyQuery { PropertyId = DeviceSeekPenaltyProperty };
         if (!DeviceIoControl(volume, StorageQueryProperty, in query, (uint)Marshal.SizeOf<StoragePropertyQuery>(),
                 out var result, (uint)Marshal.SizeOf<SeekPenaltyDescriptor>(), out var size, IntPtr.Zero) || size < 9)
@@ -85,9 +115,6 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
         return result.IncursSeekPenalty != 0;
     }
 
-    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern SafeFileHandle OpenVolume(
-        string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
 
     [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

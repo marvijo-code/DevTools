@@ -164,6 +164,25 @@ public sealed class VolumeSpaceTests
     }
 
     [Fact]
+    public void ParseVolumeExtents_ReportsAllDisksAndRejectsIncompleteReplies()
+    {
+        var reply = new byte[8 + 2 * 24];
+        BinaryPrimitives.WriteInt32LittleEndian(reply, 2);
+        BinaryPrimitives.WriteInt32LittleEndian(reply.AsSpan(8), 3);
+        BinaryPrimitives.WriteInt64LittleEndian(reply.AsSpan(16), 10);
+        BinaryPrimitives.WriteInt64LittleEndian(reply.AsSpan(24), 20);
+        BinaryPrimitives.WriteInt32LittleEndian(reply.AsSpan(32), 7);
+        BinaryPrimitives.WriteInt64LittleEndian(reply.AsSpan(40), 100);
+        BinaryPrimitives.WriteInt64LittleEndian(reply.AsSpan(48), 200);
+
+        Assert.Equal([(3, new DiskRange(10, 20)), (7, new DiskRange(100, 200))],
+            DiskCapacityInventory.ParseVolumeExtents(reply));
+        Assert.Empty(DiskCapacityInventory.ParseVolumeExtents(reply.AsSpan(0, reply.Length - 1)));
+        BinaryPrimitives.WriteInt64LittleEndian(reply.AsSpan(48), long.MaxValue);
+        Assert.Empty(DiskCapacityInventory.ParseVolumeExtents(reply));
+    }
+
+    [Fact]
     public void ReadPartitionRanges_RejectsTruncatedAndOutOfDiskPartitions()
     {
         var layout = new byte[48 + 2 * 144];

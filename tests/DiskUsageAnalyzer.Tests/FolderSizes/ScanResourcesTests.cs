@@ -21,6 +21,28 @@ public sealed class ScanResourcesTests
     }
 
     [Fact]
+    public void SeekPenaltyFallback_UsesEveryDistinctBackingDiskUntilOneReportsSeeks()
+    {
+        var queried = new List<int>();
+        bool? Read(int disk)
+        {
+            queried.Add(disk);
+            return disk switch
+            {
+                1 or 2 => false,
+                3 => true,
+                _ => null
+            };
+        }
+
+        Assert.Null(ScanResources.ResolveBackingDiskSeekPenalty([], Read));
+        Assert.False(ScanResources.ResolveBackingDiskSeekPenalty([1, 1, 2], Read));
+        Assert.Equal([1, 2], queried);
+        Assert.Null(ScanResources.ResolveBackingDiskSeekPenalty([1, 4], Read));
+        Assert.True(ScanResources.ResolveBackingDiskSeekPenalty([4, 2, 3], Read));
+    }
+
+    [Fact]
     public void MftPlan_UsesSmallerBuffersWithLimitedMemory()
     {
         var high = new ScanResources(24, 4096 * MiB).MftPlan(1_000_000, includeFileNames: false);

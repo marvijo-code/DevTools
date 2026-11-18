@@ -310,8 +310,15 @@ public sealed partial class MainPage : Page
 
     private async void OpenLogs_Click(object sender, RoutedEventArgs e)
     {
-        AppLog.Info($"Open Logs clicked. Folder={AppLog.LogDirectory}");
-        await Launcher.LaunchFolderPathAsync(AppLog.LogDirectory);
+        var directory = await AppLog.GetLogDirectoryAsync();
+        if (directory is null)
+        {
+            ViewModel.StatusMessage = "No writable log folder was found.";
+            return;
+        }
+
+        AppLog.Info($"Open Logs clicked. Folder={directory}");
+        await Launcher.LaunchFolderPathAsync(directory);
     }
 
     private void NavigateToResources_Click(object sender, RoutedEventArgs e)

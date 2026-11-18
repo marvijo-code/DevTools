@@ -94,6 +94,92 @@ public sealed class DiskUsageExpansionTests
     }
 
     [Fact]
+    public async Task Refresh_ReusesMountedOverlaysUntilTheVolumeTreeIsPublished()
+    {
+        var analyzer = new DevTools.Services.DiskUsageAnalyzer();
+        var fixture = Directory.CreateTempSubdirectory("devtools-overlay-refresh-");
+        var older = fixture.CreateSubdirectory("older");
+        var current = fixture.CreateSubdirectory("current");
+        var olderFile = Path.Combine(older.FullName, "old.bin");
+        var currentFile = Path.Combine(current.FullName, "new.bin");
+        try
+        {
+            await File.WriteAllBytesAsync(olderFile, new byte[512]);
+            await File.WriteAllBytesAsync(currentFile, new byte[1024]);
+            var drive = new DriveDescriptor(fixture.Root.FullName, "Fixture", "NTFS", null)
+            {
+                VolumeName = @"\\?\Volume{b9b6d0b5-6ffc-4088-b889-b293f453d90b}\"
+            };
+            var initial = analyzer.ReplaceVolumeInventory([drive], []);
+            Assert.True(await analyzer.SizeFolderNowAsync(older.FullName, CancellationToken.None));
+            Assert.True(analyzer.TryFindNode(older.FullName, out var oldTree, out _));
+
+            var refresh = analyzer.ReplaceVolumeInventory([drive], []);
+            Assert.True(analyzer.TryFindNode(older.FullName, out var pendingTree, out _));
+            Assert.Same(oldTree, pendingTree);
+            analyzer.PublishVolumeTree(initial, drive.RootPath, oldTree);
+            Assert.Empty(analyzer.Trees);
+
+            Assert.True(await analyzer.SizeFolderNowAsync(current.FullName, CancellationToken.None));
+            Assert.True(analyzer.TryFindNode(current.FullName, out var newTree, out _));
+            var fullTree = new FolderTreeBuilder(drive.RootPath).Build("Fixture", TimeSpan.Zero);
+            analyzer.PublishVolumeTree(refresh, drive.RootPath, fullTree);
+            Assert.False(analyzer.TryFindNode(older.FullName, out _, out _));
+            Assert.True(analyzer.TryFindNode(current.FullName, out var keptTree, out _));
+            Assert.Same(newTree, keptTree);
+
+            var other = drive with { VolumeName = @"\\?\Volume{c403be59-3402-4f7f-b5fa-0a63e7ba88ee}\" };
+            analyzer.ReplaceVolumeInventory([other], []);
+            Assert.Empty(analyzer.Trees);
+            Assert.False(analyzer.TryFindNode(current.FullName, out _, out _));
+        }
+        finally
+        {
+            File.Delete(currentFile);
+            File.Delete(olderFile);
+            current.Delete();
+            older.Delete();
+            fixture.Delete();
+        }
+    }
+
+    [Fact]
+    public async Task Refresh_PrefersACurrentAncestorScanOverAnOlderExactMatch()
+    {
+        var analyzer = new DevTools.Services.DiskUsageAnalyzer();
+        var fixture = Directory.CreateTempSubdirectory("devtools-overlay-ancestor-");
+        var child = fixture.CreateSubdirectory("child");
+        var file = Path.Combine(child.FullName, "data.bin");
+        try
+        {
+            var drive = new DriveDescriptor(fixture.Root.FullName, "Fixture", "NTFS", null)
+            {
+                VolumeName = @"\\?\Volume{b9b6d0b5-6ffc-4088-b889-b293f453d90b}\"
+            };
+            analyzer.ReplaceVolumeInventory([drive], []);
+            await File.WriteAllBytesAsync(file, new byte[512]);
+            Assert.True(await analyzer.SizeFolderNowAsync(child.FullName, CancellationToken.None));
+            Assert.True(analyzer.TryFindNode(child.FullName, out var olderTree, out _));
+
+            analyzer.ReplaceVolumeInventory([drive], []);
+            await File.WriteAllBytesAsync(file, new byte[2048]);
+            Assert.True(await analyzer.SizeFolderNowAsync(fixture.FullName, CancellationToken.None));
+
+            var alternatePath = child.FullName.Replace(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            Assert.True(analyzer.TryFindNode(alternatePath, out var currentTree, out var node));
+            Assert.NotSame(olderTree, currentTree);
+            Assert.Equal(2048, currentTree!.GetTotalBytes(node));
+            Assert.False(analyzer.TryFindNode(child.FullName + "-other", out _, out _));
+        }
+        finally
+        {
+            File.Delete(file);
+            child.Delete();
+            fixture.Delete();
+        }
+    }
+
+    [Fact]
     public void SetChildren_MarksChildrenAsLoadedSoExpansionIsNotRepeated()
     {
         var entry = DiskUsageEntry.CreateCompleted(@"C:\Users", true, 100, "100 B");

@@ -27,8 +27,11 @@ public sealed class DiskUsageAnalyzer
     private readonly DriveUsageService _driveUsage = new();
     private readonly object _treesLock = new();
     private readonly Dictionary<string, FolderTree> _trees = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, (FolderTree Tree, bool AllocationRequested)> _overlayTrees = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (FolderTree Tree, bool AllocationRequested, long InventoryVersion)> _overlayTrees =
+        new(StringComparer.Ordinal);
+    private Dictionary<string, string?> _volumeNames = new(StringComparer.OrdinalIgnoreCase);
     private VolumeMountAlias[] _mountAliases = [];
+    private long _inventoryVersion;
 
     /// <summary>The folder trees from the last scan, system drive first.</summary>
     public IReadOnlyList<FolderTree> Trees
@@ -59,14 +62,7 @@ public sealed class DiskUsageAnalyzer
         var drives = DriveUsageService.GetLocalVolumes();
         var browseRoots = drives.Select(drive => drive.RootPath).ToArray();
         var mountAliases = WindowsVolumePaths.GetMountAliases(drives, cancellationToken);
-        lock (_treesLock)
-        {
-            _mountAliases = mountAliases;
-            foreach (var root in _trees.Keys.Where(root => !browseRoots.Contains(root, StringComparer.OrdinalIgnoreCase)).ToArray())
-            {
-                _trees.Remove(root);
-            }
-        }
+        var inventoryVersion = ReplaceVolumeInventory(drives, mountAliases);
 
         var headline = BuildHeadline(drives, capturedAt);
         var systemRoot = FolderTree.NormalizeRoot(Environment.SystemDirectory);
@@ -169,17 +165,7 @@ public sealed class DiskUsageAnalyzer
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var drive = drives[sectionIndex];
-                lock (_treesLock)
-                {
-                    if (result.Tree is { } tree)
-                    {
-                        _trees[drive.RootPath] = tree;
-                    }
-                    else
-                    {
-                        _trees.Remove(drive.RootPath);
-                    }
-                }
+                PublishVolumeTree(inventoryVersion, drive.RootPath, result.Tree);
 
                 var driveSection = BuildDriveSection(result);
                 var derived = string.Equals(drive.RootPath, systemRoot, StringComparison.OrdinalIgnoreCase)
@@ -238,6 +224,62 @@ public sealed class DiskUsageAnalyzer
         var analysis = BuildAnalysis(results.Values);
         progress?.Report(new DiskUsageProgress(headline, $"Last disk refresh: {capturedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}", analysis, sections.ToList(), true));
         return new DiskUsageSnapshot(capturedAt, headline, analysis, sections) { BrowseRoots = browseRoots };
+    }
+
+    internal long ReplaceVolumeInventory(IReadOnlyList<DriveDescriptor> drives, VolumeMountAlias[] mountAliases)
+    {
+        var volumeNames = drives.ToDictionary(drive => drive.RootPath, drive => drive.VolumeName, StringComparer.OrdinalIgnoreCase);
+        lock (_treesLock)
+        {
+            bool StaysMounted(string root) =>
+                _volumeNames.TryGetValue(root, out var previousName) && previousName is not null &&
+                volumeNames.TryGetValue(root, out var currentName) &&
+                previousName.Equals(currentName, StringComparison.OrdinalIgnoreCase);
+
+            foreach (var root in _trees.Keys.Where(root => !StaysMounted(root)).ToArray())
+            {
+                _trees.Remove(root);
+            }
+
+            foreach (var path in _overlayTrees.Where(item => !StaysMounted(item.Value.Tree.RootPath)).Select(item => item.Key).ToArray())
+            {
+                _overlayTrees.Remove(path);
+            }
+
+            _volumeNames = volumeNames;
+            _mountAliases = mountAliases;
+            return ++_inventoryVersion;
+        }
+    }
+
+    internal void PublishVolumeTree(long inventoryVersion, string root, FolderTree? tree)
+    {
+        lock (_treesLock)
+        {
+            if (inventoryVersion != _inventoryVersion)
+            {
+                return;
+            }
+
+            if (tree is null)
+            {
+                _trees.Remove(root);
+            }
+            else
+            {
+                _trees[root] = tree;
+            }
+
+            // Old priority scans can fill gaps while a refresh is pending. The new volume
+            // snapshot supersedes them, while clicks during this refresh can still supply allocation.
+            foreach (var path in _overlayTrees
+                .Where(item => item.Value.InventoryVersion < inventoryVersion &&
+                    item.Value.Tree.RootPath.Equals(root, StringComparison.OrdinalIgnoreCase))
+                .Select(item => item.Key).ToArray())
+            {
+                _overlayTrees.Remove(path);
+            }
+        }
     }
 
     private static int PlanVolumeParallelism(IReadOnlyList<DriveDescriptor> drives, bool[] rawMftVolumes,
@@ -468,36 +510,39 @@ public sealed class DiskUsageAnalyzer
 
     private bool TryFindOverlayNode(string path, bool requireAllocation, out FolderTree? tree, out int node)
     {
-        var trimmed = Path.TrimEndingDirectorySeparator(path.Trim().Replace(
-            Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar));
-        foreach (var (folder, (overlay, allocationRequested)) in _overlayTrees)
+        tree = null;
+        node = -1;
+        if (_overlayTrees.Count == 0)
         {
-            if (requireAllocation && !allocationRequested)
+            return false;
+        }
+
+        var bestVersion = long.MinValue;
+        var normalized = path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        var lookup = _overlayTrees.GetAlternateLookup<ReadOnlySpan<char>>();
+        for (var candidate = Path.TrimEndingDirectorySeparator(normalized.AsSpan().Trim()); !candidate.IsEmpty;
+             candidate = Path.GetDirectoryName(candidate))
+        {
+            if (!lookup.TryGetValue(candidate, out var entry) || entry.InventoryVersion <= bestVersion ||
+                (requireAllocation && !entry.AllocationRequested))
             {
                 continue;
             }
 
-            var underOverlay = trimmed.Equals(folder, StringComparison.Ordinal)
-                || (trimmed.Length > folder.Length
-                    && trimmed.StartsWith(folder, StringComparison.Ordinal)
-                    && (Path.EndsInDirectorySeparator(folder) || trimmed[folder.Length] == Path.DirectorySeparatorChar));
-            if (!underOverlay)
+            var overlayNode = entry.Tree.Find(path);
+            if (overlayNode >= 0 && (!requireAllocation || entry.Tree.GetAllocatedBytes(overlayNode).HasValue))
             {
-                continue;
-            }
-
-            var overlayNode = overlay.Find(path);
-            if (overlayNode >= 0 && (!requireAllocation || overlay.GetAllocatedBytes(overlayNode).HasValue))
-            {
-                tree = overlay;
+                tree = entry.Tree;
                 node = overlayNode;
-                return true;
+                bestVersion = entry.InventoryVersion;
+                if (bestVersion == _inventoryVersion)
+                {
+                    break;
+                }
             }
         }
 
-        tree = null;
-        node = -1;
-        return false;
+        return tree is not null;
     }
 
     private string ResolveWalkPath(string path)
@@ -552,11 +597,23 @@ public sealed class DiskUsageAnalyzer
             return false;
         }
 
+        long inventoryVersion;
+        lock (_treesLock)
+        {
+            inventoryVersion = _inventoryVersion;
+        }
+
         var scanPath = ResolveWalkPath(path);
         var overlayPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(scanPath));
         lock (_treesLock)
         {
-            if (_overlayTrees.TryGetValue(overlayPath, out var cached) && cached.AllocationRequested)
+            if (inventoryVersion != _inventoryVersion)
+            {
+                return false;
+            }
+
+            if (_overlayTrees.TryGetValue(overlayPath, out var cached) && cached.InventoryVersion == inventoryVersion &&
+                cached.AllocationRequested)
             {
                 return true;
             }
@@ -566,9 +623,15 @@ public sealed class DiskUsageAnalyzer
         lock (_treesLock)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!_overlayTrees.TryGetValue(overlayPath, out var cached) || !cached.AllocationRequested)
+            if (inventoryVersion != _inventoryVersion)
             {
-                _overlayTrees[overlayPath] = (tree, measureAllocation);
+                return false;
+            }
+
+            if (!_overlayTrees.TryGetValue(overlayPath, out var cached) || cached.InventoryVersion != inventoryVersion ||
+                !cached.AllocationRequested)
+            {
+                _overlayTrees[overlayPath] = (tree, measureAllocation, inventoryVersion);
             }
         }
 

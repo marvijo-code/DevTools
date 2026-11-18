@@ -53,6 +53,35 @@ public sealed class FolderTreeTests
         Assert.Equal(@"G:\Photos\2025", tree.GetPath(tree.GetChildren(tree.Find(@"G:\Photos"))[0]));
     }
 
+    [Fact]
+    public void Builder_AcceptsAnExplicitTotalAfterAddingFolders()
+    {
+        var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);
+        var measured = builder.AddFolder(@"C:\measured");
+        var child = builder.AddChildFolder(measured, "child");
+        builder.AddFilesToFolder(child, 80, 1, 4096);
+
+        builder.AddFolder(@"C:\measured", 100);
+        var other = builder.AddFolder(@"C:\other");
+        var listedFolders = Enumerable.Range(0, 12).Select(index => $"listed-{index}").ToList();
+        var firstListed = builder.AppendEnumeratedChildren(other, listedFolders);
+        builder.AddFilesToFolder(firstListed + 4, 10, 1, 4096);
+        var tree = builder.Build("fixture", TimeSpan.Zero);
+
+        Assert.Equal(80, tree.GetTotalBytes(child));
+        Assert.Equal(100, tree.GetTotalBytes(measured));
+        Assert.Equal(firstListed + 4, tree.Find(@"C:\other\listed-4"));
+        Assert.Equal(10, tree.GetTotalBytes(other));
+        Assert.Equal(110, tree.TotalBytes);
+        Assert.Equal(2, tree.TotalFiles);
+        Assert.Equal(8192, tree.GetAllocatedBytes(0));
+
+        builder.AddFolder(@"C:\", 0);
+        var withRootOverride = builder.Build("fixture", TimeSpan.Zero);
+        Assert.Equal(0, withRootOverride.TotalBytes);
+        Assert.Equal(8192, withRootOverride.GetAllocatedBytes(0));
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(2)]

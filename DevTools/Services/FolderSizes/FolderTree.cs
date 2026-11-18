@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using DevTools.Services.BiggestFiles.Ntfs;
 
 namespace DevTools.Services.FolderSizes;
@@ -448,8 +449,8 @@ public sealed class FolderTreeBuilder
     private readonly List<string> _names = [string.Empty];
     private readonly List<long> _ownBytes = [0];
     private readonly List<long> _ownFiles = [0];
-    private readonly List<long> _knownTotal = [-1];
     private readonly List<long>? _ownAllocatedBytes;
+    private List<long>? _knownTotals;
     private List<int>? _incompleteDirectories;
     private HashSet<int>? _incompleteAllocationDirectories;
     private readonly Dictionary<(int Parent, string Name), int> _lookup = new(new NodeKeyComparer());
@@ -504,7 +505,8 @@ public sealed class FolderTreeBuilder
         var node = EnsureFolder(fullPath);
         if (node >= 0 && knownTotalBytes >= 0)
         {
-            _knownTotal[node] = knownTotalBytes;
+            _knownTotals ??= Enumerable.Repeat(-1L, _parent.Count).ToList();
+            _knownTotals[node] = knownTotalBytes;
         }
 
         return node;
@@ -520,12 +522,39 @@ public sealed class FolderTreeBuilder
     internal int AppendEnumeratedChildren(int parentNode, List<string> names)
     {
         var first = _parent.Count;
-        foreach (var name in names)
+        if (names.Count < 8)
         {
-            AppendChild(parentNode, name);
+            foreach (var name in names)
+            {
+                AppendChild(parentNode, name);
+            }
+
+            return first;
+        }
+
+        var count = checked(first + names.Count);
+        ExtendColumn(_parent, count, parentNode);
+        _names.AddRange(names);
+        ExtendColumn(_ownBytes, count, 0L);
+        ExtendColumn(_ownFiles, count, 0L);
+        if (_knownTotals is not null)
+        {
+            ExtendColumn(_knownTotals, count, -1L);
+        }
+
+        if (_ownAllocatedBytes is not null)
+        {
+            ExtendColumn(_ownAllocatedBytes, count, 0L);
         }
 
         return first;
+    }
+
+    private static void ExtendColumn<T>(List<T> column, int count, T value)
+    {
+        var first = column.Count;
+        CollectionsMarshal.SetCount(column, count);
+        CollectionsMarshal.AsSpan(column)[first..].Fill(value);
     }
 
     public void AddFilesToFolder(int node, long bytes, long files, long allocatedBytes = 0)
@@ -557,27 +586,41 @@ public sealed class FolderTreeBuilder
         var totals = _ownBytes.ToArray();
         var files = _ownFiles.ToArray();
         var allocations = _ownAllocatedBytes?.ToArray();
+        var knownTotals = _knownTotals;
 
         // Children always get a higher index than their parent, so one reverse pass rolls
         // every folder up into its parent.
         for (var i = count - 1; i > 0; i--)
         {
-            if (_knownTotal[i] >= 0)
+            var parentNode = parent[i];
+            if (knownTotals is null)
             {
-                totals[i] = _knownTotal[i];
+                totals[parentNode] += totals[i];
+            }
+            else
+            {
+                var knownSize = knownTotals[i];
+                if (knownSize >= 0)
+                {
+                    totals[i] = knownSize;
+                }
+
+                if (knownTotals[parentNode] < 0)
+                {
+                    totals[parentNode] += totals[i];
+                }
             }
 
-            totals[parent[i]] += _knownTotal[parent[i]] >= 0 ? 0 : totals[i];
-            files[parent[i]] += files[i];
+            files[parentNode] += files[i];
             if (allocations is not null)
             {
-                allocations[parent[i]] += allocations[i];
+                allocations[parentNode] += allocations[i];
             }
         }
 
-        if (_knownTotal[0] >= 0)
+        if (knownTotals is not null && knownTotals[0] >= 0)
         {
-            totals[0] = _knownTotal[0];
+            totals[0] = knownTotals[0];
         }
 
         return new FolderTree(_root, parent, _names.ToArray(), totals, files, engineName, elapsed, allocations,
@@ -664,7 +707,7 @@ public sealed class FolderTreeBuilder
         _names.Add(name);
         _ownBytes.Add(0);
         _ownFiles.Add(0);
-        _knownTotal.Add(-1);
+        _knownTotals?.Add(-1);
         _ownAllocatedBytes?.Add(0);
         return node;
     }

@@ -80,7 +80,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
 
         var nativePath = path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path : @"\\?\" + path;
         // Open the directory itself so a replacement junction cannot redirect this listing.
-        using var handle = OpenDirectory(nativePath, 1, 7, IntPtr.Zero, 3,
+        using var handle = OpenPath(nativePath, 1, 7, IntPtr.Zero, 3,
             BackupSemantics | OpenReparsePoint | OpenNoRecall, IntPtr.Zero);
         if (handle.IsInvalid)
         {
@@ -88,7 +88,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
             {
                 WaitForScan(cancellationToken);
                 // Windows can allow metadata access to the directory itself when it denies listing its children.
-                using var metadata = OpenDirectory(nativePath, 0, 7, IntPtr.Zero, 3,
+                using var metadata = OpenPath(nativePath, 0, 7, IntPtr.Zero, 3,
                     BackupSemantics | OpenReparsePoint | OpenNoRecall, IntPtr.Zero);
                 if (!metadata.IsInvalid && TryReadOwnDirectoryAllocation(metadata, out var directoryBytes, out var isMetadataDirectory) &&
                     isMetadataDirectory)
@@ -276,6 +276,36 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
         return directoryBytes + ReadNamedStreamAllocation(directory, ref incompleteAllocation);
     }
 
+    // Used when the filesystem has no hard links or named streams and directory batches are unavailable.
+    internal bool TryReadPathAllocation(string path, long? expectedFileLength, CancellationToken cancellationToken,
+        out long allocatedBytes)
+    {
+        allocatedBytes = 0;
+        WaitForScan(cancellationToken);
+        var nativePath = path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path : @"\\?\" + path;
+        using var handle = OpenPath(nativePath, 0, 7, IntPtr.Zero, 3,
+            BackupSemantics | OpenReparsePoint | OpenNoRecall, IntPtr.Zero);
+        var expectDirectory = !expectedFileLength.HasValue;
+        if (handle.IsInvalid ||
+            !GetFileInformationByHandleEx(handle, FileStandardInfo, _streamBuffer, StandardInfoBytes) ||
+            _streamBuffer[StandardInfoDeletePendingOffset] != 0 ||
+            (_streamBuffer[StandardInfoDirectoryOffset] != 0) != expectDirectory)
+        {
+            return false;
+        }
+
+        var reported = BinaryPrimitives.ReadInt64LittleEndian(_streamBuffer);
+        if (reported < 0 || (expectedFileLength is long length &&
+            (reported < length || BinaryPrimitives.ReadInt64LittleEndian(_streamBuffer.AsSpan(sizeof(long))) != length ||
+             BinaryPrimitives.ReadUInt32LittleEndian(_streamBuffer.AsSpan(StandardInfoLinkCountOffset)) != 1)))
+        {
+            return false;
+        }
+
+        allocatedBytes = reported;
+        return true;
+    }
+
     private bool TryReadOwnDirectoryAllocation(SafeFileHandle directory, out long allocatedBytes, out bool isDirectory)
     {
         allocatedBytes = 0;
@@ -441,7 +471,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
         SafeFileHandle volumeHint, in FileIdDescriptor id, uint access, uint share, IntPtr security, uint flags);
 
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern SafeFileHandle OpenDirectory(
+    private static extern SafeFileHandle OpenPath(
         string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
 
     [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]

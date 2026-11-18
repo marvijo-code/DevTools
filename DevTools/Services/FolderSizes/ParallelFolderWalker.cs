@@ -43,6 +43,7 @@ public sealed class ParallelFolderWalker
     private static FolderTree Scan(string rootPath, IProgress<FolderScanProgress>? progress,
         CancellationToken cancellationToken, int? workerCount, bool prioritize, int volumeShare, bool measureAllocation)
     {
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
         var fullRoot = Path.GetFullPath(rootPath);
         var driveRoot = FolderTree.NormalizeRoot(fullRoot);
         var stopwatch = Stopwatch.StartNew();
@@ -55,7 +56,8 @@ public sealed class ParallelFolderWalker
         var allocationIndex = volumeRoot is not null && string.Equals(fileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)
             ? DirectoryAllocationIndex.Create(volumeRoot, resources, fullVolume, volumeShare)
             : null;
-        var trackAllocation = allocationIndex is not null || DirectoryAllocationReader.SupportsAllocationWithoutFileIds(fileSystem);
+        var trackAllocationWithoutFileIds = DirectoryAllocationReader.SupportsAllocationWithoutFileIds(fileSystem);
+        var trackAllocation = allocationIndex is not null || trackAllocationWithoutFileIds;
         var allocationUnitBytes = allocationIndex is null ? 0 : WindowsVolumePaths.GetAllocationUnitBytes(volumeRoot!);
         var builder = new FolderTreeBuilder(driveRoot, trackAllocation);
         var builderLock = new object();
@@ -138,6 +140,7 @@ public sealed class ParallelFolderWalker
         {
             try
             {
+                using var workerErrorMode = WindowsVolumePaths.SuppressCriticalErrors();
                 var directoryReader = OperatingSystem.IsWindows()
                     ? new DirectoryAllocationReader(allocationIndex, allocationUnitBytes, workers, prioritize,
                         measureAllocation: trackAllocation)
@@ -180,41 +183,19 @@ public sealed class ParallelFolderWalker
                         !directoryReader.TryRead(path, node, subfolders, scheduleStreams, scanToken,
                             out bytes, out allocatedBytes, out files, out incompleteAllocation))
                     {
-                        // Retry the listing with the managed enumerator when the native read cannot finish.
-                        incompleteAllocation = trackAllocation;
-                        bytes = 0;
-                        files = 0;
-                        subfolders.Clear();
-                        try
+                        var pathAllocation = trackAllocationWithoutFileIds ? directoryReader : null;
+                        var fallback = ReadManagedDirectory(path, subfolders, options, pathAllocation, scanToken);
+                        (bytes, files, incomplete) = (fallback.LogicalBytes, fallback.Files, fallback.Incomplete);
+                        if (pathAllocation is not null)
                         {
-                            // A queued directory can be replaced by a reparse point after its parent was read.
-                            var attributes = File.GetAttributes(path);
-                            var isReparsePoint = (attributes & System.IO.FileAttributes.ReparsePoint) != 0;
-                            // A name string is only needed for folders; files just add their length.
-                            IEnumerable<(string? Name, bool IsDirectory, long Length, System.IO.FileAttributes Attributes)> entries = isReparsePoint ? [] : new FileSystemEnumerable<(string? Name, bool IsDirectory, long Length, System.IO.FileAttributes Attributes)>(
-                                path,
-                                (ref FileSystemEntry entry) => (entry.IsDirectory ? entry.FileName.ToString() : null, entry.IsDirectory, entry.Length, entry.Attributes),
-                                options);
-                            foreach (var entry in entries)
-                            {
-                                scanToken.ThrowIfCancellationRequested();
-                                if (entry.IsDirectory)
-                                {
-                                    if ((entry.Attributes & System.IO.FileAttributes.ReparsePoint) == 0)
-                                    {
-                                        subfolders.Add(entry.Name!);
-                                    }
-                                }
-                                else
-                                {
-                                    bytes += entry.Length;
-                                    files++;
-                                }
-                            }
+                            // FAT has no shared file-ID claims. Replace any partial native total.
+                            allocatedBytes = fallback.AllocatedBytes;
+                            incompleteAllocation = fallback.IncompleteAllocation;
                         }
-                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                        else
                         {
-                            incomplete = true;
+                            // NTFS has already claimed IDs from the native batches. Retain that partial allocation.
+                            incompleteAllocation = trackAllocation;
                         }
                     }
 
@@ -309,6 +290,76 @@ public sealed class ParallelFolderWalker
 
         stopwatch.Stop();
         return builder.Build(EngineName, stopwatch.Elapsed);
+    }
+
+    internal static (long LogicalBytes, long Files, long AllocatedBytes, bool Incomplete, bool IncompleteAllocation)
+        ReadManagedDirectory(string path, List<string> subfolders, EnumerationOptions options,
+            DirectoryAllocationReader? pathAllocation, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        subfolders.Clear();
+        long bytes = 0;
+        long files = 0;
+        long allocatedBytes = 0;
+        var incompleteAllocation = false;
+        try
+        {
+            // A queued directory can be replaced by a reparse point after its parent was read.
+            if ((File.GetAttributes(path) & System.IO.FileAttributes.ReparsePoint) != 0)
+            {
+                return (0, 0, 0, false, pathAllocation is not null);
+            }
+
+            if (pathAllocation is not null)
+            {
+                incompleteAllocation = !pathAllocation.TryReadPathAllocation(path, expectedFileLength: null,
+                    cancellationToken, out allocatedBytes);
+            }
+
+            var includeFileNames = pathAllocation is not null;
+            var entries = new FileSystemEnumerable<(string? Name, bool IsDirectory, long Length, bool ReparsePoint)>(path,
+                (ref FileSystemEntry entry) => (includeFileNames || entry.IsDirectory ? entry.FileName.ToString() : null,
+                    entry.IsDirectory, entry.Length, (entry.Attributes & System.IO.FileAttributes.ReparsePoint) != 0),
+                options);
+            foreach (var entry in entries)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (entry.IsDirectory)
+                {
+                    if (!entry.ReparsePoint)
+                    {
+                        subfolders.Add(entry.Name!);
+                    }
+                    else
+                    {
+                        incompleteAllocation |= pathAllocation is not null;
+                    }
+
+                    continue;
+                }
+
+                bytes += entry.Length;
+                files++;
+                if (pathAllocation is not null)
+                {
+                    if (entry.ReparsePoint || !pathAllocation.TryReadPathAllocation(Path.Combine(path, entry.Name!),
+                        entry.Length, cancellationToken, out var allocation))
+                    {
+                        incompleteAllocation = true;
+                    }
+                    else
+                    {
+                        allocatedBytes += allocation;
+                    }
+                }
+            }
+
+            return (bytes, files, allocatedBytes, false, incompleteAllocation);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return (bytes, files, allocatedBytes, true, pathAllocation is not null);
+        }
     }
 
     private sealed record StreamBatch(SafeFileHandle Hint, ulong[] FileIds);

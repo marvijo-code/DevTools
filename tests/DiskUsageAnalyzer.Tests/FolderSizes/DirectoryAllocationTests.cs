@@ -45,6 +45,21 @@ public sealed class DirectoryAllocationTests
             Assert.Equal(8193, logical);
             Assert.Equal((1 + (logical - 1) / clusterBytes) * clusterBytes, allocated);
             Assert.False(incomplete);
+
+            var options = new EnumerationOptions { AttributesToSkip = 0, IgnoreInaccessible = false };
+            var fallback = ParallelFolderWalker.ReadManagedDirectory(root.FullName, folders, options, reader,
+                CancellationToken.None);
+            Assert.Equal((logical, files, allocated, false, false), fallback);
+            Assert.Equal(["résumé"], folders);
+
+            var file = Path.Combine(root.FullName, "payload.bin");
+            Assert.False(reader.TryReadPathAllocation(file, logical + 1, CancellationToken.None, out var staleBytes));
+            Assert.Equal(0, staleBytes);
+
+            var missing = ParallelFolderWalker.ReadManagedDirectory(Path.Combine(root.FullName, "missing"),
+                folders, options, reader, CancellationToken.None);
+            Assert.Equal((0L, 0L, 0L, true, true), missing);
+            Assert.Empty(folders);
         }
         finally
         {

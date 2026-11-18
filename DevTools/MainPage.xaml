@@ -330,6 +330,7 @@
               BorderThickness="1">
         <Grid>
           <Grid x:Name="KillProcessesContentPane"
+                x:Load="False"
                 RowSpacing="10"
                 Visibility="Collapsed">
             <Grid.RowDefinitions>
@@ -469,6 +470,7 @@
           </Grid>
 
           <Grid x:Name="WorkflowContentPane"
+                x:Load="False"
                 RowSpacing="10">
             <Grid.RowDefinitions>
               <RowDefinition Height="Auto" />
@@ -781,6 +783,7 @@
           </Grid>
 
           <Grid x:Name="DiskContentPane"
+                x:Load="False"
                 RowSpacing="10"
                 Visibility="Collapsed">
             <Grid.RowDefinitions>
@@ -2350,6 +2353,7 @@
           </Grid>
 
           <ScrollViewer x:Name="DetailsScroll"
+                        x:Load="False"
                         Grid.Row="1"
                         HorizontalAlignment="Stretch"
                         VerticalScrollBarVisibility="Auto"
@@ -2547,7 +2551,8 @@
             </StackPanel>
           </ScrollViewer>
 
-          <ScrollViewer x:Name="ProcessDetailsScroll" Grid.Row="1" Visibility="Collapsed"
+          <ScrollViewer x:Name="ProcessDetailsScroll"
+                        x:Load="False" Grid.Row="1" Visibility="Collapsed"
                         VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <StackPanel Spacing="16">
               <StackPanel Spacing="12" Visibility="{Binding ShowProcessOverview, Converter={StaticResource BoolToVisibilityConverter}}">
@@ -2599,7 +2604,8 @@
             </StackPanel>
           </ScrollViewer>
 
-          <ScrollViewer x:Name="StorageOverviewScroll" Grid.Row="1" Visibility="Collapsed"
+          <ScrollViewer x:Name="StorageOverviewScroll"
+                        x:Load="False" Grid.Row="1" Visibility="Collapsed"
                         VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <StackPanel Spacing="12">
               <Border Style="{StaticResource ContextCardStyle}">

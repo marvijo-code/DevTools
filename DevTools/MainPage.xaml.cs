@@ -1083,7 +1083,7 @@ public sealed partial class MainPage : Page
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(MainViewModel.ProcessFilterText))
-            KillProcessesScroll.ChangeView(null, 0, null, true);
+            KillProcessesScroll?.ChangeView(null, 0, null, true);
 
         if (e.PropertyName is nameof(MainViewModel.AutoRefreshEnabled) or nameof(MainViewModel.RefreshIntervalSeconds))
         {
@@ -1157,19 +1157,24 @@ public sealed partial class MainPage : Page
         var isOpenWorkVisible = context.ShowOpenWork;
         var isWorktreesVisible = context.ShowWorktrees;
 
-        KillProcessesContentPane.Visibility = isKillVisible ? Visibility.Visible : Visibility.Collapsed;
-        WorkflowContentPane.Visibility = isWorkflowVisible ? Visibility.Visible : Visibility.Collapsed;
-        DiskContentPane.Visibility = isDiskVisible ? Visibility.Visible : Visibility.Collapsed;
+        SetDeferredPaneVisibility(KillProcessesContentPane, nameof(KillProcessesContentPane), isKillVisible);
+        SetDeferredPaneVisibility(WorkflowContentPane, nameof(WorkflowContentPane), isWorkflowVisible);
+        SetDeferredPaneVisibility(DiskContentPane, nameof(DiskContentPane), isDiskVisible);
         SetDeferredPaneVisibility(ResourcesContentPane, nameof(ResourcesContentPane), isResourcesVisible);
         SetDeferredPaneVisibility(OpenWorkContentPane, nameof(OpenWorkContentPane), isOpenWorkVisible);
         SetDeferredPaneVisibility(WorktreesContentPane, nameof(WorktreesContentPane), isWorktreesVisible);
 
         RunDetailsBorder.Visibility = Visibility.Visible;
         Grid.SetColumnSpan(MainContentBorder, 1);
-        DetailsScroll.Visibility = isWorkflowVisible ? Visibility.Visible : Visibility.Collapsed;
-        ProcessDetailsScroll.Visibility = isKillVisible ? Visibility.Visible : Visibility.Collapsed;
-        StorageOverviewScroll.Visibility = isDiskVisible ? Visibility.Visible : Visibility.Collapsed;
+        var firstRunDetailsLoad = isWorkflowVisible && DetailsScroll is null;
+        SetDeferredPaneVisibility(DetailsScroll, nameof(DetailsScroll), isWorkflowVisible);
+        SetDeferredPaneVisibility(ProcessDetailsScroll, nameof(ProcessDetailsScroll), isKillVisible);
+        SetDeferredPaneVisibility(StorageOverviewScroll, nameof(StorageOverviewScroll), isDiskVisible);
         SetDeferredPaneVisibility(SystemOverviewScroll, nameof(SystemOverviewScroll), isResourcesVisible);
+        if (firstRunDetailsLoad)
+        {
+            UpdateRunDetailsExpanders();
+        }
         RunStatusBadge.Visibility = isWorkflowVisible && ViewModel.HasSelectedRun ? Visibility.Visible : Visibility.Collapsed;
 
         ApplyTabButtonState(ResourcesNavigationButton, isResourcesVisible);
@@ -1224,16 +1229,14 @@ public sealed partial class MainPage : Page
 
     private void UpdateRunDetailsExpanders()
     {
-        var selectedRun = ViewModel.SelectedRun;
-        if (selectedRun is null)
+        if (TriggerDetailsExpander is not { } trigger || PullRequestDescriptionExpander is not { } pullRequest)
         {
-            TriggerDetailsExpander.IsExpanded = false;
-            PullRequestDescriptionExpander.IsExpanded = false;
             return;
         }
 
-        TriggerDetailsExpander.IsExpanded = selectedRun.HasTriggerDetails;
-        PullRequestDescriptionExpander.IsExpanded = selectedRun.HasRunDescription;
+        var selectedRun = ViewModel.SelectedRun;
+        trigger.IsExpanded = selectedRun?.HasTriggerDetails == true;
+        pullRequest.IsExpanded = selectedRun?.HasRunDescription == true;
     }
 
     private void OpenPath_Click(object sender, RoutedEventArgs e)

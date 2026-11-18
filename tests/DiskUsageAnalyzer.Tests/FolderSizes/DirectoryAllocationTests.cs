@@ -318,13 +318,32 @@ public sealed class DirectoryAllocationTests
     public void AllocationIndex_DistinguishesDuplicatesFromExhaustedCapacity()
     {
         var index = new DirectoryAllocationIndex(32);
-        UInt128 first = 1;
-        var sameShard = Enumerable.Range(2, 64).Select(value => (UInt128)value)
-            .First(id => (id.GetHashCode() & 31) == (first.GetHashCode() & 31));
+        const ulong first = 1;
+        var shard = ((UInt128)first).GetHashCode() & 31;
+        var sameShard = Enumerable.Range(2, 1024).Select(value => (ulong)value)
+            .First(id => (((UInt128)id).GetHashCode() & 31) == shard);
 
         Assert.Equal(DirectoryAllocationIndex.ClaimResult.New, index.Claim(first));
         Assert.Equal(DirectoryAllocationIndex.ClaimResult.AlreadyCounted, index.Claim(first));
         Assert.Equal(DirectoryAllocationIndex.ClaimResult.Unavailable, index.Claim(sameShard));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AllocationIndex_SharesTheShardLimitAcrossBothIdWidths(bool extendedFirst)
+    {
+        const ulong ordinary = 1;
+        var shard = ((UInt128)ordinary).GetHashCode() & 31;
+        var extended = Enumerable.Range(1, 1024).Select(value => new UInt128(1, (ulong)value))
+            .First(id => (id.GetHashCode() & 31) == shard);
+        var index = new DirectoryAllocationIndex(32);
+        var first = extendedFirst ? extended : ordinary;
+        var second = extendedFirst ? ordinary : extended;
+
+        Assert.Equal(DirectoryAllocationIndex.ClaimResult.New, index.Claim(first));
+        Assert.Equal(DirectoryAllocationIndex.ClaimResult.Unavailable, index.Claim(second));
+        Assert.Equal(DirectoryAllocationIndex.ClaimResult.AlreadyCounted, index.Claim(first));
     }
 
     [Fact]

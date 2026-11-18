@@ -132,7 +132,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                     logicalBytes += Math.Max(0, BinaryPrimitives.ReadInt64LittleEndian(remaining[40..]));
                     var low = BinaryPrimitives.ReadUInt64LittleEndian(remaining[72..]);
                     var high = BinaryPrimitives.ReadUInt64LittleEndian(remaining[80..]);
-                    var claim = identities.Claim(new UInt128(high, low));
+                    var claim = high == 0 ? identities.Claim(low) : identities.Claim(new UInt128(high, low));
                     if (claim == DirectoryAllocationIndex.ClaimResult.New)
                     {
                         allocatedBytes += PhysicalAllocation(BinaryPrimitives.ReadInt64LittleEndian(remaining[48..]));
@@ -353,7 +353,7 @@ internal sealed class DirectoryAllocationIndex
     private const int MaximumRecords = 16_000_000;
     private const ulong RecordNumberMask = 0x0000FFFFFFFFFFFF;
     private readonly int[] _recordSequences;
-    private readonly HashSet<UInt128>[] _shards = new HashSet<UInt128>[ShardCount];
+    private readonly IdentityShard[] _shards = new IdentityShard[ShardCount];
     private readonly int _entriesPerShard;
 
     internal DirectoryAllocationIndex(int entryLimit, int recordCapacity = 0)
@@ -362,7 +362,7 @@ internal sealed class DirectoryAllocationIndex
         _entriesPerShard = entryLimit / ShardCount;
         for (var i = 0; i < _shards.Length; i++)
         {
-            _shards[i] = [];
+            _shards[i] = new IdentityShard();
         }
     }
 
@@ -409,19 +409,18 @@ internal sealed class DirectoryAllocationIndex
 
     internal enum ClaimResult { New, AlreadyCounted, Unavailable }
 
-    public ClaimResult Claim(UInt128 id)
+    public ClaimResult Claim(ulong id)
     {
         if (id == 0)
         {
             return ClaimResult.Unavailable;
         }
 
-        var low = (ulong)id;
-        var record = low & RecordNumberMask;
-        if (record < (ulong)_recordSequences.Length && id >> 64 == 0)
+        var record = id & RecordNumberMask;
+        if (record < (ulong)_recordSequences.Length)
         {
             // Store the full high 16 bits of the 64-bit ID. Zero marks a slot nobody has claimed.
-            var sequence = (int)(low >> 48) + 1;
+            var sequence = (int)(id >> 48) + 1;
             var previous = Interlocked.CompareExchange(ref _recordSequences[(int)record], sequence, 0);
             if (previous == 0)
             {
@@ -434,16 +433,48 @@ internal sealed class DirectoryAllocationIndex
             }
         }
 
-        // Reused record slots, larger IDs and records added after the geometry query still deduplicate by full ID.
+        // Mix the full ID when choosing a shard so sparse file records do not fill one shard early.
+        var shard = _shards[((UInt128)id).GetHashCode() & (ShardCount - 1)];
+        lock (shard)
+        {
+            return ClaimInShard(shard.FileIds, id, _entriesPerShard - (shard.ExtendedIds?.Count ?? 0));
+        }
+    }
+
+    public ClaimResult Claim(UInt128 id)
+    {
+        if (id >> 64 == 0)
+        {
+            return Claim((ulong)id);
+        }
+
         var shard = _shards[id.GetHashCode() & (ShardCount - 1)];
         lock (shard)
         {
-            if (shard.Count < _entriesPerShard)
+            var capacity = _entriesPerShard - shard.FileIds.Count;
+            if (capacity == 0)
             {
-                return shard.Add(id) ? ClaimResult.New : ClaimResult.AlreadyCounted;
+                return ClaimResult.Unavailable;
             }
 
-            return shard.Contains(id) ? ClaimResult.AlreadyCounted : ClaimResult.Unavailable;
+            shard.ExtendedIds ??= [];
+            return ClaimInShard(shard.ExtendedIds, id, capacity);
         }
+    }
+
+    private static ClaimResult ClaimInShard<T>(HashSet<T> ids, T id, int capacity)
+    {
+        if (ids.Count < capacity)
+        {
+            return ids.Add(id) ? ClaimResult.New : ClaimResult.AlreadyCounted;
+        }
+
+        return ids.Contains(id) ? ClaimResult.AlreadyCounted : ClaimResult.Unavailable;
+    }
+
+    private sealed class IdentityShard
+    {
+        internal readonly HashSet<ulong> FileIds = [];
+        internal HashSet<UInt128>? ExtendedIds;
     }
 }

@@ -53,7 +53,7 @@ public sealed class ParallelFolderWalker
             ? WindowsVolumePaths.ReadVolumeInformation(volumeRoot).FileSystem
             : string.Empty;
         var allocationIndex = volumeRoot is not null && string.Equals(fileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)
-            ? DirectoryAllocationIndex.Create(volumeRoot, resources, fullVolume)
+            ? DirectoryAllocationIndex.Create(volumeRoot, resources, fullVolume, volumeShare)
             : null;
         var trackAllocation = allocationIndex is not null || DirectoryAllocationReader.SupportsAllocationWithoutFileIds(fileSystem);
         var allocationUnitBytes = allocationIndex is null ? 0 : WindowsVolumePaths.GetAllocationUnitBytes(volumeRoot!);

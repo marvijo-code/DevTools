@@ -18,6 +18,9 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
     private const int FileIdExtdDirectoryInfo = 19;
     private const int FileStandardInfo = 1;
     private const int StandardInfoBytes = 24;
+    private const int StandardInfoLinkCountOffset = 16;
+    private const int StandardInfoDeletePendingOffset = 20;
+    private const int StandardInfoDirectoryOffset = 21;
     private const int FileStreamInfo = 7;
     private const int StreamHeaderBytes = 24;
     private const int MaximumStreamBufferBytes = 1024 * 1024;
@@ -212,7 +215,9 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
                     }
                     else if (claim == DirectoryAllocationIndex.ClaimResult.Unavailable)
                     {
-                        incompleteAllocation = true;
+                        var defaultStreamBytes = BinaryPrimitives.ReadInt64LittleEndian(remaining[48..]);
+                        allocatedBytes += ReadUnindexedFileAllocation(handle, low, high, defaultStreamBytes, cancellationToken,
+                            ref incompleteAllocation);
                     }
 
                     files++;
@@ -282,8 +287,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
             return false;
         }
 
-        // FILE_STANDARD_INFO.Directory is the byte after DeletePending.
-        isDirectory = _streamBuffer[21] != 0;
+        isDirectory = _streamBuffer[StandardInfoDirectoryOffset] != 0;
         if (isDirectory)
         {
             var reported = BinaryPrimitives.ReadInt64LittleEndian(_streamBuffer);
@@ -293,15 +297,37 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
         return true;
     }
 
+    private long ReadUnindexedFileAllocation(SafeFileHandle hint, ulong low, ulong high, long defaultStreamBytes,
+        CancellationToken cancellationToken, ref bool incompleteAllocation)
+    {
+        if (low == 0 || high != 0)
+        {
+            incompleteAllocation = true;
+            return 0;
+        }
+
+        WaitForScan(cancellationToken);
+        using var file = OpenFileMetadataById(hint, low);
+        if (file.IsInvalid ||
+            !GetFileInformationByHandleEx(file, FileStandardInfo, _streamBuffer, StandardInfoBytes) ||
+            _streamBuffer[StandardInfoDeletePendingOffset] != 0 || _streamBuffer[StandardInfoDirectoryOffset] != 0 ||
+            BinaryPrimitives.ReadUInt32LittleEndian(_streamBuffer.AsSpan(StandardInfoLinkCountOffset)) != 1)
+        {
+            incompleteAllocation = true;
+            return 0;
+        }
+
+        // Use the same directory-reported allocation as the indexed path. The handle only verifies the link count here.
+        return PhysicalAllocation(defaultStreamBytes) + ReadNamedStreamAllocation(file, ref incompleteAllocation);
+    }
+
     internal long ReadFileStreams(SafeFileHandle hint, ReadOnlySpan<ulong> fileIds, CancellationToken cancellationToken, ref bool incompleteAllocation)
     {
         long allocatedBytes = 0;
         foreach (var fileId in fileIds)
         {
             WaitForScan(cancellationToken);
-            var id = new FileIdDescriptor(fileId);
-            // Metadata access only. Prevent reparse resolution and remote file recall.
-            using var file = OpenFileById(hint, in id, 0, 7, IntPtr.Zero, OpenReparsePoint | OpenNoRecall);
+            using var file = OpenFileMetadataById(hint, fileId);
             if (file.IsInvalid)
             {
                 incompleteAllocation = true;
@@ -312,6 +338,13 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
         }
 
         return allocatedBytes;
+    }
+
+    private static SafeFileHandle OpenFileMetadataById(SafeFileHandle hint, ulong fileId)
+    {
+        var id = new FileIdDescriptor(fileId);
+        // Metadata access only. Prevent reparse resolution and remote file recall.
+        return OpenFileById(hint, in id, 0, 7, IntPtr.Zero, OpenReparsePoint | OpenNoRecall);
     }
 
     internal static SafeFileHandle? DuplicateVolumeHint(SafeFileHandle hint)
@@ -436,10 +469,10 @@ internal sealed class DirectoryAllocationIndex
         }
     }
 
-    public static DirectoryAllocationIndex? Create(string root, ScanResources resources, bool fullVolume)
+    public static DirectoryAllocationIndex? Create(string root, ScanResources resources, bool fullVolume, int volumeShare = 1)
     {
-        // Keep at least seven eighths of current memory headroom available to other work.
-        var budget = resources.MemoryHeadroom.GetValueOrDefault() / 8;
+        // Share the identity-index budget across volume walks that can run together.
+        var budget = resources.MemoryHeadroom.GetValueOrDefault() / 8 / volumeShare;
         if (budget / 48 < ShardCount)
         {
             return null;

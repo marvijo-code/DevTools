@@ -148,6 +148,7 @@ public sealed class DirectoryAllocationTests
                 stream.Write(block);
                 stream.Position = secondRange;
                 stream.Write(block);
+                stream.Flush(flushToDisk: true);
             }
 
             var expectedLogical = secondRange + block.Length;
@@ -160,6 +161,15 @@ public sealed class DirectoryAllocationTests
 
             Assert.Equal(expectedLogical, tree.GetTotalBytes(node));
             Assert.Equal(expectedAllocated, tree.GetAllocatedBytes(node));
+
+            var clusterBytes = WindowsVolumePaths.GetAllocationUnitBytes(root.Root.FullName);
+            Assert.True(clusterBytes > 0);
+            var constrained = new DirectoryAllocationReader(new DirectoryAllocationIndex(0), clusterBytes);
+            Assert.True(constrained.TryRead(root.FullName, 0, [], null, CancellationToken.None,
+                out var logical, out var allocated, out _, out var incomplete));
+            Assert.Equal(expectedLogical, logical);
+            Assert.Equal(expectedAllocated, allocated);
+            Assert.False(incomplete);
         }
         finally
         {
@@ -416,6 +426,25 @@ public sealed class DirectoryAllocationTests
         Assert.Equal(DirectoryAllocationIndex.ClaimResult.Unavailable, index.Claim(sameShard));
     }
 
+    [Fact]
+    public void AllocationIndex_DividesTheIdentityBudgetAmongOverlappingVolumes()
+    {
+        const long memoryBytes = 32 * 48 * 8 * 4;
+        var resources = new ScanResources(8, memoryBytes);
+        var alone = Assert.IsType<DirectoryAllocationIndex>(DirectoryAllocationIndex.Create(@"C:\", resources, fullVolume: false));
+        var shared = Assert.IsType<DirectoryAllocationIndex>(DirectoryAllocationIndex.Create(@"C:\", resources, fullVolume: false, volumeShare: 4));
+        const ulong first = 1;
+        var shard = ((UInt128)first).GetHashCode() & 31;
+        var second = Enumerable.Range(2, 1024).Select(value => (ulong)value)
+            .First(id => (((UInt128)id).GetHashCode() & 31) == shard);
+
+        Assert.Equal(DirectoryAllocationIndex.ClaimResult.New, alone.Claim(first));
+        Assert.Equal(DirectoryAllocationIndex.ClaimResult.New, alone.Claim(second));
+        Assert.Equal(DirectoryAllocationIndex.ClaimResult.New, shared.Claim(first));
+        Assert.Equal(DirectoryAllocationIndex.ClaimResult.Unavailable, shared.Claim(second));
+        Assert.Equal(DirectoryAllocationIndex.ClaimResult.AlreadyCounted, shared.Claim(first));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -432,6 +461,48 @@ public sealed class DirectoryAllocationTests
         Assert.Equal(DirectoryAllocationIndex.ClaimResult.New, index.Claim(first));
         Assert.Equal(DirectoryAllocationIndex.ClaimResult.Unavailable, index.Claim(second));
         Assert.Equal(DirectoryAllocationIndex.ClaimResult.AlreadyCounted, index.Claim(first));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Reader_CountsSingleLinkAllocationWhenTheIndexIsFull(bool includeSharedFile)
+    {
+        var root = Directory.CreateTempSubdirectory("devtools-full-index-");
+        var unique = Path.Combine(root.FullName, "unique.bin");
+        var shared = Path.Combine(root.FullName, "shared.bin");
+        var link = Path.Combine(root.FullName, "link.bin");
+        var data = new byte[65_537];
+        new Random(22).NextBytes(data);
+        try
+        {
+            await File.WriteAllBytesAsync(unique, data);
+            WriteNamedStream(unique + ":payload", data);
+            if (includeSharedFile)
+            {
+                await File.WriteAllBytesAsync(shared, data);
+                Assert.True(CreateHardLink(link, shared, IntPtr.Zero));
+            }
+
+            var clusterBytes = WindowsVolumePaths.GetAllocationUnitBytes(root.Root.FullName);
+            Assert.True(clusterBytes > 0);
+            var reader = new DirectoryAllocationReader(new DirectoryAllocationIndex(0), clusterBytes);
+            Assert.True(reader.TryRead(root.FullName, 0, [], null, CancellationToken.None,
+                out var logical, out var allocated, out var files, out var incomplete));
+
+            var expectedFiles = includeSharedFile ? 3 : 1;
+            Assert.Equal(expectedFiles, files);
+            Assert.Equal(expectedFiles * data.LongLength, logical);
+            Assert.Equal(2 * ((data.LongLength + clusterBytes - 1) / clusterBytes) * clusterBytes, allocated);
+            Assert.Equal(includeSharedFile, incomplete);
+        }
+        finally
+        {
+            File.Delete(link);
+            File.Delete(shared);
+            File.Delete(unique);
+            root.Delete();
+        }
     }
 
     [Fact]

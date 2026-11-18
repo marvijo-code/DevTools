@@ -27,6 +27,30 @@ public sealed class VolumeSpaceTests
         Assert.DoesNotContain(all, drive => drive.RootPath.Equals(identity, StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void ContainingVolumeRoot_ResolvesDriveLetterAndGuidPaths()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-volume-root-");
+        try
+        {
+            var root = fixture.Root.FullName;
+            var volume = Assert.IsType<string>(WindowsVolumePaths.GetVolumeName(root));
+            var leaf = Path.Combine(fixture.FullName, "missing");
+            var byLetter = Assert.IsType<string>(WindowsVolumePaths.GetContainingVolumeRoot(leaf, root));
+            var guidLeaf = Path.Combine(volume, Path.GetRelativePath(root, leaf));
+            var byGuid = Assert.IsType<string>(WindowsVolumePaths.GetContainingVolumeRoot(guidLeaf, volume));
+
+            Assert.Equal(volume, WindowsVolumePaths.GetVolumeName(byLetter), ignoreCase: true);
+            Assert.Equal(volume, WindowsVolumePaths.GetVolumeName(byGuid), ignoreCase: true);
+            Assert.Equal(root, WindowsVolumePaths.GetContainingVolumeRoot(root, root));
+            Assert.Equal(volume, WindowsVolumePaths.GetContainingVolumeRoot(volume, volume));
+        }
+        finally
+        {
+            fixture.Delete();
+        }
+    }
+
     [Theory]
     [InlineData(@"C:\Mount\Disk", @"D:\")]
     [InlineData(@"c:/mount/disk/one", @"D:\one")]

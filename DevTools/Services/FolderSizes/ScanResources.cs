@@ -99,7 +99,7 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
         }
     }
 
-    internal static bool? ReadSeekPenalty(string driveRoot)
+    internal static bool? ReadSeekPenalty(string? driveRoot)
     {
         if (!OperatingSystem.IsWindows() || WindowsVolumePaths.GetDevicePath(driveRoot) is not { } path)
         {

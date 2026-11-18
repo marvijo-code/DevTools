@@ -36,14 +36,15 @@ public sealed class ParallelFolderWalker
         var stopwatch = Stopwatch.StartNew();
         var resources = ScanResources.Capture();
         var fullVolume = string.Equals(fullRoot, driveRoot, StringComparison.OrdinalIgnoreCase);
-        var fileSystem = !prioritize && OperatingSystem.IsWindows()
-            ? WindowsVolumePaths.ReadVolumeInformation(driveRoot).FileSystem
+        var volumeRoot = WindowsVolumePaths.GetContainingVolumeRoot(fullRoot, driveRoot);
+        var fileSystem = !prioritize && volumeRoot is not null && OperatingSystem.IsWindows()
+            ? WindowsVolumePaths.ReadVolumeInformation(volumeRoot).FileSystem
             : string.Empty;
-        var allocationIndex = string.Equals(fileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)
-            ? DirectoryAllocationIndex.Create(driveRoot, resources, fullVolume)
+        var allocationIndex = volumeRoot is not null && string.Equals(fileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)
+            ? DirectoryAllocationIndex.Create(volumeRoot, resources, fullVolume)
             : null;
         var trackAllocation = allocationIndex is not null || DirectoryAllocationReader.SupportsAllocationWithoutFileIds(fileSystem);
-        var allocationUnitBytes = allocationIndex is null ? 0 : WindowsVolumePaths.GetAllocationUnitBytes(driveRoot);
+        var allocationUnitBytes = allocationIndex is null ? 0 : WindowsVolumePaths.GetAllocationUnitBytes(volumeRoot!);
         var builder = new FolderTreeBuilder(driveRoot, trackAllocation);
         var builderLock = new object();
         var startNode = builder.AddFolder(Path.TrimEndingDirectorySeparator(fullRoot));
@@ -58,7 +59,7 @@ public sealed class ParallelFolderWalker
 
         var workers = workerCount is int requested
             ? Math.Clamp(requested, 1, 16)
-            : resources.WalkWorkerCount(ScanResources.ReadSeekPenalty(driveRoot), prioritize);
+            : resources.WalkWorkerCount(ScanResources.ReadSeekPenalty(volumeRoot), prioritize);
         DirectoryAllocationReader.TryScheduleStreams? scheduleStreams = allocationIndex is not null && workers > 1
             ? TryQueueStreams
             : null;

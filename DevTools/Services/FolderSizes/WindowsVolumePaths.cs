@@ -11,6 +11,7 @@ internal static class WindowsVolumePaths
     private const int ErrorNoMoreFiles = 18;
     private const int ErrorMoreData = 234;
     private const int MaximumAccessPathChars = 1024 * 1024;
+    private const int MaximumWindowsPathChars = 32_768;
     private const string VolumeGuidPrefix = @"\\?\Volume{";
 
     internal static Guid? GetVolumeGuid(string? path) =>
@@ -44,6 +45,48 @@ internal static class WindowsVolumePaths
         return GetVolumeNameForVolumeMountPoint(rootPath, buffer, VolumeNameCapacity)
             ? buffer.ToString()
             : null;
+    }
+
+    internal static string? GetContainingVolumeRoot(string fullPath, string pathRoot)
+    {
+        if (!OperatingSystem.IsWindows() || fullPath.Equals(pathRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return pathRoot;
+        }
+
+        // The walker opens the final entry itself. Resolving its parent gets the volume that owns
+        // that entry, even if the final entry is a junction or mount point on that volume.
+        var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(fullPath));
+        if (parent is null)
+        {
+            return null;
+        }
+
+        if (!Path.EndsInDirectorySeparator(parent))
+        {
+            parent += Path.DirectorySeparatorChar;
+        }
+
+        var capacity = Math.Clamp(parent.Length + 2, 260, MaximumWindowsPathChars);
+        var mount = new StringBuilder(capacity);
+        if (!GetVolumePathName(parent, mount, (uint)mount.Capacity))
+        {
+            return null;
+        }
+
+        var volumePath = mount.ToString();
+        if (volumePath.Length == 0)
+        {
+            return null;
+        }
+
+        if (!Path.EndsInDirectorySeparator(volumePath))
+        {
+            volumePath += Path.DirectorySeparatorChar;
+        }
+
+        // Mounted folders need the GUID so the seek-penalty query can open the backing device.
+        return GetDevicePath(volumePath) is not null ? volumePath : GetVolumeName(volumePath);
     }
 
     internal static VolumeMountAlias[] GetMountAliases(IReadOnlyList<DriveDescriptor> drives,
@@ -190,6 +233,10 @@ internal static class WindowsVolumePaths
     [DllImport("kernel32.dll", EntryPoint = "GetVolumeNameForVolumeMountPointW", ExactSpelling = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetVolumeNameForVolumeMountPoint(string rootPath, StringBuilder name, int capacity);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetVolumePathNameW", ExactSpelling = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetVolumePathName(string path, StringBuilder volumePath, uint length);
 
     [DllImport("kernel32.dll", EntryPoint = "GetVolumePathNamesForVolumeNameW", ExactSpelling = true,
         CharSet = CharSet.Unicode, SetLastError = true)]

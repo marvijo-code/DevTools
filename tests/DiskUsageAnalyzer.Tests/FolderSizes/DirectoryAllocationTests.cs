@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using DevTools.Models;
 using DevTools.Services.FolderSizes;
 using Microsoft.Win32.SafeHandles;
@@ -206,6 +208,54 @@ public sealed class DirectoryAllocationTests
             Assert.Equal(bytes.Length, tree.GetTotalBytes(node));
             Assert.Equal(3, tree.GetFileCount(node));
             Assert.Equal(allocationPerStream * 6, tree.GetAllocatedBytes(node));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Walker_AttributesTheDirectoryStreamWhenWindowsDeniesListing()
+    {
+        var root = Directory.CreateTempSubdirectory("devtools-restricted-directory-");
+        try
+        {
+            var restricted = root.CreateSubdirectory("restricted");
+            var file = Path.Combine(restricted.FullName, "content.bin");
+            await File.WriteAllBytesAsync(file, new byte[1024 * 1024]);
+            var payload = new byte[64 * 1024];
+            new Random(71).NextBytes(payload);
+            var streamPath = restricted.FullName + ":payload";
+            WriteNamedStream(streamPath, payload);
+            var expected = GetCompressedFileSize(streamPath, out var high);
+            Assert.Equal(0u, high);
+            Assert.Equal((uint)payload.Length, expected);
+
+            using var current = WindowsIdentity.GetCurrent();
+            var sid = Assert.IsType<SecurityIdentifier>(current.User);
+            var acl = restricted.GetAccessControl(AccessControlSections.Access);
+            var original = acl.GetSecurityDescriptorBinaryForm();
+            acl.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.ListDirectory, AccessControlType.Deny));
+
+            try
+            {
+                restricted.SetAccessControl(acl);
+                Assert.Throws<UnauthorizedAccessException>(() => Directory.GetFileSystemEntries(restricted.FullName));
+                var tree = await new ParallelFolderWalker().ScanAsync(root.FullName, null, CancellationToken.None, workerCount: 1);
+                var node = tree.Find(restricted.FullName);
+
+                Assert.True(tree.HasIncompleteScan(node));
+                Assert.True(tree.HasIncompleteAllocation(node));
+                Assert.Equal(0, tree.GetFileCount(node));
+                Assert.Equal(0, tree.GetTotalBytes(node));
+                Assert.Equal((long)expected, tree.GetAllocatedBytes(node));
+            }
+            finally
+            {
+                acl.SetSecurityDescriptorBinaryForm(original, AccessControlSections.Access);
+                restricted.SetAccessControl(acl);
+            }
         }
         finally
         {

@@ -17,6 +17,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
     private const int FileStreamInfo = 7;
     private const int StreamHeaderBytes = 24;
     private const int MaximumStreamBufferBytes = 1024 * 1024;
+    private const int ErrorAccessDenied = 5;
     private const int ErrorNoMoreFiles = 18;
     private const int ErrorHandleEof = 38;
     private const int ErrorInsufficientBuffer = 122;
@@ -53,6 +54,20 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
         using var handle = OpenDirectory(nativePath, 1, 7, IntPtr.Zero, 3, BackupSemantics | OpenReparsePoint, IntPtr.Zero);
         if (handle.IsInvalid)
         {
+            if (Marshal.GetLastPInvokeError() == ErrorAccessDenied)
+            {
+                ScanGate.Wait(cancellationToken);
+                // Windows can allow metadata access to the directory itself when it denies listing its children.
+                using var metadata = OpenDirectory(nativePath, 0, 7, IntPtr.Zero, 3,
+                    BackupSemantics | OpenReparsePoint | OpenNoRecall, IntPtr.Zero);
+                if (!metadata.IsInvalid && TryReadDirectoryIndex(metadata, out var indexBytes, out var isMetadataDirectory) &&
+                    isMetadataDirectory)
+                {
+                    allocatedBytes = indexBytes + ReadNamedStreamAllocation(metadata, ref incompleteAllocation);
+                }
+            }
+
+            incompleteAllocation = true;
             return false;
         }
 

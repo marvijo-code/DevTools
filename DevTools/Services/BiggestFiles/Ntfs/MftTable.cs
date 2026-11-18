@@ -521,6 +521,7 @@ internal static class MftTableLoader
         long ClusterStart(long offset) => offset / clusterBytes * clusterBytes;
         long ClusterEnd(long offset) => ((offset - 1) / clusterBytes + 1) * clusterBytes;
 
+        var mappedReader = new MftExtentMapReader.MappedReader(extents, clusterBytes);
         var scratch = ArrayPool<byte>.Shared.Rent(clusterBytes);
         byte[]? buffer = null;
         try
@@ -560,7 +561,7 @@ internal static class MftTableLoader
                 }
 
                 var batch = buffer.AsSpan(0, length);
-                MftExtentMapReader.ReadMapped(extents, batchStart, batch, scratch.AsSpan(0, clusterBytes), readAt, cancellationToken);
+                mappedReader.Read(batchStart, batch, scratch, readAt, cancellationToken);
                 for (; first < next; first++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();

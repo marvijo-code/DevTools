@@ -248,6 +248,31 @@ public sealed class MftExtentMapReaderTests
     }
 
     [Fact]
+    public void MappedReader_KeepsLogicalOffsetsAcrossFragmentedOverlappingReads()
+    {
+        var reader = new MftExtentMapReader.MappedReader([(32, 4), (8, 3), (20, 1)], ClusterSize);
+        var scratch = new byte[ClusterSize];
+        var destination = new byte[32];
+        var reads = new List<long>();
+        void ReadCluster(long offset, Span<byte> buffer)
+        {
+            reads.Add(offset);
+            buffer.Fill((byte)(offset / ClusterSize));
+        }
+
+        reader.Read(7 * ClusterSize - 16, destination, scratch, ReadCluster, CancellationToken.None);
+        Assert.Equal(Enumerable.Repeat((byte)10, 16).Concat(Enumerable.Repeat((byte)20, 16)), destination);
+        reader.Read(7 * ClusterSize - 8, destination, scratch, ReadCluster, CancellationToken.None);
+        Assert.Equal(Enumerable.Repeat((byte)10, 8).Concat(Enumerable.Repeat((byte)20, 24)), destination);
+        reader.Read(7 * ClusterSize, destination, scratch, ReadCluster, CancellationToken.None);
+        Assert.All(destination, value => Assert.Equal((byte)20, value));
+        reader.Read(0, destination, scratch, ReadCluster, CancellationToken.None);
+        Assert.All(destination, value => Assert.Equal((byte)32, value));
+        Assert.Equal([10L * ClusterSize, 20L * ClusterSize, 10L * ClusterSize, 20L * ClusterSize,
+            20L * ClusterSize, 32L * ClusterSize], reads);
+    }
+
+    [Fact]
     public void LoadDeferredFileDetails_CoalescesAdjacentWinnersAndSkipsGapsAcrossExtents()
     {
         const int recordSize = MftRecordBuilder.RecordSize;

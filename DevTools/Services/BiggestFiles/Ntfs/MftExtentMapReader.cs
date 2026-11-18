@@ -98,7 +98,7 @@ internal static class MftExtentMapReader
                 throw new IOException("An NTFS master file table continuation lies outside the mapped extents.");
             }
 
-            ReadMapped(extents, recordOffset, recordBuffer, scratch, readAt, cancellationToken);
+            new MappedReader(extents, (int)geometry.BytesPerCluster).Read(recordOffset, recordBuffer, scratch, readAt, cancellationToken);
             if (!MftRecordParser.TryPrepareRecord(recordBuffer, out var record) || !IsInUse(record) ||
                 BinaryPrimitives.ReadUInt16LittleEndian(record[0x10..]) != sequence ||
                 BinaryPrimitives.ReadUInt64LittleEndian(record[0x20..]) != baseReference)
@@ -149,7 +149,7 @@ internal static class MftExtentMapReader
         try
         {
             var value = buffer.AsSpan(0, (int)bytes);
-            ReadMapped(runs, 0, value, scratch, readAt, cancellationToken);
+            new MappedReader(runs, (int)geometry.BytesPerCluster).Read(0, value, scratch, readAt, cancellationToken);
             return ReadReferences(value, cancellationToken);
         }
         finally
@@ -188,52 +188,69 @@ internal static class MftExtentMapReader
         return references;
     }
 
-    internal static void ReadMapped(List<(long Lcn, long ClusterCount)> extents, long fileOffset,
-        Span<byte> destination, Span<byte> scratch, ReadAt readAt, CancellationToken cancellationToken)
+    internal struct MappedReader(List<(long Lcn, long ClusterCount)> extents, int clusterSize)
     {
-        var clusterSize = scratch.Length;
-        foreach (var (lcn, clusterCount) in extents)
+        private int _extentIndex;
+        private long _extentStart;
+
+        internal void Read(long fileOffset, Span<byte> destination, Span<byte> scratch, ReadAt readAt,
+            CancellationToken cancellationToken)
         {
-            var extentBytes = clusterCount * clusterSize;
-            if (fileOffset >= extentBytes)
+            fileOffset -= _extentStart;
+            if (fileOffset < 0)
             {
-                fileOffset -= extentBytes;
-                continue;
+                fileOffset += _extentStart;
+                _extentIndex = 0;
+                _extentStart = 0;
             }
 
-            var offset = lcn * clusterSize + fileOffset;
-            var remaining = (int)Math.Min(destination.Length, extentBytes - fileOffset);
-            while (remaining > 0)
+            for (var index = _extentIndex; index < extents.Count; index++)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var withinCluster = (int)(offset % clusterSize);
-                int count;
-                if (withinCluster == 0 && remaining >= clusterSize)
+                var (lcn, clusterCount) = extents[index];
+                var extentBytes = clusterCount * clusterSize;
+                if (fileOffset >= extentBytes)
                 {
-                    count = remaining / clusterSize * clusterSize;
-                    readAt(offset, destination[..count]);
-                }
-                else
-                {
-                    count = Math.Min(remaining, clusterSize - withinCluster);
-                    readAt(offset - withinCluster, scratch);
-                    scratch.Slice(withinCluster, count).CopyTo(destination);
+                    // The next batch can overlap this read, so keep its starting extent.
+                    _extentIndex = index + 1;
+                    _extentStart += extentBytes;
+                    fileOffset -= extentBytes;
+                    continue;
                 }
 
-                destination = destination[count..];
-                offset += count;
-                remaining -= count;
+                var offset = lcn * clusterSize + fileOffset;
+                var remaining = (int)Math.Min(destination.Length, extentBytes - fileOffset);
+                while (remaining > 0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var withinCluster = (int)(offset % clusterSize);
+                    int count;
+                    if (withinCluster == 0 && remaining >= clusterSize)
+                    {
+                        count = remaining / clusterSize * clusterSize;
+                        readAt(offset, destination[..count]);
+                    }
+                    else
+                    {
+                        count = Math.Min(remaining, clusterSize - withinCluster);
+                        readAt(offset - withinCluster, scratch[..clusterSize]);
+                        scratch.Slice(withinCluster, count).CopyTo(destination);
+                    }
+
+                    destination = destination[count..];
+                    offset += count;
+                    remaining -= count;
+                }
+
+                if (destination.IsEmpty)
+                {
+                    return;
+                }
+
+                fileOffset = 0;
             }
 
-            if (destination.IsEmpty)
-            {
-                return;
-            }
-
-            fileOffset = 0;
+            throw new IOException("An NTFS master file table continuation lies outside the mapped extents.");
         }
-
-        throw new IOException("An NTFS master file table continuation lies outside the mapped extents.");
     }
 
     private static bool IsInUse(ReadOnlySpan<byte> record) =>

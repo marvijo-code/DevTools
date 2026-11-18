@@ -70,6 +70,12 @@ public sealed class FolderBrowserRow
     public Microsoft.UI.Xaml.Visibility ExpandVisibility => CanExpand
         ? Microsoft.UI.Xaml.Visibility.Visible
         : Microsoft.UI.Xaml.Visibility.Collapsed;
+
+    internal bool HasSamePresentation(FolderBrowserRow other) =>
+        SizeBytes == other.SizeBytes && SharePercent == other.SharePercent && Depth == other.Depth &&
+        CanOpen == other.CanOpen && CanExpand == other.CanExpand && IsExpanded == other.IsExpanded &&
+        IsFile == other.IsFile && Name == other.Name && Path == other.Path &&
+        SizeText == other.SizeText && DetailText == other.DetailText;
 }
 
 public sealed partial class MainViewModel
@@ -118,7 +124,9 @@ public sealed partial class MainViewModel
     }
 
     /// <summary>Opens <paramref name="path"/> in the browser, with nothing expanded.</summary>
-    public bool BrowseFolder(string? path)
+    public bool BrowseFolder(string? path) => BrowseFolder(path, skipUnchanged: false);
+
+    private bool BrowseFolder(string? path, bool skipUnchanged)
     {
         if (string.IsNullOrWhiteSpace(path) || !_diskUsageAnalyzer.TryFindNode(path, out var tree, out var node) || tree is null)
         {
@@ -130,6 +138,10 @@ public sealed partial class MainViewModel
         {
             _folderBrowserExpanded.Clear();
             CancelFolderBrowserFileLoads();
+        }
+        else if (skipUnchanged && ReferenceEquals(tree, _folderBrowserFileTree))
+        {
+            return true;
         }
 
         _folderBrowserPath = normalized;
@@ -149,7 +161,7 @@ public sealed partial class MainViewModel
         RaisePropertyChanged(nameof(FolderBrowserSummary));
         RaisePropertyChanged(nameof(CanFolderBrowserGoUp));
 
-        RebuildFolderBrowserRows();
+        RebuildFolderBrowserRows(tree, node);
         return true;
     }
 
@@ -263,8 +275,8 @@ public sealed partial class MainViewModel
             ? _folderBrowserPath
             : roots[0];
         var rootPath = Path.GetPathRoot(path)!;
-        if (!BrowseFolder(path) &&
-            (string.Equals(path, rootPath, StringComparison.OrdinalIgnoreCase) || !BrowseFolder(rootPath)))
+        if (!BrowseFolder(path, skipUnchanged: true) &&
+            (string.Equals(path, rootPath, StringComparison.OrdinalIgnoreCase) || !BrowseFolder(rootPath, skipUnchanged: true)))
         {
             ShowPendingBrowserDrive(rootPath, scanCompleted || completedRoot is not null);
         }
@@ -274,7 +286,10 @@ public sealed partial class MainViewModel
     {
         _folderBrowserExpanded.Clear();
         ResetFolderBrowserFileCache(null);
-        _folderBrowserRows.Clear();
+        if (_folderBrowserRows.Count > 0)
+        {
+            _folderBrowserRows.Clear();
+        }
         _folderBrowserPath = path;
         _canFolderBrowserGoUp = false;
         _folderBrowserSummary = string.IsNullOrEmpty(path)
@@ -328,6 +343,11 @@ public sealed partial class MainViewModel
             return;
         }
 
+        RebuildFolderBrowserRows(tree, node);
+    }
+
+    private void RebuildFolderBrowserRows(FolderTree tree, int node)
+    {
         if (!ReferenceEquals(tree, _folderBrowserFileTree))
         {
             ResetFolderBrowserFileCache(tree);
@@ -337,7 +357,11 @@ public sealed partial class MainViewModel
         var total = showAllocation ? tree.GetAllocatedBytes(node) : tree.GetTotalBytes(node);
         if (total is null)
         {
-            _folderBrowserRows.Clear();
+            if (_folderBrowserRows.Count > 0)
+            {
+                _folderBrowserRows.Clear();
+            }
+
             return;
         }
 
@@ -345,16 +369,49 @@ public sealed partial class MainViewModel
         var pendingFolders = new List<FolderFileRequest>();
         AppendLevel(tree, node, 0, Math.Max(1, total.Value), showAllocation, rows, pendingFolders);
 
-        _folderBrowserRows.Clear();
-        foreach (var row in rows)
-        {
-            _folderBrowserRows.Add(row);
-        }
+        UpdateFolderBrowserRows(rows);
 
         if (pendingFolders.Count > 0)
         {
             _folderBrowserFileLoadCts ??= new();
             _ = LoadFolderFilesAsync(pendingFolders, _folderBrowserFileLoadCts.Token);
+        }
+    }
+
+    private void UpdateFolderBrowserRows(List<FolderBrowserRow> rows)
+    {
+        // Keep unchanged rows at the edges so listing updates don't recreate the whole view.
+        var oldEnd = _folderBrowserRows.Count;
+        var newEnd = rows.Count;
+        var first = 0;
+        while (first < oldEnd && first < newEnd && _folderBrowserRows[first].HasSamePresentation(rows[first]))
+        {
+            first++;
+        }
+
+        while (oldEnd > first && newEnd > first && _folderBrowserRows[oldEnd - 1].HasSamePresentation(rows[newEnd - 1]))
+        {
+            oldEnd--;
+            newEnd--;
+        }
+
+        var sharedEnd = Math.Min(oldEnd, newEnd);
+        for (var index = first; index < sharedEnd; index++)
+        {
+            if (!_folderBrowserRows[index].HasSamePresentation(rows[index]))
+            {
+                _folderBrowserRows[index] = rows[index];
+            }
+        }
+
+        for (var index = oldEnd - 1; index >= newEnd; index--)
+        {
+            _folderBrowserRows.RemoveAt(index);
+        }
+
+        for (var index = oldEnd; index < newEnd; index++)
+        {
+            _folderBrowserRows.Insert(index, rows[index]);
         }
     }
 

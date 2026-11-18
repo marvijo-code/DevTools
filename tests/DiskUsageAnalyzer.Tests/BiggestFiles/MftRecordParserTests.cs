@@ -243,6 +243,18 @@ public sealed class MftRecordParserTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TryReadUnnamedDataRuns_RejectsMalformedOrSparseMftMap(bool sparseRun)
+    {
+        byte[] runs = sparseRun ? [0x11, 2, 9, 0x01, 3, 0] : [0x11, 2, 9, 0x09, 0];
+        var record = new MftRecordBuilder().NonResidentData(20_480, 20_480, runs: runs).Build();
+        var extents = new List<(long Lcn, long ClusterCount)>();
+
+        Assert.False(MftRecordParser.TryReadUnnamedDataRuns(record, extents));
+    }
+
     [Fact]
     public void TryDecodeRunList_HandlesNegativeRelativeOffsets()
     {

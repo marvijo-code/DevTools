@@ -330,6 +330,11 @@ public static class MftRecordParser
 
             if (attributeType == AttrData && nameLength == 0 && nonResident)
             {
+                if (attributeLength < 0x40)
+                {
+                    return false;
+                }
+
                 var runListOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(offset + 0x20, 2));
                 if (runListOffset < 0x40 || offset + runListOffset > offset + attributeLength)
                 {
@@ -337,7 +342,7 @@ public static class MftRecordParser
                 }
 
                 var runs = record.Slice(offset + runListOffset, attributeLength - runListOffset);
-                return TryDecodeRunList(runs, extents);
+                return TryDecodeRunList(runs, extents, out _, allowSparse: false);
             }
 
             offset += attributeLength;
@@ -354,7 +359,7 @@ public static class MftRecordParser
         TryDecodeRunList(runList, extents, out _);
 
     private static bool TryDecodeRunList(
-        ReadOnlySpan<byte> runList, List<(long Lcn, long ClusterCount)>? extents, out long allocatedClusters)
+        ReadOnlySpan<byte> runList, List<(long Lcn, long ClusterCount)>? extents, out long allocatedClusters, bool allowSparse = true)
     {
         extents?.Clear();
         allocatedClusters = 0;
@@ -386,6 +391,11 @@ public static class MftRecordParser
 
             if (offsetSize == 0)
             {
+                if (!allowSparse)
+                {
+                    return false;
+                }
+
                 // Sparse run: no clusters on disk. Skip without moving the LCN cursor.
                 continue;
             }

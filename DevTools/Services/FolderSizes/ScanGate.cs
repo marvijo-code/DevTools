@@ -6,8 +6,8 @@ namespace DevTools.Services.FolderSizes;
 /// </summary>
 public static class ScanGate
 {
-    private static readonly ManualResetEventSlim Open = new(true);
     private static readonly object Sync = new();
+    private static TaskCompletionSource? _resume;
     private static int _pauses;
 
     /// <summary>Pauses background scans until the returned handle is disposed.</summary>
@@ -17,7 +17,7 @@ public static class ScanGate
         {
             if (++_pauses == 1)
             {
-                Open.Reset();
+                Volatile.Write(ref _resume, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
             }
         }
 
@@ -27,7 +27,11 @@ public static class ScanGate
     /// <summary>Blocks while a priority job is running. Call between units of background work.</summary>
     public static void Wait(CancellationToken cancellationToken)
     {
-        Open.Wait(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        while (Volatile.Read(ref _resume) is { } resume)
+        {
+            resume.Task.WaitAsync(cancellationToken).GetAwaiter().GetResult();
+        }
     }
 
     private sealed class Releaser : IDisposable
@@ -45,7 +49,9 @@ public static class ScanGate
             {
                 if (--_pauses == 0)
                 {
-                    Open.Set();
+                    var resume = _resume!;
+                    Volatile.Write(ref _resume, null);
+                    resume.SetResult();
                 }
             }
         }

@@ -127,7 +127,8 @@ internal sealed class DirectoryAllocationIndex
         try
         {
             var fileSystem = new DriveInfo(root).DriveFormat;
-            if (fileSystem is not ("NTFS" or "ReFS"))
+            // ReFS block clones can share physical clusters across different file IDs.
+            if (!string.Equals(fileSystem, "NTFS", StringComparison.OrdinalIgnoreCase))
             {
                 return null;
             }

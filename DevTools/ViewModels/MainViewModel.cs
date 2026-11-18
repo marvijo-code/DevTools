@@ -540,6 +540,7 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
+        var refreshCleanup = false;
         try
         {
             SetDiskUsageRefreshing(true);
@@ -577,9 +578,7 @@ public sealed partial class MainViewModel : ObservableObject
             SetDiskUsageActivityText("Snapshot ready");
             RaiseDiskUsageProperties();
             RefreshFolderBrowserDrives(scanCompleted: true);
-            // Reuse the drive trees for cleanup estimates instead of starting additional walks.
-            await RefreshCleanupOptionsAsync(cancellationToken);
-
+            refreshCleanup = true;
             StatusMessage = "Disk usage snapshot refreshed.";
             AppLog.Info("RefreshDiskUsageAsync completed.");
         }
@@ -602,6 +601,12 @@ public sealed partial class MainViewModel : ObservableObject
             SetDiskUsageRefreshing(false);
             _diskUsageRefreshGate.Release();
             AppLog.Info("RefreshDiskUsageAsync finished.");
+        }
+
+        if (refreshCleanup && !cancellationToken.IsCancellationRequested)
+        {
+            // Reuse the drive trees and let cleanup maintain its own refresh state.
+            _ = RefreshCleanupOptionsAsync(cancellationToken);
         }
     }
 

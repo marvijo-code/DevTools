@@ -334,7 +334,11 @@ internal static class MftTableLoader
         {
             ReadExact(volume, buffer.AsSpan(0, bytesToRead), geometry.MftStartLcn * geometry.BytesPerCluster);
             var extents = new List<(long Lcn, long ClusterCount)>();
-            MftRecordParser.TryReadUnnamedDataRuns(buffer.AsSpan(0, recordSize), extents);
+            if (!MftRecordParser.TryReadUnnamedDataRuns(buffer.AsSpan(0, recordSize), extents))
+            {
+                throw new IOException("The NTFS master file table has an invalid extent map.");
+            }
+
             return extents;
         }
         finally

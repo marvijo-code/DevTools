@@ -88,8 +88,11 @@ public sealed class ParallelFolderWalker
                             subfolders.Clear();
                             try
                             {
+                                // A queued directory can be replaced by a reparse point after its parent was read.
+                                var attributes = File.GetAttributes(path);
+                                var isReparsePoint = (attributes & System.IO.FileAttributes.ReparsePoint) != 0;
                                 // A name string is only needed for folders; files just add their length.
-                                var entries = new FileSystemEnumerable<(string? Name, bool IsDirectory, long Length, System.IO.FileAttributes Attributes)>(
+                                IEnumerable<(string? Name, bool IsDirectory, long Length, System.IO.FileAttributes Attributes)> entries = isReparsePoint ? [] : new FileSystemEnumerable<(string? Name, bool IsDirectory, long Length, System.IO.FileAttributes Attributes)>(
                                     path,
                                     (ref FileSystemEntry entry) => (entry.IsDirectory ? entry.FileName.ToString() : null, entry.IsDirectory, entry.Length, entry.Attributes),
                                     options);

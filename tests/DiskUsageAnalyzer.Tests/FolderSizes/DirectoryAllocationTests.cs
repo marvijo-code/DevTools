@@ -304,6 +304,14 @@ public sealed class DirectoryAllocationTests
             var streamCount = (fileCount - 1) / streamStride + 1;
             Assert.True(sequential.GetAllocatedBytes(sequentialNode) >= streamCount * payload.Length);
             Assert.Equal(sequential.GetAllocatedBytes(sequentialNode), parallel.GetAllocatedBytes(parallelNode));
+
+            // The priority walk starts with the directory that produces the stream jobs.
+            var priority = await walker.ScanAsync(wide.FullName, null, CancellationToken.None,
+                workerCount: Math.Min(4, Environment.ProcessorCount), prioritize: true, measureAllocation: true);
+            var priorityNode = priority.Find(wide.FullName);
+            Assert.Equal(fileCount + 1, priority.GetFileCount(priorityNode));
+            Assert.Equal(0, priority.GetTotalBytes(priorityNode));
+            Assert.Equal(sequential.GetAllocatedBytes(sequentialNode), priority.GetAllocatedBytes(priorityNode));
         }
         finally
         {

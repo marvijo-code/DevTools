@@ -78,7 +78,10 @@ public sealed class ParallelFolderWalker
         DirectoryAllocationReader.TryScheduleStreams? scheduleStreams = allocationIndex is not null && workers > 1
             ? TryQueueStreams
             : null;
-        var threads = new List<Thread>(workers);
+        // A priority walk can reuse the scan thread when it does not report progress.
+        var scanThreadWorks = prioritize && progress is null;
+        var dedicatedWorkers = workers - (scanThreadWorks ? 1 : 0);
+        var threads = new List<Thread>(dedicatedWorkers);
         Exception? failure = null;
         var options = new EnumerationOptions
         {
@@ -287,7 +290,7 @@ public sealed class ParallelFolderWalker
 
         try
         {
-            for (var w = 0; w < workers; w++)
+            for (var w = 0; w < dedicatedWorkers; w++)
             {
                 var thread = new Thread(ConsumeWork)
                 {
@@ -297,6 +300,11 @@ public sealed class ParallelFolderWalker
                 };
                 threads.Add(thread);
                 thread.Start();
+            }
+
+            if (scanThreadWorks)
+            {
+                ConsumeWork();
             }
 
             while (threads.FirstOrDefault(thread => thread.IsAlive) is { } worker)

@@ -84,6 +84,19 @@ public sealed class VolumeSpaceTests
         Assert.Null(DiskCapacityInventory.ReadDiskGeometry(reply.AsSpan(0, 31)));
     }
 
+    [Theory]
+    [InlineData(5_000_000_000L, 8, 5_000_000_000L)]
+    [InlineData(5_000_000_000L, 7, null)]
+    [InlineData(0L, 8, null)]
+    [InlineData(-1L, 8, null)]
+    public void ReadDiskLength_AcceptsOnlyCompletePositiveSizes(long bytes, int length, long? expected)
+    {
+        var reply = new byte[8];
+        BinaryPrimitives.WriteInt64LittleEndian(reply, bytes);
+
+        Assert.Equal(expected, DiskCapacityInventory.ReadDiskLength(reply.AsSpan(0, length)));
+    }
+
     [Fact]
     public void CallerSpaceFallback_MeasuresTheSystemVolumeByGuid()
     {
@@ -618,6 +631,28 @@ public sealed class VolumeSpaceTests
         Assert.Contains("20 inside matched volume extents beyond their filesystem capacities", summary.Summary);
         Assert.Contains("400 in other volume extents, and 500 outside reported volume extents.", summary.Summary);
         Assert.Contains("Partition ranges are unavailable.", summary.Summary);
+    }
+
+    [Fact]
+    public void DriveSummary_ReportsKnownExtentsWhenDiskCapacityIsUnavailable()
+    {
+        var extents = new VolumeDiskExtent[]
+        {
+            new(7, new DiskRange(100, 200), null),
+            new(7, new DiskRange(250, 100), null),
+            new(7, new DiskRange(500, 50), 40),
+            new(7, new DiskRange(long.MaxValue - 1, 2), null),
+            new(8, new DiskRange(100, 900), null)
+        };
+        var backingDisk = DiskCapacityInventory.Reconcile(7, null, null, extents);
+        var deviceWithoutExtents = DiskCapacityInventory.Reconcile(9, null, null, extents);
+
+        Assert.Equal(new DiskCapacity(7, null, null, 300, 50, 40, 0), backingDisk);
+        var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(),
+            [backingDisk, deviceWithoutExtents]);
+        Assert.Contains("Disk 7 capacity is unavailable. Windows reports 300 bytes in volume extents.", summary.Summary);
+        Assert.Contains("Disk 9 capacity is unavailable. Windows reported no volume extents.", summary.Summary);
+        Assert.DoesNotContain("outside", summary.Summary);
     }
 
     [Fact]

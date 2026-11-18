@@ -18,7 +18,7 @@ internal readonly record struct VolumeDiskExtent(int DiskNumber, DiskRange Range
 internal readonly record struct DiskPartitionLayout(HashSet<DiskRange> Ranges, DiskRange? GptUsableRange, DiskRange? MbrSector);
 
 internal readonly record struct DiskCapacity(
-    int DiskNumber, long TotalBytes, long? PartitionedBytes, long VolumeExtentBytes,
+    int DiskNumber, long? TotalBytes, long? PartitionedBytes, long VolumeExtentBytes,
     long MatchedExtentBytes, long FileSystemBytes, long VolumeExtentBytesInPartitions,
     long? UnassignedGptUsableBytes = null, long? UnassignedMbrSectorBytes = null);
 
@@ -35,6 +35,8 @@ internal static class DiskCapacityInventory
     private const int ErrorMoreData = 234;
     private const uint GetDriveGeometry = 0x000700A0;
     private const uint GetDriveLayout = 0x00070050;
+    private const uint GetDiskLength = 0x0007405C;
+    private const uint ReadDataAccess = 0x00000001;
     private const uint GetVolumeExtents = 0x00560000;
     private const int MaximumBufferSize = 1024 * 1024;
 
@@ -86,23 +88,41 @@ internal static class DiskCapacityInventory
         using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
         var buffer = new byte[4096];
         var disks = new List<DiskCapacity>();
-        foreach (var disk in ReadDiskNumbers())
+        var diskNumbers = ReadDiskNumbers().Union(extents.Select(extent => extent.DiskNumber)).Order();
+        foreach (var disk in diskNumbers)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            using var handle = OpenMetadata(PhysicalDiskPath(disk));
+            var path = PhysicalDiskPath(disk);
+            using var handle = OpenMetadata(path);
             var geometryBytes = Query(handle, GetDriveGeometry, ref buffer);
-            if (ReadDiskGeometry(buffer.AsSpan(0, geometryBytes)) is not { } geometry)
+            var geometry = ReadDiskGeometry(buffer.AsSpan(0, geometryBytes));
+            var total = geometry?.TotalBytes ?? QueryDiskLength(path, ref buffer);
+
+            DiskPartitionLayout? layout = null;
+            if (total is long capacity)
             {
-                continue;
+                var bytes = Query(handle, GetDriveLayout, ref buffer);
+                layout = ReadPartitionLayout(buffer.AsSpan(0, bytes), capacity, geometry?.SectorBytes ?? 0);
             }
 
-            var (total, sectorBytes) = geometry;
-            var bytes = Query(handle, GetDriveLayout, ref buffer);
-            var layout = ReadPartitionLayout(buffer.AsSpan(0, bytes), total, sectorBytes);
             disks.Add(Reconcile(disk, total, layout?.Ranges, extents, layout?.GptUsableRange, layout?.MbrSector));
         }
 
         return disks;
+    }
+
+    private static long? QueryDiskLength(string path, ref byte[] buffer)
+    {
+        // The disk length control requires read access. The handle only issues the length query.
+        using var handle = OpenMetadata(path, ReadDataAccess);
+        var bytes = Query(handle, GetDiskLength, ref buffer);
+        return ReadDiskLength(buffer.AsSpan(0, bytes));
+    }
+
+    internal static long? ReadDiskLength(ReadOnlySpan<byte> reply)
+    {
+        var bytes = reply.Length >= sizeof(long) ? BinaryPrimitives.ReadInt64LittleEndian(reply) : 0;
+        return bytes > 0 ? bytes : null;
     }
 
     internal static (long TotalBytes, uint SectorBytes)? ReadDiskGeometry(ReadOnlySpan<byte> geometry)
@@ -232,11 +252,12 @@ internal static class DiskCapacityInventory
         return new DiskPartitionLayout(ranges, gptUsableRange, mbrSector);
     }
 
-    internal static DiskCapacity Reconcile(int disk, long total, HashSet<DiskRange>? partitions,
+    internal static DiskCapacity Reconcile(int disk, long? total, HashSet<DiskRange>? partitions,
         IReadOnlyList<VolumeDiskExtent> extents, DiskRange? gptUsableRange = null, DiskRange? mbrSector = null)
     {
         var partitionRanges = partitions is null ? null : MergeOrderedRanges(partitions.OrderBy(range => range.Start));
-        var volumeExtents = extents.Where(extent => extent.DiskNumber == disk && extent.Range.FitsInside(total))
+        var extentLimit = total ?? long.MaxValue;
+        var volumeExtents = extents.Where(extent => extent.DiskNumber == disk && extent.Range.FitsInside(extentLimit))
             .GroupBy(extent => extent.Range).OrderBy(group => group.Key.Start).ToArray();
         var volumeRanges = MergeOrderedRanges(volumeExtents.Select(group => group.Key));
 
@@ -338,9 +359,7 @@ internal static class DiskCapacityInventory
                     .Where(name => name.StartsWith(PhysicalDrivePrefix, StringComparison.OrdinalIgnoreCase))
                     .Select(name => int.TryParse(name.AsSpan(PhysicalDrivePrefix.Length), NumberStyles.None,
                         CultureInfo.InvariantCulture, out var number) ? number : -1)
-                    .Where(number => number >= 0)
-                    .Distinct()
-                    .Order();
+                    .Where(number => number >= 0);
             }
 
             if (Marshal.GetLastPInvokeError() != ErrorInsufficientBuffer || names.Length >= MaximumBufferSize / sizeof(char))
@@ -379,8 +398,11 @@ internal static class DiskCapacityInventory
     internal static string PhysicalDiskPath(int number) =>
         @"\\.\" + PhysicalDrivePrefix + number.ToString(CultureInfo.InvariantCulture);
 
-    // Desired access zero permits disk and volume metadata queries.
-    internal static SafeFileHandle OpenMetadata(string path) => CreateFile(path, 0, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+    // Most disk and volume metadata queries only require a handle with zero desired access.
+    internal static SafeFileHandle OpenMetadata(string path) => OpenMetadata(path, 0);
+
+    private static SafeFileHandle OpenMetadata(string path, uint access) =>
+        CreateFile(path, access, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
 
     [DllImport("kernel32.dll", EntryPoint = "QueryDosDeviceW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint QueryDosDevice(string? device, [Out] char[] targets, uint targetChars);

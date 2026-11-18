@@ -991,7 +991,14 @@ public sealed class DiskUsageAnalyzer
 
     private static string DescribeDiskCapacity(DiskCapacity disk)
     {
-        var total = $"Disk {disk.DiskNumber} has {disk.TotalBytes:N0} bytes.";
+        if (disk.TotalBytes is not long capacity)
+        {
+            return disk.VolumeExtentBytes > 0
+                ? $"Disk {disk.DiskNumber} capacity is unavailable. Windows reports {disk.VolumeExtentBytes:N0} bytes in volume extents."
+                : $"Disk {disk.DiskNumber} capacity is unavailable. Windows reported no volume extents.";
+        }
+
+        var total = $"Disk {disk.DiskNumber} has {capacity:N0} bytes.";
         var matchedRemainder = disk.MatchedExtentBytes - disk.FileSystemBytes;
         var otherVolumeExtents = disk.VolumeExtentBytes - disk.MatchedExtentBytes;
         var otherExtentNote = otherVolumeExtents > 0 ? $"{otherVolumeExtents:N0} in other volume extents, " : string.Empty;
@@ -1000,13 +1007,13 @@ public sealed class DiskUsageAnalyzer
             otherExtentNote;
         if (disk.PartitionedBytes is not long partitioned)
         {
-            return $"{total} {volumeNotes}and {disk.TotalBytes - disk.VolumeExtentBytes:N0} outside reported volume extents. " +
+            return $"{total} {volumeNotes}and {capacity - disk.VolumeExtentBytes:N0} outside reported volume extents. " +
                 "Partition ranges are unavailable.";
         }
 
         var extentsOutsidePartitions = disk.VolumeExtentBytes - disk.VolumeExtentBytesInPartitions;
         var otherPartitions = partitioned - disk.VolumeExtentBytesInPartitions;
-        var outside = disk.TotalBytes - partitioned - extentsOutsidePartitions;
+        var outside = capacity - partitioned - extentsOutsidePartitions;
         var outsideNote = (disk.UnassignedGptUsableBytes, disk.UnassignedMbrSectorBytes) switch
         {
             (long usable, _) => $"{usable:N0} unallocated in the GPT usable range and {outside - usable:N0} remaining outside the GPT usable range.",

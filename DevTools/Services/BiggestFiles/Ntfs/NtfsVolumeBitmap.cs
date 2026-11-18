@@ -1,7 +1,10 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace DevTools.Services.BiggestFiles.Ntfs;
 
@@ -106,23 +109,10 @@ internal sealed class NtfsVolumeBitmap
                 var firstWord = (int)(next >> 6);
                 var allocatedWords = MemoryMarshal.Cast<byte, ulong>(buffer.AsSpan(offset, fullBytes));
                 var observedWords = _observed.AsSpan(firstWord, fullWords);
-                for (var i = 0; i < allocatedWords.Length; i++)
-                {
-                    var allocated = allocatedWords[i];
-                    if (!BitConverter.IsLittleEndian)
-                    {
-                        allocated = BinaryPrimitives.ReverseEndianness(allocated);
-                    }
-
-                    var observed = (ulong)observedWords[i];
-                    inUse += BitOperations.PopCount(allocated);
-                    // Matching words contribute no discrepancies.
-                    if (allocated != observed)
-                    {
-                        unmatchedAllocated += BitOperations.PopCount(allocated & ~observed);
-                        recordedFree += BitOperations.PopCount(observed & ~allocated);
-                    }
-                }
+                var counts = CountWords(allocatedWords, observedWords);
+                inUse += counts.InUse;
+                unmatchedAllocated += counts.UnmatchedAllocated;
+                recordedFree += counts.RecordedFree;
 
                 var tailBits = (int)(end & 63);
                 if (tailBits > 0)
@@ -147,6 +137,120 @@ internal sealed class NtfsVolumeBitmap
             ArrayPool<byte>.Shared.Return(buffer);
         }
     }
+
+    private static (long InUse, long UnmatchedAllocated, long RecordedFree) CountWords(
+        ReadOnlySpan<ulong> allocatedWords, ReadOnlySpan<long> observedWords)
+    {
+        long inUse = 0;
+        long unmatchedAllocated = 0;
+        long recordedFree = 0;
+        if (LooksMostlyMatching(allocatedWords, observedWords))
+        {
+            for (var index = 0; index < allocatedWords.Length; index++)
+            {
+                var allocated = LittleEndianWord(allocatedWords[index]);
+                var observed = (ulong)observedWords[index];
+                inUse += BitOperations.PopCount(allocated);
+                if (allocated != observed)
+                {
+                    unmatchedAllocated += BitOperations.PopCount(allocated & ~observed);
+                    recordedFree += BitOperations.PopCount(observed & ~allocated);
+                }
+            }
+
+            return (inUse, unmatchedAllocated, recordedFree);
+        }
+
+        var vectorWords = Avx2.IsSupported ? allocatedWords.Length / Vector256<ulong>.Count * Vector256<ulong>.Count : 0;
+        if (vectorWords > 0)
+        {
+            (inUse, unmatchedAllocated, recordedFree) = CountVectorWords(allocatedWords[..vectorWords], observedWords[..vectorWords]);
+        }
+
+        for (var index = vectorWords; index < allocatedWords.Length; index++)
+        {
+            var allocated = LittleEndianWord(allocatedWords[index]);
+            var observed = (ulong)observedWords[index];
+            inUse += BitOperations.PopCount(allocated);
+            unmatchedAllocated += BitOperations.PopCount(allocated & ~observed);
+            recordedFree += BitOperations.PopCount(observed & ~allocated);
+        }
+
+        return (inUse, unmatchedAllocated, recordedFree);
+    }
+
+    private static bool LooksMostlyMatching(ReadOnlySpan<ulong> allocatedWords, ReadOnlySpan<long> observedWords)
+    {
+        if (!BitConverter.IsLittleEndian || allocatedWords.Length < 64)
+        {
+            return true;
+        }
+
+        // Sample several short runs of words to choose a counting loop. Every bit is still counted.
+        const int samples = 8;
+        const int wordsPerSample = 4;
+        var stride = (allocatedWords.Length - wordsPerSample) / (samples - 1);
+        var differingSamples = 0;
+        for (var sample = 0; sample < samples; sample++)
+        {
+            var index = sample * stride;
+            var allocated = MemoryMarshal.AsBytes(allocatedWords.Slice(index, wordsPerSample));
+            var observed = MemoryMarshal.AsBytes(observedWords.Slice(index, wordsPerSample));
+            if (!allocated.SequenceEqual(observed) && ++differingSamples == 2)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static (long InUse, long UnmatchedAllocated, long RecordedFree) CountVectorWords(
+        ReadOnlySpan<ulong> allocatedWords, ReadOnlySpan<long> observedWords)
+    {
+        var inUse = Vector256<ulong>.Zero;
+        var unmatchedAllocated = Vector256<ulong>.Zero;
+        var recordedFree = Vector256<ulong>.Zero;
+        ref var allocatedStart = ref MemoryMarshal.GetReference(allocatedWords);
+        ref var observedStart = ref MemoryMarshal.GetReference(observedWords);
+        const int vectorsPerBatch = 16;
+
+        for (var index = 0; index < allocatedWords.Length;)
+        {
+            var end = Math.Min(index + vectorsPerBatch * Vector256<ulong>.Count, allocatedWords.Length);
+            var allocatedCounts = Vector256<byte>.Zero;
+            var unmatchedCounts = Vector256<byte>.Zero;
+            var freeCounts = Vector256<byte>.Zero;
+            for (; index < end; index += Vector256<ulong>.Count)
+            {
+                var allocated = Vector256.LoadUnsafe(ref allocatedStart, (nuint)index).AsByte();
+                var observed = Vector256.LoadUnsafe(ref observedStart, (nuint)index).AsByte();
+                allocatedCounts += CountBitsPerByte(allocated);
+                unmatchedCounts += CountBitsPerByte(Avx2.AndNot(observed, allocated));
+                freeCounts += CountBitsPerByte(Avx2.AndNot(allocated, observed));
+            }
+
+            // A vector adds at most eight bits to a byte lane. Widen before reaching 256.
+            inUse += Avx2.SumAbsoluteDifferences(allocatedCounts, Vector256<byte>.Zero).AsUInt64();
+            unmatchedAllocated += Avx2.SumAbsoluteDifferences(unmatchedCounts, Vector256<byte>.Zero).AsUInt64();
+            recordedFree += Avx2.SumAbsoluteDifferences(freeCounts, Vector256<byte>.Zero).AsUInt64();
+        }
+
+        return ((long)Vector256.Sum(inUse), (long)Vector256.Sum(unmatchedAllocated), (long)Vector256.Sum(recordedFree));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<byte> CountBitsPerByte(Vector256<byte> value)
+    {
+        var counts = Vector256.Create(Vector128.Create((byte)0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4));
+        var mask = Vector256.Create((byte)15);
+        var low = Avx2.Shuffle(counts, value & mask);
+        var high = Avx2.Shuffle(counts, Avx2.ShiftRightLogical(value.AsUInt16(), 4).AsByte() & mask);
+        return low + high;
+    }
+
+    private static ulong LittleEndianWord(ulong value) =>
+        BitConverter.IsLittleEndian ? value : BinaryPrimitives.ReverseEndianness(value);
 
     private static bool TryDescribeReply(byte[] buffer, int bytes, long clusters, long next, out int offset, out long end)
     {

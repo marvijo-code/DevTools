@@ -72,10 +72,12 @@ public sealed class NtfsVolumeBitmapTests
             map.Reconcile(clusterBytes, (_, output) => WriteReply(0, clusters, payload, output), CancellationToken.None));
     }
 
-    [Fact]
-    public void Reconcile_CountsDiscrepanciesInMixedWordsAndTheFinalPartialWord()
+    [Theory]
+    [InlineData(32)]
+    [InlineData(1032)]
+    public void Reconcile_CountsDiscrepanciesInMixedWordsAndTheFinalPartialWord(int replyBytes)
     {
-        const int clusters = 2059;
+        const int clusters = 26315;
         var map = Assert.IsType<NtfsVolumeBitmap>(NtfsVolumeBitmap.TryCreate(clusters, 1024 * 1024));
         var payload = new byte[(clusters + 7) / 8];
         var inUse = 0;
@@ -84,7 +86,7 @@ public sealed class NtfsVolumeBitmapTests
         for (var cluster = 0; cluster < clusters; cluster++)
         {
             var observed = cluster % 13 < 5;
-            var allocated = cluster < 1024 ? observed : cluster % 17 < 7;
+            var allocated = cluster < 8192 ? observed : cluster % 17 < 7;
             if (observed)
             {
                 map.Mark(cluster, 1);
@@ -106,7 +108,7 @@ public sealed class NtfsVolumeBitmapTests
         var result = map.Reconcile(1, (start, output) =>
         {
             var offset = (int)(start / 8);
-            return WriteReply(start, clusters - start, payload.AsSpan(offset, Math.Min(32, payload.Length - offset)), output);
+            return WriteReply(start, clusters - start, payload.AsSpan(offset, Math.Min(replyBytes, payload.Length - offset)), output);
         }, CancellationToken.None);
 
         Assert.Equal(new NtfsBitmapAllocation(inUse, matched, recordedFree), result);

@@ -1212,6 +1212,7 @@
                                         <HyperlinkButton Content="{Binding DisplayName}"
                                                          Click="OpenPath_Click"
                                                          Tag="{Binding Path}"
+                                                         IsEnabled="{Binding ExistsOnDisk}"
                                                          HorizontalAlignment="Left"
                                                          FontSize="13" />
                                         <TextBlock Text="{Binding Note}"

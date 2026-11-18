@@ -100,7 +100,7 @@ The Storage workspace sizes **every folder on every fixed drive** once, in the b
 
 The app scans in the background using its built-in NTFS Master File Table reader when elevated. It falls back to a folder walk on volumes where the NTFS reader is unavailable. Each drive section names the engine and elapsed scan time.
 
-Drive Summary shows Windows' total, used, free, reserved and pool-unavailable bytes. Folder sizes are shown separately as logical file lengths. Start with --minimized to open on the taskbar without taking focus.
+Drive Summary includes fixed volumes without a drive letter and shows Windows' total, used, free, reserved and pool-unavailable bytes. On scanned drives, logical file lengths and the allocation attributed by the scan are shown separately. The summary shows any remaining used space.
 
 The **Biggest Files** card below it lists the largest individual files. It uses the same fast NTFS path when elevated.
 

@@ -5,7 +5,7 @@ using DevTools.Services.BiggestFiles;
 namespace DevTools.Services.FolderSizes;
 
 /// <summary>One fixed drive as the scan sees it.</summary>
-public sealed record DriveDescriptor(string RootPath, string Label, string FileSystem, VolumeSpace Space);
+public sealed record DriveDescriptor(string RootPath, string Label, string FileSystem, VolumeSpace? Space, bool HasDriveLetter = true);
 
 /// <summary>Byte counts reported by Windows for one volume.</summary>
 public readonly record struct VolumeSpace(
@@ -38,10 +38,15 @@ public sealed class DriveUsageService
     private readonly MftFolderSizeScanner _mft = new();
     private readonly ParallelFolderWalker _walker = new();
 
-    public static IReadOnlyList<DriveDescriptor> GetFixedDrives()
+    public static IReadOnlyList<DriveDescriptor> GetFixedDrives(bool includeVolumesWithoutDriveLetters = false)
     {
         var drives = new List<DriveDescriptor>();
-        foreach (var drive in DriveInfo.GetDrives())
+        var volumeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var systemRoot = FolderTree.NormalizeRoot(Environment.SystemDirectory);
+        var driveLetters = DriveInfo.GetDrives()
+            .OrderByDescending(drive => string.Equals(drive.Name, systemRoot, StringComparison.OrdinalIgnoreCase))
+            .ThenBy(drive => drive.Name, StringComparer.OrdinalIgnoreCase);
+        foreach (var drive in driveLetters)
         {
             try
             {
@@ -50,11 +55,13 @@ public sealed class DriveUsageService
                     continue;
                 }
 
-                drives.Add(new DriveDescriptor(
-                    FolderTree.NormalizeRoot(drive.RootDirectory.FullName),
-                    drive.VolumeLabel,
-                    drive.DriveFormat,
-                    ReadVolumeSpace(drive)));
+                var rootPath = FolderTree.NormalizeRoot(drive.RootDirectory.FullName);
+                var volumeName = WindowsVolumePaths.GetVolumeName(rootPath);
+                var descriptor = new DriveDescriptor(rootPath, drive.VolumeLabel, drive.DriveFormat, ReadVolumeSpace(drive));
+                if (volumeName is null || volumeNames.Add(volumeName))
+                {
+                    drives.Add(descriptor);
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -62,18 +69,41 @@ public sealed class DriveUsageService
             }
         }
 
-        // System drive first, then by letter.
-        var systemRoot = FolderTree.NormalizeRoot(Environment.SystemDirectory);
-        return drives
-            .OrderByDescending(drive => string.Equals(drive.RootPath, systemRoot, StringComparison.OrdinalIgnoreCase))
-            .ThenBy(drive => drive.RootPath, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        if (includeVolumesWithoutDriveLetters)
+        {
+            foreach (var volumeName in WindowsVolumePaths.GetFixedVolumeNames().Order(StringComparer.OrdinalIgnoreCase))
+            {
+                if (!volumeNames.Add(volumeName))
+                {
+                    continue;
+                }
+
+                var (label, fileSystem) = WindowsVolumePaths.ReadVolumeInformation(volumeName);
+                drives.Add(new DriveDescriptor(volumeName, label, fileSystem,
+                    TryReadWindowsVolumeSpace(volumeName), HasDriveLetter: false));
+            }
+        }
+
+        return drives;
     }
 
     internal static VolumeSpace ReadVolumeSpace(DriveInfo drive)
     {
+        if (TryReadWindowsVolumeSpace(drive.RootDirectory.FullName) is { } space)
+        {
+            return space;
+        }
+
+        // DriveInfo.TotalSize and AvailableFreeSpace can both reflect a caller quota.
+        var total = drive.TotalSize;
+        var free = drive.AvailableFreeSpace;
+        return new VolumeSpace(total, free, Math.Max(0, total - free), 0, 0, IsVolumeWide: false);
+    }
+
+    private static VolumeSpace? TryReadWindowsVolumeSpace(string rootPath)
+    {
         if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 17763) &&
-            GetDiskSpaceInformation(drive.RootDirectory.FullName, out var information) == 0)
+            GetDiskSpaceInformation(rootPath, out var information) == 0)
         {
             var bytesPerUnit = (ulong)information.SectorsPerAllocationUnit * information.BytesPerSector;
             if (bytesPerUnit > 0)
@@ -90,15 +120,12 @@ public sealed class DriveUsageService
                 }
                 catch (OverflowException)
                 {
-                    AppLog.Info($"Volume byte counts for {drive.Name} exceed the supported range.");
+                    AppLog.Info($"Volume byte counts for {rootPath} exceed the supported range.");
                 }
             }
         }
 
-        // DriveInfo.TotalSize and AvailableFreeSpace can both reflect a caller quota.
-        var total = drive.TotalSize;
-        var free = drive.AvailableFreeSpace;
-        return new VolumeSpace(total, free, Math.Max(0, total - free), 0, 0, IsVolumeWide: false);
+        return null;
     }
 
     [DllImport("kernel32.dll", EntryPoint = "GetDiskSpaceInformationW", ExactSpelling = true, CharSet = CharSet.Unicode)]

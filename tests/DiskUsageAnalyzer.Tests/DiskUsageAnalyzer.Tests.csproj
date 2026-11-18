@@ -56,6 +56,7 @@
     <Compile Include="..\..\DevTools\Services\FolderSizes\ParallelFolderWalker.cs" Link="Services\FolderSizes\ParallelFolderWalker.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\ScanGate.cs" Link="Services\FolderSizes\ScanGate.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\ScanResources.cs" Link="Services\FolderSizes\ScanResources.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\WindowsVolumePaths.cs" Link="Services\FolderSizes\WindowsVolumePaths.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\DriveUsageService.cs" Link="Services\FolderSizes\DriveUsageService.cs" />    <Compile Include="..\..\DevTools\Models\ResourceSample.cs" Link="Models\ResourceSample.cs" />
     <Compile Include="..\..\DevTools\Models\AgentSessionUsage.cs" Link="Models\AgentSessionUsage.cs" />
     <Compile Include="..\..\DevTools\Models\AgentSessionEntry.cs" Link="Models\AgentSessionEntry.cs" />

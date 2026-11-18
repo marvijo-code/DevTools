@@ -68,7 +68,7 @@ public sealed class DiskUsageEntry : ObservableObject
 
     public bool HasNote => !string.IsNullOrWhiteSpace(Note);
 
-    public bool CanClear => !IsMeasuring && Directory.Exists(Path) && IsClearableDirectory(Path);
+    public bool CanClear => ExistsOnDisk && !IsMeasuring && Directory.Exists(Path) && IsClearableDirectory(Path);
 
     public IReadOnlyList<DiskUsageEntry> Children => _children;
 

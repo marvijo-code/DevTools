@@ -4,6 +4,8 @@ using DevTools.Services.FolderSizes;
 
 namespace DevTools.ViewModels;
 
+public sealed record FolderBrowserDrive(string Path, string Label);
+
 /// <summary>One row of the folder browser: a folder, a file, or the tail of smaller files in a folder.</summary>
 public sealed class FolderBrowserRow
 {
@@ -76,7 +78,7 @@ public sealed partial class MainViewModel
     private const int FolderBrowserMaxFiles = 100;
 
     private readonly ObservableCollection<FolderBrowserRow> _folderBrowserRows = [];
-    private readonly ObservableCollection<string> _folderBrowserDrives = [];
+    private readonly ObservableCollection<FolderBrowserDrive> _folderBrowserDrives = [];
     private readonly HashSet<string> _folderBrowserExpanded = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, IReadOnlyList<FolderFile>> _folderBrowserFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _folderBrowserFilesLoading = new(StringComparer.OrdinalIgnoreCase);
@@ -92,7 +94,7 @@ public sealed partial class MainViewModel
     public ObservableCollection<FolderBrowserRow> FolderBrowserRows => _folderBrowserRows;
 
     /// <summary>Drive roots that have a finished folder tree.</summary>
-    public ObservableCollection<string> FolderBrowserDrives => _folderBrowserDrives;
+    public ObservableCollection<FolderBrowserDrive> FolderBrowserDrives => _folderBrowserDrives;
 
     public string FolderBrowserPath => _folderBrowserPath;
 
@@ -148,7 +150,7 @@ public sealed partial class MainViewModel
             return;
         }
 
-        if (IsDiskUsageRefreshing && _folderBrowserDrives.Contains(path, StringComparer.OrdinalIgnoreCase))
+        if (IsDiskUsageRefreshing && _folderBrowserDrives.Any(drive => path.Equals(drive.Path, StringComparison.OrdinalIgnoreCase)))
         {
             ShowPendingBrowserDrive(path);
             return;
@@ -221,12 +223,13 @@ public sealed partial class MainViewModel
             return;
         }
 
-        if (!roots.SequenceEqual(_folderBrowserDrives))
+        if (!roots.SequenceEqual(_folderBrowserDrives.Select(drive => drive.Path), StringComparer.OrdinalIgnoreCase))
         {
             _folderBrowserDrives.Clear();
             foreach (var root in roots)
             {
-                _folderBrowserDrives.Add(root);
+                var label = WindowsVolumePaths.GetVolumeGuid(root) is { } id ? $"Volume {id.ToString("N")[..8]}" : root;
+                _folderBrowserDrives.Add(new FolderBrowserDrive(root, label));
             }
         }
 
@@ -256,7 +259,7 @@ public sealed partial class MainViewModel
         _folderBrowserPath = path;
         _canFolderBrowserGoUp = false;
         _folderBrowserSummary = string.IsNullOrEmpty(path)
-            ? "No fixed drives with drive letters are available."
+            ? "No fixed volumes are available."
             : scanCompleted
                 ? $"Folder sizes for {path} are unavailable."
                 : $"Waiting for the drive scan of {path}.";

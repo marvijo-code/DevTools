@@ -22,12 +22,13 @@ public sealed class VolumeSpaceTests
 
     [Theory]
     [InlineData(true, false, null, true, "Folder scan pending.")]
-    [InlineData(false, false, null, true, "700 used bytes have no folder attribution.")]
+    [InlineData(false, false, null, true, "Folder scan pending.")]
+    [InlineData(false, true, null, true, "700 used bytes have no folder attribution.")]
     [InlineData(true, true, null, true, "700 used bytes have no folder attribution.")]
     [InlineData(true, true, 500L, true, "200 used bytes remain unattributed.")]
     [InlineData(true, true, 800L, true, "File allocation exceeded reported usage by 100 bytes")]
     [InlineData(true, true, 500L, false, "Volume-wide usage is unavailable for reconciliation.")]
-    [InlineData(false, false, null, false, "Folder allocation is unavailable.")]
+    [InlineData(false, true, null, false, "Folder allocation is unavailable.")]
     public void DriveSummary_DistinguishesPendingAndUnattributedUsage(
         bool hasDriveLetter, bool scanned, long? allocatedBytes, bool volumeWide, string expectedNote)
     {

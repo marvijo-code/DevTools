@@ -49,8 +49,7 @@ public sealed class DiskUsageAnalyzer
     {
         var capturedAt = DateTimeOffset.Now;
         var drives = DriveUsageService.GetFixedDrives(includeVolumesWithoutDriveLetters: true);
-        var scanDrives = drives.Where(drive => drive.HasDriveLetter).ToArray();
-        var browseRoots = scanDrives.Select(drive => drive.RootPath).ToArray();
+        var browseRoots = drives.Select(drive => drive.RootPath).ToArray();
         lock (_treesLock)
         {
             foreach (var root in _trees.Keys.Where(root => !browseRoots.Contains(root, StringComparer.OrdinalIgnoreCase)).ToArray())
@@ -63,7 +62,7 @@ public sealed class DiskUsageAnalyzer
         var systemRoot = FolderTree.NormalizeRoot(Environment.SystemDirectory);
 
         var sections = new List<DiskUsageSection>();
-        foreach (var drive in scanDrives)
+        foreach (var drive in drives)
         {
             sections.Add(CreatePendingSection(LargestFoldersTitleFor(drive.RootPath), $"Waiting to size every folder on {drive.RootPath}."));
         }
@@ -75,17 +74,17 @@ public sealed class DiskUsageAnalyzer
         }
 
         sections.Add(BuildDriveSummarySection(drives, new Dictionary<string, DriveScanResult>(StringComparer.OrdinalIgnoreCase)));
-        progress?.Report(new DiskUsageProgress(headline, $"Found {drives.Count} fixed volume(s). Scanning folders on {scanDrives.Length} drive(s)...", "Sizing folders. Results appear per drive as soon as each drive is done.", sections.ToList(), false)
+        progress?.Report(new DiskUsageProgress(headline, $"Found {drives.Count} fixed volume(s). Scanning folders...", "Sizing folders. Results appear per drive as soon as each drive is done.", sections.ToList(), false)
         {
             BrowseRoots = browseRoots
         });
 
         var results = new Dictionary<string, DriveScanResult>(StringComparer.OrdinalIgnoreCase);
         var currentAnalysis = BuildAnalysis([]);
-        for (var driveIndex = 0; driveIndex < scanDrives.Length; driveIndex++)
+        for (var driveIndex = 0; driveIndex < drives.Count; driveIndex++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var drive = scanDrives[driveIndex];
+            var drive = drives[driveIndex];
             var sectionIndex = driveIndex;
             var title = LargestFoldersTitleFor(drive.RootPath);
             var lastStatus = DateTime.MinValue;
@@ -100,7 +99,7 @@ public sealed class DiskUsageAnalyzer
                 lastStatus = DateTime.UtcNow;
                 var elapsed = update.Elapsed > TimeSpan.Zero ? $" ({update.Elapsed.TotalSeconds:F0}s)" : string.Empty;
                 sections[sectionIndex] = CreatePendingSection(title, $"{update.EngineName}: {update.Message}{elapsed}");
-                progress?.Report(new DiskUsageProgress(headline, $"Drive {sectionIndex + 1} of {scanDrives.Length} ({drive.RootPath}): {update.Message}", currentAnalysis, sections.ToList(), false));
+                progress?.Report(new DiskUsageProgress(headline, $"Volume {sectionIndex + 1} of {drives.Count} ({drive.RootPath}): {update.Message}", currentAnalysis, sections.ToList(), false));
             });
 
             DriveScanResult result;
@@ -137,7 +136,7 @@ public sealed class DiskUsageAnalyzer
                 var derived = BuildDerivedSections(result.Tree);
                 for (var i = 0; i < derived.Count; i++)
                 {
-                    sections[scanDrives.Length + i] = derived[i];
+                    sections[drives.Count + i] = derived[i];
                 }
             }
 
@@ -147,7 +146,7 @@ public sealed class DiskUsageAnalyzer
             headline = BuildHeadline(currentDrives, capturedAt);
             sections[^1] = BuildDriveSummarySection(currentDrives, results);
             currentAnalysis = BuildAnalysis(results.Values);
-            progress?.Report(new DiskUsageProgress(headline, $"Sized {results.Count} of {scanDrives.Length} drive(s).", currentAnalysis, sections.ToList(), false)
+            progress?.Report(new DiskUsageProgress(headline, $"Sized {results.Count} of {drives.Count} volume(s).", currentAnalysis, sections.ToList(), false)
             {
                 BrowseRoots = browseRoots,
                 CompletedRoot = drive.RootPath
@@ -191,12 +190,16 @@ public sealed class DiskUsageAnalyzer
     {
         tree = null;
         node = -1;
-        if (string.IsNullOrWhiteSpace(path) || path.Length < 2 || path[1] != ':')
+        if (string.IsNullOrWhiteSpace(path) || Path.GetPathRoot(path) is not { } root)
         {
             return false;
         }
 
-        var root = char.ToUpperInvariant(path[0]) + @":\";
+        if (root.Length == 2 && root[1] == ':')
+        {
+            root += Path.DirectorySeparatorChar;
+        }
+
         lock (_treesLock)
         {
             if (_trees.TryGetValue(root, out var found))
@@ -448,7 +451,7 @@ public sealed class DiskUsageAnalyzer
             results.TryGetValue(drive.RootPath, out var result);
             var scanNote = result?.Tree is { } tree
                 ? $"Logical file size: {tree.TotalBytes:N0} bytes ({result.EngineName}, {tree.Elapsed.TotalSeconds:F1}s)."
-                : result?.Note ?? (drive.HasDriveLetter ? "Folder scan pending." : "Fixed volume without a drive letter.");
+                : result?.Note ?? "Folder scan pending.";
             if (result?.Tree?.GetAllocatedBytes(0) is long allocatedBytes)
             {
                 scanNote += $" {allocatedBytes:N0} bytes of allocation attributed by the scan.";
@@ -464,7 +467,7 @@ public sealed class DiskUsageAnalyzer
                     scanNote += " Volume-wide usage is unavailable for reconciliation.";
                 }
             }
-            else if (result is not null || !drive.HasDriveLetter)
+            else if (result is not null)
             {
                 scanNote += space.IsVolumeWide
                     ? $" {space.UsedBytes:N0} used bytes have no folder attribution."
@@ -472,7 +475,7 @@ public sealed class DiskUsageAnalyzer
             }
 
             var note = $"{totals}. {scanNote}";
-            entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, drive.HasDriveLetter, space.UsedBytes,
+            entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, drive.HasDriveLetter || result?.Tree is not null, space.UsedBytes,
                 $"{FormatBytes(space.UsedBytes)} used", note, display));
         }
 

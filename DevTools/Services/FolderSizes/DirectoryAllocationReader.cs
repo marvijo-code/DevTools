@@ -126,7 +126,9 @@ internal sealed class DirectoryAllocationIndex
 
         try
         {
-            var fileSystem = new DriveInfo(root).DriveFormat;
+            var fileSystem = WindowsVolumePaths.GetVolumeGuid(root).HasValue
+                ? WindowsVolumePaths.ReadVolumeInformation(root).FileSystem
+                : new DriveInfo(root).DriveFormat;
             // ReFS block clones can share physical clusters across different file IDs.
             if (!string.Equals(fileSystem, "NTFS", StringComparison.OrdinalIgnoreCase))
             {

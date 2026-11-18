@@ -849,12 +849,12 @@
                         </ItemsPanelTemplate>
                       </ItemsControl.ItemsPanel>
                       <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="x:String">
-                          <Button Content="{Binding}"
-                                  Tag="{Binding}"
+                        <DataTemplate x:DataType="vm:FolderBrowserDrive">
+                          <Button Content="{Binding Label}"
+                                  Tag="{Binding Path}"
                                   Click="BrowseDrive_Click"
                                   Padding="10,2"
-                                  ToolTipService.ToolTip="Open this drive in the folder browser" />
+                                  ToolTipService.ToolTip="{Binding Path}" />
                         </DataTemplate>
                       </ItemsControl.ItemTemplate>
                     </ItemsControl>

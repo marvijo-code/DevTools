@@ -64,12 +64,11 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
 
     internal static bool? ReadSeekPenalty(string driveRoot)
     {
-        if (!OperatingSystem.IsWindows() || driveRoot.Length != 3 || driveRoot[1] != ':')
+        if (!OperatingSystem.IsWindows() || WindowsVolumePaths.GetDevicePath(driveRoot) is not { } path)
         {
             return null;
         }
 
-        var path = @"\\.\" + driveRoot[..2];
         using var volume = OpenVolume(path, 0, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
         if (volume.IsInvalid)
         {

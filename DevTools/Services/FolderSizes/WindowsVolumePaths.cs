@@ -7,6 +7,27 @@ internal static class WindowsVolumePaths
 {
     private const int VolumeNameCapacity = 64;
     private const int ErrorNoMoreFiles = 18;
+    private const string VolumeGuidPrefix = @"\\?\Volume{";
+
+    internal static Guid? GetVolumeGuid(string? path) =>
+        path is not null &&
+        path.Length == VolumeGuidPrefix.Length + 38 &&
+        path.StartsWith(VolumeGuidPrefix, StringComparison.OrdinalIgnoreCase) &&
+        path.EndsWith(@"}\", StringComparison.Ordinal) &&
+        Guid.TryParseExact(path.AsSpan(VolumeGuidPrefix.Length, 36), "D", out var id)
+            ? id
+            : null;
+
+    internal static string? GetDevicePath(string? root)
+    {
+        if (root is { Length: 3 } && char.IsAsciiLetter(root[0]) && root[1] == ':' && Path.EndsInDirectorySeparator(root))
+        {
+            return @"\\.\" + root[..2];
+        }
+
+        // CreateFile opens the raw volume when the trailing separator is omitted.
+        return GetVolumeGuid(root).HasValue ? root![..^1] : null;
+    }
 
     internal static string? GetVolumeName(string rootPath)
     {

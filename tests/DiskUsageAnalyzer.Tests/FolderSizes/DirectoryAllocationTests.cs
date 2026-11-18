@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using DevTools.Models;
 using DevTools.Services.FolderSizes;
 using Microsoft.Win32.SafeHandles;
 using Xunit;
@@ -75,6 +76,38 @@ public sealed class DirectoryAllocationTests
         {
             File.Delete(path);
             root.Delete();
+        }
+    }
+
+    [Fact]
+    public async Task Walker_CanReadAnNtfsFolderByVolumeGuidAndCleanupRemainsDisabled()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-volume-guid-");
+        var fixtureDrive = Path.GetPathRoot(fixture.FullName)!;
+        var volumeRoot = Assert.IsType<string>(WindowsVolumePaths.GetVolumeName(fixtureDrive));
+        var folderPath = Path.Combine(volumeRoot, Path.GetRelativePath(fixtureDrive, fixture.FullName));
+        var filePath = Path.Combine(fixture.FullName, "content.bin");
+
+        try
+        {
+            var bytes = new byte[8193];
+            new Random(13).NextBytes(bytes);
+            await File.WriteAllBytesAsync(filePath, bytes);
+            var tree = await new ParallelFolderWalker().ScanAsync(folderPath, null, CancellationToken.None, workerCount: 1);
+            var node = tree.Find(folderPath);
+
+            Assert.Equal(volumeRoot, tree.RootPath);
+            Assert.Equal(folderPath, tree.GetPath(node));
+            Assert.Equal(bytes.Length, tree.GetTotalBytes(node));
+            Assert.True(tree.GetAllocatedBytes(node) > 0);
+            Assert.Equal(-1, tree.Find(fixture.FullName));
+            Assert.Equal(volumeRoot[..^1], WindowsVolumePaths.GetDevicePath(volumeRoot));
+            Assert.False(DiskUsageEntry.IsClearableDirectory(folderPath));
+        }
+        finally
+        {
+            File.Delete(filePath);
+            fixture.Delete();
         }
     }
 

@@ -195,12 +195,13 @@ public sealed class FolderTree
         }
 
         var full = path.Trim();
-        if (!full.StartsWith(RootPath[..2], StringComparison.OrdinalIgnoreCase))
+        var relativeStart = GetRelativeStart(RootPath, full);
+        if (relativeStart < 0)
         {
             return -1;
         }
 
-        var relative = full[2..].Trim(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var relative = full[relativeStart..].Trim(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         if (relative.Length == 0)
         {
             return 0;
@@ -236,12 +237,33 @@ public sealed class FolderTree
     internal static string NormalizeRoot(string rootPath)
     {
         var root = Path.GetPathRoot(rootPath);
-        if (string.IsNullOrWhiteSpace(root) || root.Length < 2 || root[1] != ':')
+        if (root is { Length: >= 2 } && root[1] == ':')
         {
-            throw new ArgumentException($"A drive-letter root is required, got '{rootPath}'.", nameof(rootPath));
+            return char.ToUpperInvariant(root[0]) + @":\";
         }
 
-        return char.ToUpperInvariant(root[0]) + @":\";
+        if (WindowsVolumePaths.GetVolumeGuid(root).HasValue)
+        {
+            return root!;
+        }
+
+        throw new ArgumentException($"A local volume path is required, got '{rootPath}'.", nameof(rootPath));
+    }
+
+    internal static int GetRelativeStart(string root, string path)
+    {
+        var rootLength = root.Length - 1;
+        if (!path.AsSpan().StartsWith(root.AsSpan(0, rootLength), StringComparison.OrdinalIgnoreCase))
+        {
+            return -1;
+        }
+
+        if (root[1] != ':' && path.Length > rootLength && !Path.EndsInDirectorySeparator(path.AsSpan(0, rootLength + 1)))
+        {
+            return -1;
+        }
+
+        return rootLength;
     }
 }
 
@@ -376,13 +398,13 @@ public sealed class FolderTreeBuilder
 
     private int EnsureFolder(string fullPath)
     {
-        if (fullPath.Length < 2 || char.ToUpperInvariant(fullPath[0]) != _root[0] || fullPath[1] != ':')
+        var position = FolderTree.GetRelativeStart(_root, fullPath);
+        if (position < 0)
         {
             return -1;
         }
 
         var node = 0;
-        var position = 2;
         while (position < fullPath.Length)
         {
             while (position < fullPath.Length && fullPath[position] == Path.DirectorySeparatorChar)

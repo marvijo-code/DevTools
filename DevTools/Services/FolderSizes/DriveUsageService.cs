@@ -208,7 +208,13 @@ public sealed class DriveUsageService
         AppLog.Info($"Drive {drive.RootPath}: {tree.EngineName} sized {tree.FolderCount:N0} folders ({ByteFormatter.Format(tree.TotalBytes)} in {tree.TotalFiles:N0} files) in {tree.Elapsed.TotalSeconds:F1}s.");
         try
         {
-            drive = drive with { Space = ReadVolumeSpace(new DriveInfo(drive.RootPath)) };
+            var space = drive.HasDriveLetter
+                ? ReadVolumeSpace(new DriveInfo(drive.RootPath))
+                : TryReadWindowsVolumeSpace(drive.RootPath);
+            if (space is { } refreshed)
+            {
+                drive = drive with { Space = refreshed };
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

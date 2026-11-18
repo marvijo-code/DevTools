@@ -272,15 +272,14 @@ internal static class MftTableLoader
     {
         var root = Path.GetFullPath(scanRoot);
         var pathRoot = Path.GetPathRoot(root);
-        if (string.IsNullOrWhiteSpace(pathRoot) || pathRoot.Length < 2 || pathRoot[1] != ':')
+        var devicePath = WindowsVolumePaths.GetDevicePath(pathRoot);
+        if (devicePath is null)
         {
-            throw new NotSupportedException($"MFT scan requires a drive-letter path, got '{root}'.");
+            throw new NotSupportedException($"MFT scan requires a local volume path, got '{root}'.");
         }
 
-        var driveLetter = char.ToUpperInvariant(pathRoot[0]);
-        var volumeRoot = $@"{driveLetter}:\";
-
-        using var volume = NativeMethods.OpenVolume(driveLetter);
+        var volumeRoot = FolderTree.NormalizeRoot(root);
+        using var volume = NativeMethods.OpenVolume(devicePath);
         var geometry = NativeMethods.GetVolumeData(volume);
         var recordCount = GetRecordCount(geometry);
         var recordSize = (int)geometry.BytesPerFileRecordSegment;

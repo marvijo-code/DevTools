@@ -44,9 +44,8 @@ internal static class NativeMethods
         IntPtr lpOverlapped);
 
     /// <summary>Opens a raw read handle to a volume, e.g. <c>\\.\C:</c>. Requires elevation.</summary>
-    internal static SafeFileHandle OpenVolume(char driveLetter)
+    internal static SafeFileHandle OpenVolume(string path)
     {
-        var path = $@"\\.\{char.ToUpperInvariant(driveLetter)}:";
         var handle = CreateFile(
             path,
             GenericRead,

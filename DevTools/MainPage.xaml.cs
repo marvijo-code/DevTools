@@ -1266,6 +1266,12 @@ public sealed partial class MainPage : Page
             return;
         }
 
+        if (!DiskUsageEntry.IsClearableDirectory(rawPath) || !DiskUsageEntry.IsClearableDirectory(targetPath))
+        {
+            ViewModel.StatusMessage = $"Cleanup is disabled for {targetPath}.";
+            return;
+        }
+
         var dialog = new ContentDialog
         {
             Title = "Clear Folder Contents?",

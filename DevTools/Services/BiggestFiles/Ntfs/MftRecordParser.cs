@@ -298,7 +298,7 @@ public static class MftRecordParser
         }
     }
 
-    private static int NamespaceRank(byte fileNameNamespace) => fileNameNamespace switch
+    internal static int NamespaceRank(byte fileNameNamespace) => fileNameNamespace switch
     {
         NamespaceWin32 => 3,
         NamespaceWin32Dos => 3,

@@ -150,6 +150,60 @@ public sealed class MftExtentMapReaderTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LoadVolumeAsync_UsesVerifiedNamesFromExtensions(bool keepFileNames)
+    {
+        var directory = Directory.CreateTempSubdirectory("devtools-mft-names-");
+        var path = Path.Combine(directory.FullName, "image.bin");
+        try
+        {
+            var disk = BuildDisk(nonResidentList: true);
+            new MftRecordBuilder().Directory(true).Sequence(3).Build().CopyTo(disk, 95 * ClusterSize);
+            new MftRecordBuilder().NonResidentData(4130, 8192, runs: [0x11, 16, 120, 0], highestVcn: 15)
+                .Build().CopyTo(disk, 97 * ClusterSize);
+
+            foreach (var (offset, baseReference, name, parent, nameNamespace) in new (int, ulong, string, ulong, byte)[]
+            {
+                (99, (1UL << 48) | 25, "stale-parent.bin", (2UL << 48) | 24, 1),
+                (101, (1UL << 48) | 25, "DATA~1.BIN", (3UL << 48) | 24, 2),
+                (103, (1UL << 48) | 25, "data.bin", (3UL << 48) | 24, 1),
+                (105, (1UL << 48) | 25, "other-link.bin", (3UL << 48) | 24, 1),
+                (107, (2UL << 48) | 24, "Reused folder record", (1UL << 48) | 5, 1),
+                (109, (3UL << 48) | 24, "Folder", (1UL << 48) | 5, 1)
+            })
+            {
+                new MftRecordBuilder().BaseRecord(baseReference).FileName(name, parent, nameNamespace)
+                    .Build().CopyTo(disk, offset * ClusterSize);
+            }
+
+            await File.WriteAllBytesAsync(path, disk);
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var table = await MftTableLoader.LoadVolumeAsync(handle, @"C:\", Geometry, null,
+                Stopwatch.StartNew(), CancellationToken.None, keepFileNames);
+            var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "fixture", Stopwatch.StartNew());
+
+            Assert.True(table.IsNamedFile(25));
+            Assert.Equal(24U, table.Parent[25]);
+            Assert.Equal(keepFileNames ? "data.bin" : null, table.Names[25]);
+            Assert.Equal(4130, tree.TotalBytes);
+            Assert.Equal(1, tree.TotalFiles);
+            var folder = tree.Find(@"C:\Folder");
+            Assert.True(folder > 0);
+            if (!keepFileNames)
+            {
+                Assert.Equal(16 * ClusterSize, tree.GetAllocatedBytes(folder));
+                Assert.Equal(0, tree.NtfsAllocation?.UnlinkedBytes);
+            }
+        }
+        finally
+        {
+            File.Delete(path);
+            directory.Delete();
+        }
+    }
+
     private static byte[] BuildDisk(bool nonResidentList, ushort firstSequence = 7, ushort firstRecordNumber = 1,
         bool includeOverlappingRun = false)
     {

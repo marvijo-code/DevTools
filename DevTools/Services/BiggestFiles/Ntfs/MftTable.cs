@@ -483,8 +483,8 @@ internal static class MftTableLoader
             FullMode = BoundedChannelFullMode.Wait
         });
 
-        // Extension records whose LowestVCN==0 $DATA carries the real size for a fragmented base file.
-        var extensionSizes = new List<ExtensionAllocation>();
+        // An extension can hold part of the allocation, the first $DATA extent or a $FILE_NAME.
+        var extensions = new List<ExtensionRecord>();
         var extensionLock = new object();
         var parsedCounter = 0;
 
@@ -496,7 +496,7 @@ internal static class MftTableLoader
             var parserIndex = i;
             parsers[i] = Task.Run(async () =>
             {
-                var localExtensions = new List<ExtensionAllocation>();
+                var localExtensions = new List<ExtensionRecord>();
                 var attributeRuns = observedBitmap is not null ? new List<(long Lcn, long ClusterCount)>() : null;
                 UInt128 referencedClusters = 0;
                 var info = new MftRecordInfo();
@@ -537,11 +537,11 @@ internal static class MftTableLoader
                                 if (info.IsExtension)
                                 {
                                     flag |= MftRecordTable.FlagExtension;
-                                    if (info.BaseRecordNumber < (ulong)recordCount && (info.DataSizesValid || allocated > 0))
+                                    if (info.BaseRecordNumber < (ulong)recordCount && (info.HasName || info.DataSizesValid || allocated > 0))
                                     {
-                                        localExtensions.Add(new ExtensionAllocation(
+                                        localExtensions.Add(new ExtensionRecord(
                                             globalIndex, (int)info.BaseRecordNumber, info.BaseRecordSequence,
-                                            info.DataSizesValid, info.DataRealSize, info.DataAllocatedSize));
+                                            info.FileNameNamespace, info.DataSizesValid, info.DataRealSize, info.DataAllocatedSize));
                                     }
                                 }
                                 else
@@ -565,9 +565,9 @@ internal static class MftTableLoader
                                 {
                                     lastWrite[globalIndex] = info.LastWriteFileTime;
                                 }
-                                // File names cost hundreds of MB on a big drive; the folder-size scan only
-                                // needs folder names, so it skips them to stay light on a RAM-starved laptop.
-                                if (info.HasName && (keepFileNames || info.IsDirectory))
+                                // The folder scan skips ordinary file names. An extension with a name
+                                // may belong to a directory even if its own directory flag is clear.
+                                if (info.HasName && (keepFileNames || info.IsDirectory || info.IsExtension))
                                 {
                                     names[globalIndex] = Encoding.Unicode.GetString(recordSpan.Slice(info.NameOffsetInRecord, info.NameLengthChars * 2));
                                 }
@@ -599,7 +599,7 @@ internal static class MftTableLoader
                 {
                     lock (extensionLock)
                     {
-                        extensionSizes.AddRange(localExtensions);
+                        extensions.AddRange(localExtensions);
                     }
                 }
             }, cancellationToken);
@@ -709,8 +709,9 @@ internal static class MftTableLoader
 
         ValidateParentReferences(parent, flags, referenceSequences, cancellationToken);
 
-        // Keep an extension's allocation on its own record until its base reference is verified.
-        foreach (var extension in extensionSizes)
+        // Keep extension data on its own record until its base reference is verified.
+        Dictionary<int, (int Record, int Rank)>? recoveredNames = null;
+        foreach (var extension in extensions)
         {
             var baseNumber = extension.BaseNumber;
             if ((flags[baseNumber] & (MftRecordTable.FlagInUse | MftRecordTable.FlagExtension)) != MftRecordTable.FlagInUse ||
@@ -725,6 +726,20 @@ internal static class MftTableLoader
                 recordAllocation[extension.RecordNumber] = 0;
             }
 
+            var record = extension.RecordNumber;
+            if ((flags[record] & MftRecordTable.FlagHasName) != 0 &&
+                ((flags[baseNumber] & MftRecordTable.FlagHasName) == 0 || parent[baseNumber] == MftRecordTable.InvalidParentRecord) &&
+                IsCurrentParentReference(parent[record], baseNumber, (ushort)referenceSequences[record], flags, referenceSequences))
+            {
+                var rank = MftRecordParser.NamespaceRank(extension.NameNamespace);
+                recoveredNames ??= new();
+                if (!recoveredNames.TryGetValue(baseNumber, out var current) ||
+                    rank > current.Rank || (rank == current.Rank && record < current.Record))
+                {
+                    recoveredNames[baseNumber] = (record, rank);
+                }
+            }
+
             if (extension.HasLogicalSize && (flags[baseNumber] & MftRecordTable.FlagHasSize) == 0)
             {
                 realSize[baseNumber] = extension.LogicalBytes;
@@ -734,6 +749,17 @@ internal static class MftTableLoader
                 }
 
                 flags[baseNumber] |= MftRecordTable.FlagHasSize;
+            }
+        }
+
+        if (recoveredNames is not null)
+        {
+            foreach (var (baseNumber, name) in recoveredNames)
+            {
+                var isDirectory = (flags[baseNumber] & MftRecordTable.FlagDirectory) != 0;
+                flags[baseNumber] |= MftRecordTable.FlagHasName;
+                parent[baseNumber] = parent[name.Record];
+                names[baseNumber] = keepFileNames || isDirectory ? names[name.Record] : null;
             }
         }
 
@@ -752,7 +778,6 @@ internal static class MftTableLoader
     internal static void ValidateParentReferences(uint[] parents, byte[] flags, uint[] sequences, CancellationToken cancellationToken)
     {
         const byte namedBase = MftRecordTable.FlagInUse | MftRecordTable.FlagHasName;
-        const byte baseDirectory = MftRecordTable.FlagInUse | MftRecordTable.FlagDirectory;
         for (var index = 0; index < parents.Length; index++)
         {
             if ((index & 4095) == 0)
@@ -766,15 +791,19 @@ internal static class MftTableLoader
                 continue;
             }
 
-            var parent = parents[index];
-            var expectedSequence = (ushort)sequences[index];
-            if (parent >= (uint)parents.Length || parent == index || expectedSequence == 0 ||
-                (flags[parent] & (baseDirectory | MftRecordTable.FlagExtension)) != baseDirectory ||
-                expectedSequence != sequences[parent] >> 16)
+            if (!IsCurrentParentReference(parents[index], index, (ushort)sequences[index], flags, sequences))
             {
                 parents[index] = MftRecordTable.InvalidParentRecord;
             }
         }
+    }
+
+    private static bool IsCurrentParentReference(uint parent, int record, ushort expectedSequence, byte[] flags, uint[] sequences)
+    {
+        const byte baseDirectory = MftRecordTable.FlagInUse | MftRecordTable.FlagDirectory;
+        return parent < (uint)flags.Length && parent != record && expectedSequence != 0 &&
+               (flags[parent] & (baseDirectory | MftRecordTable.FlagExtension)) == baseDirectory &&
+               expectedSequence == sequences[parent] >> 16;
     }
 
     private static void ReadExact(Microsoft.Win32.SafeHandles.SafeFileHandle handle, Span<byte> buffer, long fileOffset)
@@ -792,8 +821,9 @@ internal static class MftTableLoader
         }
     }
 
-    private readonly record struct ExtensionAllocation(
-        int RecordNumber, int BaseNumber, ushort BaseSequence, bool HasLogicalSize, long LogicalBytes, long UnnamedDataAllocation);
+    private readonly record struct ExtensionRecord(
+        int RecordNumber, int BaseNumber, ushort BaseSequence, byte NameNamespace,
+        bool HasLogicalSize, long LogicalBytes, long UnnamedDataAllocation);
 
     private readonly record struct Block(byte[] Buffer, int StartRecordIndex, int RecordCount);
 }

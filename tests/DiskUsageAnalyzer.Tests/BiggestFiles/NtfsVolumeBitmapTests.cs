@@ -7,12 +7,14 @@ namespace DiskUsageAnalyzer.Tests.BiggestFiles;
 
 public sealed class NtfsVolumeBitmapTests
 {
-    [Fact]
-    public void Reconcile_CountsUniqueMatchesAcrossRoundedRepliesAndIgnoresPadding()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Reconcile_CountsUniqueMatchesAcrossRoundedRepliesAndIgnoresPadding(bool singleWriter)
     {
         const int clusters = 133;
         const uint clusterBytes = 512;
-        var map = Assert.IsType<NtfsVolumeBitmap>(NtfsVolumeBitmap.TryCreate(clusters, 1024 * 1024));
+        var map = Assert.IsType<NtfsVolumeBitmap>(NtfsVolumeBitmap.TryCreate(clusters, 1024 * 1024, singleWriter: singleWriter));
         map.Mark(10, 76);
         map.Mark(70, 20);
         map.Mark(124, 9);

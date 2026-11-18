@@ -452,7 +452,8 @@ internal static class MftTableLoader
         var extensionFileAllocations = keepFileNames && deferFileNames ? new Dictionary<int, long>() : null;
         var recordAllocation = keepFileNames ? null : new MftRecordAllocations(recordCount, geometry.BytesPerCluster, geometry.TotalClusters);
         var observedBitmap = bitmapQuery is not null && recordAllocation is not null
-            ? NtfsVolumeBitmap.TryCreate(geometry.TotalClusters, resources.MemoryHeadroom, bitmapQuery, cancellationToken)
+            ? NtfsVolumeBitmap.TryCreate(geometry.TotalClusters, resources.MemoryHeadroom, bitmapQuery, cancellationToken,
+                singleWriter: parserCount == 1)
             : null;
         // The record sequence and its parent reference sequence share one temporary column.
         var referenceSequences = new uint[recordCount];

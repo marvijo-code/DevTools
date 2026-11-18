@@ -20,17 +20,19 @@ internal sealed class NtfsVolumeBitmap
     private const int ProbeBytes = HeaderBytes + 4096;
     private readonly long _clusters;
     private readonly long[] _observed;
+    private readonly bool _singleWriter;
 
     internal delegate int Query(long startingLcn, byte[] output);
 
-    private NtfsVolumeBitmap(long clusters, int words)
+    private NtfsVolumeBitmap(long clusters, int words, bool singleWriter)
     {
         _clusters = clusters;
         _observed = new long[words];
+        _singleWriter = singleWriter;
     }
 
     internal static NtfsVolumeBitmap? TryCreate(long clusters, long? memoryHeadroom, Query? query = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, bool singleWriter = false)
     {
         if (clusters <= 0 || memoryHeadroom is not long available)
         {
@@ -60,7 +62,7 @@ internal sealed class NtfsVolumeBitmap
             }
         }
 
-        return new NtfsVolumeBitmap(clusters, (int)words);
+        return new NtfsVolumeBitmap(clusters, (int)words, singleWriter);
     }
 
     internal void Mark(long lcn, long count)
@@ -73,18 +75,37 @@ internal sealed class NtfsVolumeBitmap
         var lastMask = (long)(ulong.MaxValue >> (63 - (int)(lastCluster & 63)));
         if (first == last)
         {
-            Interlocked.Or(ref _observed[first], firstMask & lastMask);
+            MarkWord(first, firstMask & lastMask);
             return;
         }
 
-        Interlocked.Or(ref _observed[first], firstMask);
-        // A full word sets every bit, including any bits set by concurrent partial-word updates.
-        for (var word = first + 1; word < last; word++)
+        MarkWord(first, firstMask);
+        if (_singleWriter)
         {
-            Volatile.Write(ref _observed[word], -1L);
+            _observed.AsSpan(first + 1, last - first - 1).Fill(-1L);
+        }
+        else
+        {
+            // A full word sets every bit, including bits set by concurrent partial-word updates.
+            for (var word = first + 1; word < last; word++)
+            {
+                Volatile.Write(ref _observed[word], -1L);
+            }
         }
 
-        Interlocked.Or(ref _observed[last], lastMask);
+        MarkWord(last, lastMask);
+    }
+
+    private void MarkWord(int index, long mask)
+    {
+        if (_singleWriter)
+        {
+            _observed[index] |= mask;
+        }
+        else
+        {
+            Interlocked.Or(ref _observed[index], mask);
+        }
     }
 
     internal NtfsBitmapAllocation? Reconcile(uint bytesPerCluster, Query query, CancellationToken cancellationToken)

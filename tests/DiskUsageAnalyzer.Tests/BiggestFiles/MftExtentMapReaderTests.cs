@@ -235,6 +235,46 @@ public sealed class MftExtentMapReaderTests
     }
 
     [Fact]
+    public void LoadDeferredFileNames_CoalescesAdjacentWinnersAndSkipsGapsAcrossExtents()
+    {
+        const int recordSize = MftRecordBuilder.RecordSize;
+        var extents = new List<(long Lcn, long ClusterCount)> { (20, 3), (50, 4), (100, 6) };
+        var logical = new byte[13 * ClusterSize];
+        var parentReferences = new uint[6];
+        var sequences = new uint[6];
+        int[] winners = [1, 2, 5];
+        foreach (var index in winners)
+        {
+            new MftRecordBuilder().FileName($"file-{index}.bin", (7UL << 48) | 5, 1)
+                .Build().CopyTo(logical, index * recordSize);
+            parentReferences[index] = 5;
+            sequences[index] = (1U << 16) | 7U;
+        }
+
+        var physical = new byte[106 * ClusterSize];
+        var logicalOffset = 0;
+        foreach (var (lcn, clusters) in extents)
+        {
+            var length = (int)clusters * ClusterSize;
+            logical.AsSpan(logicalOffset, length).CopyTo(physical.AsSpan((int)lcn * ClusterSize));
+            logicalOffset += length;
+        }
+
+        var names = new string?[6];
+        var reads = new List<(long Offset, int Length)>();
+        MftTableLoader.LoadDeferredFileNames(winners, extents, recordSize, ClusterSize, parentReferences, sequences, names,
+            (offset, destination) =>
+            {
+                reads.Add((offset, destination.Length));
+                physical.AsSpan((int)offset, destination.Length).CopyTo(destination);
+            }, CancellationToken.None);
+
+        Assert.Equal(["file-1.bin", "file-2.bin", "file-5.bin"], winners.Select(index => names[index]));
+        Assert.Equal([(22L * ClusterSize, ClusterSize), (50L * ClusterSize, 3 * ClusterSize),
+            (103L * ClusterSize, 2 * ClusterSize)], reads);
+    }
+
+    [Fact]
     public async Task RankFiles_ReadsDeferredNamesFromTheVerifiedRecords()
     {
         var directory = Directory.CreateTempSubdirectory("devtools-deferred-mft-names-");

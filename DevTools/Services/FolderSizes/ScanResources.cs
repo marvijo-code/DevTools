@@ -17,6 +17,10 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
         return new ScanResources(Environment.ProcessorCount, headroom);
     }
 
+    internal static bool CanDeferLargestFileNames(int recordCount, int requestedFiles) =>
+        // The extra read pass is worthwhile when most records will stay out of the ranking.
+        requestedFiles is > 0 and <= 500 && recordCount >= (requestedFiles <= 100 ? 16_384 : 65_536);
+
     internal int VolumeWalkParallelism(int independentDisks)
     {
         const int maximumConcurrentWalks = 4;

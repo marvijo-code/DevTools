@@ -9,6 +9,18 @@ public sealed class ScanResourcesTests
     private const long MiB = 1024 * 1024;
 
     [Theory]
+    [InlineData(8_192, 100, false)]
+    [InlineData(16_384, 100, true)]
+    [InlineData(32_768, 250, false)]
+    [InlineData(65_536, 500, true)]
+    [InlineData(128_000, 501, false)]
+    [InlineData(128_000, 0, false)]
+    public void CanDeferLargestFileNames_UsesTheTableAndResultSizes(int records, int requested, bool expected)
+    {
+        Assert.Equal(expected, ScanResources.CanDeferLargestFileNames(records, requested));
+    }
+
+    [Theory]
     [InlineData(32, 4096, true, false, 1)]
     [InlineData(32, 4096, true, true, 2)]
     [InlineData(32, 4096, false, false, 8)]

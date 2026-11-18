@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using DevTools.Services.BiggestFiles;
-using DevTools.Services.FolderSizes;
 
 namespace DevTools.Services.BiggestFiles.Ntfs;
 
@@ -21,8 +20,6 @@ public sealed class MftScanner
         var stopwatch = Stopwatch.StartNew();
         using var scan = await MftTableLoader.EnterScanAsync(cancellationToken).ConfigureAwait(false);
 
-        // Small rankings can reread just the winning names cheaply on a volume without seek penalties.
-        var deferFileNames = request.TopCount <= 100 && ScanResources.ReadSeekPenalty(Path.GetPathRoot(root)) is false;
         var result = await MftTableLoader.UseVolumeAsync(
             root,
             (parsed, _ , elapsed) => progress?.Report(new BiggestFilesProgress(
@@ -31,7 +28,7 @@ public sealed class MftScanner
             stopwatch,
             cancellationToken,
             keepFileNames: true,
-            deferFileNames,
+            requestedLargestFiles: request.TopCount,
             table => RankFiles(table, root, request.TopCount, stopwatch, cancellationToken)).ConfigureAwait(false);
         progress?.Report(new BiggestFilesProgress(
             "Done", result.FilesSeen, result.BytesSeen, result.Elapsed,

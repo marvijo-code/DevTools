@@ -39,7 +39,7 @@ internal sealed class MftRecordTable
         string?[] names,
         MftRecordAllocations? recordAllocation = null,
         NtfsBitmapAllocation? bitmapAllocation = null,
-        Func<int, CancellationToken, string>? readFileName = null)
+        Action<int[], CancellationToken>? loadFileNames = null)
     {
         VolumeRoot = volumeRoot;
         RecordCount = recordCount;
@@ -51,7 +51,7 @@ internal sealed class MftRecordTable
         Names = names;
         RecordAllocation = recordAllocation;
         BitmapAllocation = bitmapAllocation;
-        _readFileName = readFileName;
+        _loadFileNames = loadFileNames;
     }
 
     public string VolumeRoot { get; }
@@ -71,19 +71,20 @@ internal sealed class MftRecordTable
     public string?[] Names { get; }
     public MftRecordAllocations? RecordAllocation { get; }
     public NtfsBitmapAllocation? BitmapAllocation { get; }
-    private readonly Func<int, CancellationToken, string>? _readFileName;
+    private readonly Action<int[], CancellationToken>? _loadFileNames;
 
     public void LoadFileNames(IEnumerable<int> records, CancellationToken cancellationToken)
     {
-        if (_readFileName is null)
+        if (_loadFileNames is null)
         {
             return;
         }
 
-        // Read names in MFT order, then show the results in size order.
-        foreach (var record in records.Order())
+        // Names recovered from extension records are already available.
+        var missing = records.Where(record => Names[record] is null).Distinct().Order().ToArray();
+        if (missing.Length > 0)
         {
-            Names[record] ??= _readFileName(record, cancellationToken);
+            _loadFileNames(missing, cancellationToken);
         }
     }
 
@@ -359,6 +360,7 @@ internal sealed class MftRecordAllocations
 /// </summary>
 internal static class MftTableLoader
 {
+    private const int MaximumNameBatchBytes = 64 * 1024;
     private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(250);
     private static readonly SemaphoreSlim ActiveScan = new(1, 1);
 
@@ -389,7 +391,7 @@ internal static class MftTableLoader
         CancellationToken cancellationToken,
         bool keepFileNames = true) =>
         UseVolumeAsync(scanRoot, reportProgress, stopwatch, cancellationToken, keepFileNames,
-            deferFileNames: false, static table => table);
+            requestedLargestFiles: 0, static table => table);
 
     internal static async Task<TResult> UseVolumeAsync<TResult>(
         string scanRoot,
@@ -397,7 +399,7 @@ internal static class MftTableLoader
         Stopwatch stopwatch,
         CancellationToken cancellationToken,
         bool keepFileNames,
-        bool deferFileNames,
+        int requestedLargestFiles,
         Func<MftRecordTable, TResult> consume)
     {
         var root = Path.GetFullPath(scanRoot);
@@ -412,6 +414,9 @@ internal static class MftTableLoader
         await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         using var volume = NativeMethods.OpenVolume(devicePath);
         var geometry = NativeMethods.GetVolumeData(volume);
+        var deferFileNames = keepFileNames && requestedLargestFiles > 0 &&
+            ScanResources.CanDeferLargestFileNames(GetRecordCount(geometry), requestedLargestFiles) &&
+            ScanResources.ReadSeekPenalty(volumeRoot) is false;
         var table = await LoadVolumeAsync(volume, volumeRoot, geometry, reportProgress, stopwatch, cancellationToken, keepFileNames,
             keepFileNames ? null : (start, output) => NativeMethods.ReadVolumeBitmap(volume, start, output), deferFileNames)
             .ConfigureAwait(false);
@@ -501,34 +506,86 @@ internal static class MftTableLoader
 
         reportProgress?.Invoke(recordCount, recordCount, stopwatch.Elapsed);
 
-        Func<int, CancellationToken, string>? readFileName = deferFileNames && keepFileNames
-            ? CreateFileNameReader(volume, extents, recordSize, clusterBytes, parent, referenceSequences)
+        Action<int[], CancellationToken>? loadFileNames = deferFileNames && keepFileNames
+            ? (records, token) => LoadDeferredFileNames(records, extents, recordSize, clusterBytes, parent,
+                referenceSequences, names, (offset, destination) => ReadExact(volume, destination, offset), token)
             : null;
         return new MftRecordTable(volumeRoot, recordCount, parent, flags, realSize, allocSize, lastWrite, names,
-            recordAllocation, bitmapAllocation, readFileName);
+            recordAllocation, bitmapAllocation, loadFileNames);
     }
 
-    private static Func<int, CancellationToken, string> CreateFileNameReader(
-        Microsoft.Win32.SafeHandles.SafeFileHandle volume, List<(long Lcn, long ClusterCount)> extents,
-        int recordSize, int clusterBytes, uint[] parents, uint[] referenceSequences)
+    internal static void LoadDeferredFileNames(int[] records, List<(long Lcn, long ClusterCount)> extents,
+        int recordSize, int clusterBytes, uint[] parents, uint[] referenceSequences, string?[] names,
+        MftExtentMapReader.ReadAt readAt, CancellationToken cancellationToken)
     {
-        var record = new byte[recordSize];
-        var scratch = new byte[clusterBytes];
-        MftExtentMapReader.ReadAt readAt = (offset, destination) => ReadExact(volume, destination, offset);
-        return (index, cancellationToken) =>
-        {
-            ScanGate.Wait(cancellationToken);
-            MftExtentMapReader.ReadMapped(extents, (long)index * recordSize, record, scratch, readAt, cancellationToken);
-            var info = new MftRecordInfo();
-            if (!MftRecordParser.TryParseRecord(record, ref info, requireInUse: true, readLastWrite: false) ||
-                info.IsDirectory || info.IsExtension || !info.HasName || info.ParentRecordNumber != parents[index] ||
-                (((uint)info.SequenceNumber << 16) | info.ParentRecordSequence) != referenceSequences[index])
-            {
-                throw new IOException($"NTFS record {index} changed while validating its file name.");
-            }
+        long ClusterStart(long offset) => offset / clusterBytes * clusterBytes;
+        long ClusterEnd(long offset) => ((offset - 1) / clusterBytes + 1) * clusterBytes;
 
-            return Encoding.Unicode.GetString(record.AsSpan(info.NameOffsetInRecord, info.NameLengthChars * 2));
-        };
+        var scratch = ArrayPool<byte>.Shared.Rent(clusterBytes);
+        byte[]? buffer = null;
+        try
+        {
+            for (var first = 0; first < records.Length;)
+            {
+                ScanGate.Wait(cancellationToken);
+                var firstRecordOffset = (long)records[first] * recordSize;
+                var batchStart = ClusterStart(firstRecordOffset);
+                var batchEnd = ClusterEnd(firstRecordOffset + recordSize);
+                var next = first + 1;
+                // Include adjacent clusters, with no read between clusters that contain no selected record.
+                while (next < records.Length)
+                {
+                    var recordOffset = (long)records[next] * recordSize;
+                    var recordEnd = ClusterEnd(recordOffset + recordSize);
+                    if (ClusterStart(recordOffset) > batchEnd ||
+                        (recordEnd > batchEnd && recordEnd - batchStart > MaximumNameBatchBytes))
+                    {
+                        break;
+                    }
+
+                    batchEnd = recordEnd;
+                    next++;
+                }
+
+                var length = checked((int)(batchEnd - batchStart));
+                if (buffer is null || buffer.Length < length)
+                {
+                    var expanded = ArrayPool<byte>.Shared.Rent(length);
+                    if (buffer is not null)
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                    }
+
+                    buffer = expanded;
+                }
+
+                var batch = buffer.AsSpan(0, length);
+                MftExtentMapReader.ReadMapped(extents, batchStart, batch, scratch.AsSpan(0, clusterBytes), readAt, cancellationToken);
+                for (; first < next; first++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var index = records[first];
+                    var record = batch.Slice((int)((long)index * recordSize - batchStart), recordSize);
+                    var info = new MftRecordInfo();
+                    if (!MftRecordParser.TryParseRecord(record, ref info, requireInUse: true, readLastWrite: false) ||
+                        info.IsDirectory || info.IsExtension || !info.HasName || info.ParentRecordNumber != parents[index] ||
+                        (((uint)info.SequenceNumber << 16) | info.ParentRecordSequence) != referenceSequences[index])
+                    {
+                        throw new IOException($"NTFS record {index} changed while validating its file name.");
+                    }
+
+                    names[index] = Encoding.Unicode.GetString(record.Slice(info.NameOffsetInRecord, info.NameLengthChars * 2));
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(scratch);
+            if (buffer is not null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
     }
 
     internal static int GetRecordCount(NtfsVolumeData geometry)

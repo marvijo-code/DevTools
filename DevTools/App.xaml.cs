@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using DevTools.Infrastructure;
 using Uno.Resizetizer;
 
@@ -12,11 +13,14 @@ public partial class App : Application
     /// </summary>
     public App()
     {
+        StartupTimestamp = Stopwatch.GetTimestamp();
         try { ShellIdentity.ConfigureProcess(); }
         catch (Exception ex) { AppLog.Error("Setting Windows app identity failed.", ex); }
         this.InitializeComponent();
         AppLog.Info("App constructed.");
     }
+
+    internal static long StartupTimestamp { get; private set; }
 
     protected Window? MainWindow { get; private set; }
 

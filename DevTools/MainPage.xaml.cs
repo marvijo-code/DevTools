@@ -21,6 +21,7 @@ public sealed partial class MainPage : Page
     private readonly WindowZoomController _windowZoomController;
     private CancellationTokenSource? _selectionCts;
     private bool _isConfirmationDialogOpen;
+    private bool _startupRenderRecorded;
 
     public MainViewModel ViewModel { get; } = new();
 
@@ -51,13 +52,37 @@ public sealed partial class MainPage : Page
     private void MainPage_Loaded(object sender, RoutedEventArgs e)
     {
         AppLog.Info("MainPage loaded.");
-        _liveRunTimer.Start();
-        ApplyResourceTimerSettings();
-        _ = InitializePageAsync();
+        if (!_startupRenderRecorded)
+        {
+            CompositionTarget.Rendering += MainPage_FirstRendering;
+        }
+
+        // Allow pending layout and render work to run before initializing tab data and timers.
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (!IsLoaded)
+            {
+                return;
+            }
+
+            _liveRunTimer.Start();
+            ApplyResourceTimerSettings();
+            _ = InitializePageAsync();
+        });
+    }
+
+    private void MainPage_FirstRendering(object? sender, object args)
+    {
+        CompositionTarget.Rendering -= MainPage_FirstRendering;
+        _startupRenderRecorded = true;
+        var elapsed = Stopwatch.GetElapsedTime(App.StartupTimestamp);
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () => AppLog.Info($"Startup first render pass: {elapsed.TotalMilliseconds:F1} ms from app construction."));
     }
 
     private void MainPage_Unloaded(object sender, RoutedEventArgs e)
     {
+        CompositionTarget.Rendering -= MainPage_FirstRendering;
         AppLog.Info("MainPage unloaded.");
         _refreshTimer.Stop();
         _liveRunTimer.Stop();

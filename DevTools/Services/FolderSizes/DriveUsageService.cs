@@ -1,12 +1,22 @@
+using System.Runtime.InteropServices;
 using DevTools.Infrastructure;
 using DevTools.Services.BiggestFiles;
 
 namespace DevTools.Services.FolderSizes;
 
 /// <summary>One fixed drive as the scan sees it.</summary>
-public sealed record DriveDescriptor(string RootPath, string Label, string FileSystem, long TotalBytes, long FreeBytes)
+public sealed record DriveDescriptor(string RootPath, string Label, string FileSystem, VolumeSpace Space);
+
+/// <summary>Byte counts reported by Windows for one volume.</summary>
+public readonly record struct VolumeSpace(
+    long TotalBytes,
+    long FreeBytes,
+    long UsedBytes,
+    long ReservedBytes,
+    long PoolUnavailableBytes,
+    bool IsVolumeWide)
 {
-    public long UsedBytes => Math.Max(0, TotalBytes - FreeBytes);
+    public long UnclassifiedBytes => TotalBytes - FreeBytes - UsedBytes - ReservedBytes - PoolUnavailableBytes;
 }
 
 /// <summary>Result of the all-folders scan of one drive.</summary>
@@ -44,8 +54,7 @@ public sealed class DriveUsageService
                     FolderTree.NormalizeRoot(drive.RootDirectory.FullName),
                     drive.VolumeLabel,
                     drive.DriveFormat,
-                    drive.TotalSize,
-                    drive.AvailableFreeSpace));
+                    ReadVolumeSpace(drive)));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -59,6 +68,58 @@ public sealed class DriveUsageService
             .OrderByDescending(drive => string.Equals(drive.RootPath, systemRoot, StringComparison.OrdinalIgnoreCase))
             .ThenBy(drive => drive.RootPath, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    internal static VolumeSpace ReadVolumeSpace(DriveInfo drive)
+    {
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 17763) &&
+            GetDiskSpaceInformation(drive.RootDirectory.FullName, out var information) == 0)
+        {
+            var bytesPerUnit = (ulong)information.SectorsPerAllocationUnit * information.BytesPerSector;
+            if (bytesPerUnit > 0)
+            {
+                try
+                {
+                    return new VolumeSpace(
+                        checked((long)(information.ActualTotalAllocationUnits * bytesPerUnit)),
+                        checked((long)(information.ActualAvailableAllocationUnits * bytesPerUnit)),
+                        checked((long)(information.UsedAllocationUnits * bytesPerUnit)),
+                        checked((long)(information.TotalReservedAllocationUnits * bytesPerUnit)),
+                        checked((long)(information.ActualPoolUnavailableAllocationUnits * bytesPerUnit)),
+                        IsVolumeWide: true);
+                }
+                catch (OverflowException)
+                {
+                    AppLog.Info($"Volume byte counts for {drive.Name} exceed the supported range.");
+                }
+            }
+        }
+
+        // DriveInfo.TotalSize and AvailableFreeSpace can both reflect a caller quota.
+        var total = drive.TotalSize;
+        var free = drive.AvailableFreeSpace;
+        return new VolumeSpace(total, free, Math.Max(0, total - free), 0, 0, IsVolumeWide: false);
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "GetDiskSpaceInformationW", ExactSpelling = true, CharSet = CharSet.Unicode)]
+    private static extern int GetDiskSpaceInformation(string rootPath, out DiskSpaceInformation information);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DiskSpaceInformation
+    {
+        public ulong ActualTotalAllocationUnits;
+        public ulong ActualAvailableAllocationUnits;
+        public ulong ActualPoolUnavailableAllocationUnits;
+        public ulong CallerTotalAllocationUnits;
+        public ulong CallerAvailableAllocationUnits;
+        public ulong CallerPoolUnavailableAllocationUnits;
+        public ulong UsedAllocationUnits;
+        public ulong TotalReservedAllocationUnits;
+        public ulong VolumeStorageReserveAllocationUnits;
+        public ulong AvailableCommittedAllocationUnits;
+        public ulong PoolAvailableAllocationUnits;
+        public uint SectorsPerAllocationUnit;
+        public uint BytesPerSector;
     }
 
     public async Task<DriveScanResult> ScanDriveAsync(
@@ -118,6 +179,15 @@ public sealed class DriveUsageService
     private static DriveScanResult Done(DriveDescriptor drive, FolderTree tree, List<string> notes)
     {
         AppLog.Info($"Drive {drive.RootPath}: {tree.EngineName} sized {tree.FolderCount:N0} folders ({ByteFormatter.Format(tree.TotalBytes)} in {tree.TotalFiles:N0} files) in {tree.Elapsed.TotalSeconds:F1}s.");
+        try
+        {
+            drive = drive with { Space = ReadVolumeSpace(new DriveInfo(drive.RootPath)) };
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            notes.Add("Volume totals are from before the folder scan.");
+        }
+
         return new DriveScanResult(drive, tree, tree.EngineName, string.Join(" ", notes));
     }
 

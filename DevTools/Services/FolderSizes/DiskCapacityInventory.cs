@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Globalization;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -14,15 +15,21 @@ internal readonly record struct DiskRange(long Start, long Length)
 
 internal readonly record struct VolumeDiskExtent(int DiskNumber, DiskRange Range, long? FileSystemBytes);
 
+internal readonly record struct DiskPartitionLayout(HashSet<DiskRange> Ranges, DiskRange? GptUsableRange, DiskRange? MbrSector);
+
 internal readonly record struct DiskCapacity(
     int DiskNumber, long TotalBytes, long? PartitionedBytes, long VolumeExtentBytes,
-    long MatchedExtentBytes, long FileSystemBytes, long VolumeExtentBytesInPartitions);
+    long MatchedExtentBytes, long FileSystemBytes, long VolumeExtentBytesInPartitions,
+    long? UnassignedGptUsableBytes = null, long? UnassignedMbrSectorBytes = null);
 
 /// <summary>Reconciles disk geometry, partition ranges and filesystem capacities without opening disk data.</summary>
 internal static class DiskCapacityInventory
 {
     private const string PhysicalDrivePrefix = "PhysicalDrive";
     private const int FixedMedia = 12;
+    private const uint MbrPartitionStyle = 0;
+    private const uint GptPartitionStyle = 1;
+    private const uint RawPartitionStyle = 2;
     private const int ErrorInsufficientBuffer = 122;
     private const int ErrorMoreData = 234;
     private const uint GetDriveGeometry = 0x000700A0;
@@ -92,9 +99,10 @@ internal static class DiskCapacityInventory
                 continue;
             }
 
+            var sectorBytes = BinaryPrimitives.ReadUInt32LittleEndian(buffer.AsSpan(20));
             var bytes = Query(handle, GetDriveLayout, ref buffer);
-            var ranges = ReadPartitionRanges(buffer.AsSpan(0, bytes), total);
-            disks.Add(Reconcile(disk, total, ranges, extents));
+            var layout = ReadPartitionLayout(buffer.AsSpan(0, bytes), total, sectorBytes);
+            disks.Add(Reconcile(disk, total, layout?.Ranges, extents, layout?.GptUsableRange, layout?.MbrSector));
         }
 
         return disks;
@@ -148,12 +156,19 @@ internal static class DiskCapacityInventory
         return extents;
     }
 
-    internal static HashSet<DiskRange>? ReadPartitionRanges(ReadOnlySpan<byte> layout, long total)
+    internal static DiskPartitionLayout? ReadPartitionLayout(ReadOnlySpan<byte> layout, long total, uint sectorBytes)
     {
         // DRIVE_LAYOUT_INFORMATION_EX has a 48-byte header and 144-byte PARTITION_INFORMATION_EX entries.
         const int headerBytes = 48;
         const int entryBytes = 144;
-        if (layout.Length < headerBytes || BinaryPrimitives.ReadUInt32LittleEndian(layout) > 2)
+        const int mbrPartitionTypeOffset = 32;
+        if (layout.Length < headerBytes)
+        {
+            return null;
+        }
+
+        var style = BinaryPrimitives.ReadUInt32LittleEndian(layout);
+        if (style > RawPartitionStyle)
         {
             return null;
         }
@@ -168,6 +183,11 @@ internal static class DiskCapacityInventory
         for (var i = 0; i < count; i++)
         {
             var entry = layout[(headerBytes + i * entryBytes)..];
+            if (style == MbrPartitionStyle && entry[mbrPartitionTypeOffset] == 0)
+            {
+                continue;
+            }
+
             var range = new DiskRange(
                 BinaryPrimitives.ReadInt64LittleEndian(entry[8..]),
                 BinaryPrimitives.ReadInt64LittleEndian(entry[16..]));
@@ -184,10 +204,27 @@ internal static class DiskCapacityInventory
             ranges.Add(range);
         }
 
-        return ranges;
+        DiskRange? gptUsableRange = null;
+        if (style == GptPartitionStyle)
+        {
+            // The GPT drive-layout union starts at byte 8, with a 16-byte disk ID ahead of the usable range.
+            var usable = new DiskRange(BinaryPrimitives.ReadInt64LittleEndian(layout[24..]),
+                BinaryPrimitives.ReadInt64LittleEndian(layout[32..]));
+            if (usable.FitsInside(total) && usable.Start > 0 && usable.End < total &&
+                ranges.All(range => range.Start >= usable.Start && range.End <= usable.End))
+            {
+                gptUsableRange = usable;
+            }
+        }
+
+        DiskRange? mbrSector = style == MbrPartitionStyle && sectorBytes >= 512 && sectorBytes <= total && BitOperations.IsPow2(sectorBytes)
+            ? new DiskRange(0, sectorBytes)
+            : null;
+        return new DiskPartitionLayout(ranges, gptUsableRange, mbrSector);
     }
 
-    internal static DiskCapacity Reconcile(int disk, long total, HashSet<DiskRange>? partitions, IReadOnlyList<VolumeDiskExtent> extents)
+    internal static DiskCapacity Reconcile(int disk, long total, HashSet<DiskRange>? partitions,
+        IReadOnlyList<VolumeDiskExtent> extents, DiskRange? gptUsableRange = null, DiskRange? mbrSector = null)
     {
         var partitionRanges = partitions is null ? null : MergeOrderedRanges(partitions.OrderBy(range => range.Start));
         var volumeExtents = extents.Where(extent => extent.DiskNumber == disk && extent.Range.FitsInside(total))
@@ -214,9 +251,26 @@ internal static class DiskCapacityInventory
             }
         }
 
+        long? unassignedGptUsableBytes = null;
+        long? unassignedMbrSectorBytes = null;
+        if (partitionRanges is not null && (gptUsableRange.HasValue || mbrSector.HasValue))
+        {
+            var occupied = MergeOrderedRanges(partitionRanges.Concat(volumeRanges).OrderBy(range => range.Start));
+            if (gptUsableRange is { } usable)
+            {
+                unassignedGptUsableBytes = usable.Length - MeasureIntersection(occupied, [usable]);
+            }
+
+            if (mbrSector is { } sector)
+            {
+                unassignedMbrSectorBytes = sector.Length - MeasureIntersection(occupied, [sector]);
+            }
+        }
+
         return new DiskCapacity(disk, total, partitionRanges?.Sum(range => range.Length),
             volumeRanges.Sum(range => range.Length), matchedExtentBytes, fileSystemBytes,
-            partitionRanges is null ? 0 : MeasureIntersection(partitionRanges, volumeRanges));
+            partitionRanges is null ? 0 : MeasureIntersection(partitionRanges, volumeRanges),
+            unassignedGptUsableBytes, unassignedMbrSectorBytes);
     }
 
     private static List<DiskRange> MergeOrderedRanges(IEnumerable<DiskRange> ranges)

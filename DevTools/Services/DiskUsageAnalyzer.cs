@@ -786,10 +786,19 @@ public sealed class DiskUsageAnalyzer
         var extentsOutsidePartitions = disk.VolumeExtentBytes - disk.VolumeExtentBytesInPartitions;
         var otherPartitions = partitioned - disk.VolumeExtentBytesInPartitions;
         var outside = disk.TotalBytes - partitioned - extentsOutsidePartitions;
-        var outsideNote = extentsOutsidePartitions > 0
-            ? $"outside partition and volume ranges. Of the reported volume extents, {extentsOutsidePartitions:N0} bytes are outside partition ranges."
-            : "outside partition ranges.";
-        return $"{total} {volumeNotes}{otherPartitions:N0} in other partition ranges and {outside:N0} {outsideNote}";
+        var outsideNote = (disk.UnassignedGptUsableBytes, disk.UnassignedMbrSectorBytes) switch
+        {
+            (long usable, _) => $"{usable:N0} unallocated in the GPT usable range and {outside - usable:N0} remaining outside the GPT usable range.",
+            (_, long bootSector) => $"{bootSector:N0} in the master boot record sector and {outside - bootSector:N0} elsewhere outside partition and volume ranges.",
+            _ when extentsOutsidePartitions > 0 => $"{outside:N0} outside partition and volume ranges.",
+            _ => $"{outside:N0} outside partition ranges."
+        };
+        if (extentsOutsidePartitions > 0)
+        {
+            outsideNote += $" Of the reported volume extents, {extentsOutsidePartitions:N0} bytes are outside partition ranges.";
+        }
+
+        return $"{total} {volumeNotes}{otherPartitions:N0} in other partition ranges and {outsideNote}";
     }
 
     private static string DescribeIncompleteFolderScan(FolderTree? tree) =>

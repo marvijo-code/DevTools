@@ -572,17 +572,63 @@ public sealed class VolumeSpaceTests
     }
 
     [Fact]
-    public void ReadPartitionRanges_RejectsTruncatedAndOutOfDiskPartitions()
+    public void ReadPartitionLayout_SkipsUnusedMbrSlotsAndRejectsInvalidPartitionRanges()
     {
         var layout = new byte[48 + 2 * 144];
         BinaryPrimitives.WriteInt32LittleEndian(layout.AsSpan(4), 2);
-        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(48 + 8), 100);
-        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(48 + 16), 500);
+        var partition = layout.AsSpan(48);
+        BinaryPrimitives.WriteInt64LittleEndian(partition[8..], 512);
+        BinaryPrimitives.WriteInt64LittleEndian(partition[16..], 1024);
+        partition[32] = 7;
+        // The unused slot can retain offsets and lengths.
+        BinaryPrimitives.WriteInt64LittleEndian(partition[(144 + 8)..], 2048);
+        BinaryPrimitives.WriteInt64LittleEndian(partition[(144 + 16)..], 1024);
 
-        var ranges = DiskCapacityInventory.ReadPartitionRanges(layout, 900);
-        Assert.Equal(new DiskRange(100, 500), Assert.Single(Assert.IsType<HashSet<DiskRange>>(ranges)));
-        Assert.Null(DiskCapacityInventory.ReadPartitionRanges(layout.AsSpan(0, layout.Length - 1), 900));
-        Assert.Null(DiskCapacityInventory.ReadPartitionRanges(layout, 599));
+        var parsed = Assert.IsType<DiskPartitionLayout>(DiskCapacityInventory.ReadPartitionLayout(layout, 4096, 512));
+        Assert.Equal(new DiskRange(512, 1024), Assert.Single(parsed.Ranges));
+        Assert.Equal(new DiskRange(0, 512), parsed.MbrSector);
+        Assert.Null(parsed.GptUsableRange);
+        Assert.Null(DiskCapacityInventory.ReadPartitionLayout(layout.AsSpan(0, layout.Length - 1), 4096, 512));
+        Assert.Null(DiskCapacityInventory.ReadPartitionLayout(layout, 1535, 512));
+
+        var capacity = DiskCapacityInventory.Reconcile(0, 4096, parsed.Ranges,
+            [new VolumeDiskExtent(0, new DiskRange(256, 512), null)], mbrSector: parsed.MbrSector);
+        Assert.Equal(256, capacity.UnassignedMbrSectorBytes);
+        var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
+        Assert.Contains("256 in the master boot record sector and 2,560 elsewhere outside partition and volume ranges.", summary.Summary);
+    }
+
+    [Fact]
+    public void DriveSummary_SplitsGptGapsWithoutCountingOverlappingExtentsTwice()
+    {
+        var layout = new byte[48 + 2 * 144];
+        BinaryPrimitives.WriteInt32LittleEndian(layout, 1);
+        BinaryPrimitives.WriteInt32LittleEndian(layout.AsSpan(4), 2);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(24), 50);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(32), 850);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(48 + 8), 100);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(48 + 16), 200);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(48 + 144 + 8), 500);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(48 + 144 + 16), 100);
+        var parsed = Assert.IsType<DiskPartitionLayout>(DiskCapacityInventory.ReadPartitionLayout(layout, 1000, 512));
+        Assert.Equal(new DiskRange(50, 850), parsed.GptUsableRange);
+
+        var capacity = DiskCapacityInventory.Reconcile(0, 1000, parsed.Ranges,
+        [
+            new VolumeDiskExtent(0, new DiskRange(0, 75), null),
+            new VolumeDiskExtent(0, new DiskRange(280, 120), null),
+            new VolumeDiskExtent(0, new DiskRange(870, 100), null)
+        ], gptUsableRange: parsed.GptUsableRange);
+
+        Assert.Equal(new DiskCapacity(0, 1000, 300, 295, 0, 0, 20, UnassignedGptUsableBytes: 395), capacity);
+        var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
+        Assert.Contains("395 unallocated in the GPT usable range and 30 remaining outside the GPT usable range.", summary.Summary);
+
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(24), 150);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(32), 750);
+        var inconsistent = Assert.IsType<DiskPartitionLayout>(DiskCapacityInventory.ReadPartitionLayout(layout, 1000, 512));
+        Assert.Null(inconsistent.GptUsableRange);
+        Assert.True(inconsistent.Ranges.SetEquals(parsed.Ranges));
     }
 
     [Theory]

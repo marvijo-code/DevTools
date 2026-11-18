@@ -106,7 +106,8 @@ public sealed class MftFolderSizeScanner
             directoryCount += table.IsNamedDirectory(record) ? 1 : 0;
         }
 
-        var children = new List<(int Record, int Next)>(directoryCount);
+        var children = new (int Record, int Next)[directoryCount];
+        var edgeCount = 0;
         for (var record = recordCount - 1; record >= 0; record--)
         {
             WaitForTreeBatch(record, cancellationToken);
@@ -118,39 +119,35 @@ public sealed class MftFolderSizeScanner
             var parent = table.Parent[record];
             if (parent < (uint)recordCount && parent != record)
             {
-                children.Add((record, recordLinks[parent]));
-                recordLinks[parent] = children.Count;
+                children[edgeCount] = (record, recordLinks[parent]);
+                recordLinks[parent] = ++edgeCount;
             }
         }
 
-        // Breadth-first numbering so every parent node index is lower than its children.
-        var capacity = children.Count + 1;
+        // Queue record numbers in the parent array. A queued folder's parent has already
+        // been numbered, so replace the record number with the parent index when dequeuing.
+        var capacity = edgeCount + 1;
         var nodeParents = new int[capacity];
         var nodeNames = new string[capacity];
-        var nodeChildHeads = new int[capacity];
-        nodeNames[0] = string.Empty;
-        nodeChildHeads[0] = recordLinks[root];
-        recordLinks[root] = ~0;
+        nodeParents[0] = root;
         var count = 1;
         for (var head = 0; head < count; head++)
         {
             WaitForTreeBatch(head, cancellationToken);
-            for (var edge = nodeChildHeads[head]; edge > 0;)
+            var record = nodeParents[head];
+            nodeParents[head] = head == 0 ? 0 : ~recordLinks[table.Parent[record]];
+            nodeNames[head] = head == 0 ? string.Empty : table.Names[record] ?? "<unnamed>";
+
+            // Each record has at most one parent edge and the root has no parent edge.
+            // A cycle therefore cannot be reached from the root.
+            var edge = recordLinks[record];
+            recordLinks[record] = ~head;
+            while (edge > 0)
             {
                 WaitForTreeBatch(count, cancellationToken);
                 var (child, next) = children[edge - 1];
+                nodeParents[count++] = child;
                 edge = next;
-                var childHead = recordLinks[child];
-                if (childHead < 0)
-                {
-                    continue;
-                }
-
-                recordLinks[child] = ~count;
-                nodeParents[count] = head;
-                nodeNames[count] = table.Names[child] ?? "<unnamed>";
-                nodeChildHeads[count] = childHead;
-                count++;
             }
         }
 

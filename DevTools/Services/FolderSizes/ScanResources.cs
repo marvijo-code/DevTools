@@ -32,7 +32,7 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
         return Math.Min(Math.Min(cpuLimit, memoryLimit), deviceLimit);
     }
 
-    public (int ChunkBytes, int Parsers, int QueueCapacity) MftPlan(int records, bool includeFileNames)
+    public (int ChunkBytes, int Parsers, int QueueCapacity) MftPlan(int records, long initializedBytes, bool includeFileNames)
     {
         // Estimate the indexed columns, temporary tree indexes and decoded names. Leave half of the
         // available commit and physical memory alone so a drive refresh can coexist with other apps.
@@ -46,10 +46,18 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
             ? Math.Clamp((headroom - estimatedTableBytes) / 16, 6L * MiB, 192L * MiB)
             : 64L * MiB;
         var chunkBytes = bufferBudget >= 96L * MiB ? 8 * MiB : bufferBudget >= 24L * MiB ? 4 * MiB : MiB;
+        var cpuParsers = Math.Clamp(LogicalProcessors / 2, 1, 6);
+
+        // Give the parsers several chances to take work while the reader is still running.
+        const int batchesPerParser = 8;
+        while (chunkBytes > MiB && initializedBytes / chunkBytes < cpuParsers * batchesPerParser)
+        {
+            chunkBytes /= 2;
+        }
 
         // A carry-over fragment can round the ArrayPool rental up to twice the chunk size.
         var blocks = (int)(bufferBudget / (2 * chunkBytes));
-        var parsers = Math.Clamp(LogicalProcessors / 2, 1, Math.Min(6, blocks - 2));
+        var parsers = Math.Min(cpuParsers, blocks - 2);
         var queue = Math.Clamp(blocks - parsers - 1, 1, 4);
         return (chunkBytes, parsers, queue);
     }

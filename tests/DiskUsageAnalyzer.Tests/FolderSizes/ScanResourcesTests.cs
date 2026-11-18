@@ -42,11 +42,25 @@ public sealed class ScanResourcesTests
         Assert.True(ScanResources.ResolveBackingDiskSeekPenalty([4, 2, 3], Read));
     }
 
+    [Theory]
+    [InlineData(8, 1)]
+    [InlineData(32, 2)]
+    [InlineData(64, 4)]
+    [InlineData(128, 8)]
+    public void MftPlan_SizesReadsToTheInitializedTable(int mftMiB, int chunkMiB)
+    {
+        var plan = new ScanResources(4, 4096 * MiB)
+            .MftPlan(mftMiB * 1024, mftMiB * MiB, includeFileNames: false);
+
+        Assert.Equal(chunkMiB * MiB, plan.ChunkBytes);
+        Assert.Equal(2, plan.Parsers);
+    }
+
     [Fact]
     public void MftPlan_UsesSmallerBuffersWithLimitedMemory()
     {
-        var high = new ScanResources(24, 4096 * MiB).MftPlan(1_000_000, includeFileNames: false);
-        var low = new ScanResources(24, 128 * MiB).MftPlan(1_000_000, includeFileNames: false);
+        var high = new ScanResources(24, 4096 * MiB).MftPlan(1_000_000, 1024 * MiB, includeFileNames: false);
+        var low = new ScanResources(24, 128 * MiB).MftPlan(1_000_000, 1024 * MiB, includeFileNames: false);
 
         Assert.True(low.ChunkBytes < high.ChunkBytes);
         Assert.True(low.Parsers < high.Parsers);
@@ -57,6 +71,6 @@ public sealed class ScanResourcesTests
     public void MftPlan_RejectsATableThatWouldExhaustMemory()
     {
         var resources = new ScanResources(12, 128 * MiB);
-        Assert.Throws<InsufficientMemoryException>(() => resources.MftPlan(5_000_000, includeFileNames: true));
+        Assert.Throws<InsufficientMemoryException>(() => resources.MftPlan(5_000_000, 5120 * MiB, includeFileNames: true));
     }
 }

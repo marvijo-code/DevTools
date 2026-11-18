@@ -316,11 +316,17 @@ internal static class MftTableLoader
         var recordCount = GetRecordCount(geometry);
         var recordSize = (int)geometry.BytesPerFileRecordSegment;
         var resources = ScanResources.Capture();
-        var (chunkBytes, parserCount, queueCapacity) = resources.MftPlan(recordCount, keepFileNames);
+        var (chunkBytes, parserCount, queueCapacity) = resources.MftPlan(recordCount, geometry.MftValidDataLength, keepFileNames);
 
         // Check the full MFT mapping before allocating its in-memory columns.
         var extents = MftExtentMapReader.Read(geometry, (offset, buffer) => ReadExact(volume, buffer, offset), cancellationToken);
         ValidateMftExtents(geometry, extents);
+
+        // The last chunk of each physical extent can be partial.
+        var clusterBytes = (int)geometry.BytesPerCluster;
+        var readBytes = Math.Max(1, chunkBytes / clusterBytes) * clusterBytes;
+        var possibleChunks = (geometry.MftValidDataLength - 1) / readBytes + extents.Count;
+        parserCount = (int)Math.Min(parserCount, possibleChunks);
 
         // Structure-of-arrays table, indexed by MFT record number.
         var parent = new uint[recordCount];

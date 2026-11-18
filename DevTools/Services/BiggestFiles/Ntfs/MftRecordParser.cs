@@ -48,6 +48,7 @@ public struct MftRecordInfo
 public static class MftRecordParser
 {
     private const int SectorSize = 512;
+    private const uint FileSignature = 0x454C4946; // FILE in little-endian order.
 
     // Attribute type codes.
     private const uint AttrStandardInformation = 0x10;
@@ -87,8 +88,7 @@ public static class MftRecordParser
             return false;
         }
 
-        // Signature "FILE".
-        if (record[0] != (byte)'F' || record[1] != (byte)'I' || record[2] != (byte)'L' || record[3] != (byte)'E')
+        if (BinaryPrimitives.ReadUInt32LittleEndian(record) != FileSignature)
         {
             return false;
         }
@@ -343,6 +343,19 @@ public static class MftRecordParser
         var words = MemoryMarshal.Cast<byte, ushort>(record);
         var fixups = words.Slice(usaOffset / sizeof(ushort), usaCount);
         var sequence = fixups[0];
+        if (usaCount == 3)
+        {
+            // The usual 1 KiB record has two protected trailers. Validate both before writing either.
+            if (words[wordsPerSector - 1] != sequence || words[2 * wordsPerSector - 1] != sequence)
+            {
+                return false;
+            }
+
+            words[wordsPerSector - 1] = fixups[1];
+            words[2 * wordsPerSector - 1] = fixups[2];
+            return true;
+        }
+
         for (var sector = 1; sector < fixups.Length; sector++)
         {
             if (words[sector * wordsPerSector - 1] != sequence)
@@ -380,7 +393,7 @@ public static class MftRecordParser
     internal static bool TryPrepareRecord(Span<byte> record, out ReadOnlySpan<byte> prepared)
     {
         prepared = default;
-        if (record.Length < 0x30 || !record[..4].SequenceEqual("FILE"u8))
+        if (record.Length < 0x30 || BinaryPrimitives.ReadUInt32LittleEndian(record) != FileSignature)
         {
             return false;
         }

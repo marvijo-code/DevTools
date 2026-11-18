@@ -19,15 +19,17 @@ public sealed class MftRecordParserTests
         Assert.False(MftRecordParser.TryParseRecord(record, ref info));
     }
 
-    [Fact]
-    public void TryParseRecord_RejectsTornRecord()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void TryParseRecord_RejectsTornRecord(int sector)
     {
         var record = new MftRecordBuilder()
             .FileName("torn.bin", parent: 5, nameNamespace: 1)
             .NonResidentData(realSize: 100, allocatedSize: 128)
             .Build();
 
-        MftRecordBuilder.CorruptSectorTail(record, sector: 1);
+        MftRecordBuilder.CorruptSectorTail(record, sector);
         var original = (byte[])record.Clone();
 
         var info = new MftRecordInfo();
@@ -51,6 +53,7 @@ public sealed class MftRecordParserTests
 
     [Theory]
     [InlineData(512)]
+    [InlineData(1024)]
     [InlineData(4096)]
     public void TryParseRecord_RestoresEveryProtectedSector(int size)
     {

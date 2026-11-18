@@ -81,6 +81,17 @@ internal static class WindowsVolumePaths
         }
     }
 
+    internal static uint GetAllocationUnitBytes(string rootPath)
+    {
+        if (GetDiskFreeSpace(rootPath, out var sectorsPerCluster, out var bytesPerSector, out _, out _))
+        {
+            var bytes = (ulong)sectorsPerCluster * bytesPerSector;
+            return bytes <= uint.MaxValue ? (uint)bytes : 0;
+        }
+
+        return 0;
+    }
+
     internal static (string Label, string FileSystem) ReadVolumeInformation(string rootPath)
     {
         const int capacity = 256;
@@ -108,6 +119,11 @@ internal static class WindowsVolumePaths
 
     [DllImport("kernel32.dll", EntryPoint = "GetDriveTypeW", ExactSpelling = true, CharSet = CharSet.Unicode)]
     private static extern DriveType GetDriveType(string rootPath);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetDiskFreeSpaceW", ExactSpelling = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetDiskFreeSpace(
+        string rootPath, out uint sectorsPerCluster, out uint bytesPerSector, out uint freeClusters, out uint totalClusters);
 
     [DllImport("kernel32.dll", EntryPoint = "GetVolumeInformationW", ExactSpelling = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]

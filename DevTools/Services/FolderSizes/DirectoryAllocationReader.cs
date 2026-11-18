@@ -5,13 +5,14 @@ using Microsoft.Win32.SafeHandles;
 
 namespace DevTools.Services.FolderSizes;
 
-
-
-internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identities)
+/// <summary>Reads allocation for NTFS files, directory indexes and named data streams.</summary>
+internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identities, uint allocationUnitBytes)
 {
     // FILE_ID_EXTD_DIR_INFO. The variable-length UTF-16 name follows the fixed header.
     private const int EntryHeaderBytes = 88;
     private const int FileIdExtdDirectoryInfo = 19;
+    private const int FileStandardInfo = 1;
+    private const int StandardInfoBytes = 24;
     private const int FileStreamInfo = 7;
     private const int StreamHeaderBytes = 24;
     private const int MaximumStreamBufferBytes = 1024 * 1024;
@@ -43,7 +44,20 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             return false;
         }
 
-        allocatedBytes = ReadNamedStreamAllocation(handle);
+        // The parent listing reports zero for directories. The directory handle can report
+        // the allocation of its default index stream separately from its named data streams.
+        if (GetFileInformationByHandleEx(handle, FileStandardInfo, _buffer, StandardInfoBytes))
+        {
+            // FILE_STANDARD_INFO.Directory is the byte after DeletePending.
+            if (_buffer[21] == 0)
+            {
+                return false;
+            }
+
+            allocatedBytes = PhysicalAllocation(BinaryPrimitives.ReadInt64LittleEndian(_buffer));
+        }
+
+        allocatedBytes += ReadNamedStreamAllocation(handle);
         while (true)
         {
             ScanGate.Wait(cancellationToken);
@@ -84,7 +98,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                     var high = BinaryPrimitives.ReadUInt64LittleEndian(remaining[80..]);
                     if (identities.TryClaim(new UInt128(high, low)))
                     {
-                        allocatedBytes += Math.Max(0, BinaryPrimitives.ReadInt64LittleEndian(remaining[48..]));
+                        allocatedBytes += PhysicalAllocation(BinaryPrimitives.ReadInt64LittleEndian(remaining[48..]));
                         if (high == 0)
                         {
                             var id = new FileIdDescriptor(low);
@@ -109,6 +123,11 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             }
         }
     }
+
+    // A resident stream can report positive bytes stored inside its MFT record. Only
+    // whole clusters can represent space independently allocated to the stream.
+    private long PhysicalAllocation(long bytes) =>
+        bytes > 0 && (allocationUnitBytes == 0 || bytes % allocationUnitBytes == 0) ? bytes : 0;
 
     private long ReadNamedStreamAllocation(SafeFileHandle file)
     {
@@ -140,7 +159,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
             var name = MemoryMarshal.Cast<byte, char>(remaining.Slice(StreamHeaderBytes, nameBytes));
             if (!name.SequenceEqual("::$DATA"))
             {
-                allocated += Math.Max(0, BinaryPrimitives.ReadInt64LittleEndian(remaining[16..]));
+                allocated += PhysicalAllocation(BinaryPrimitives.ReadInt64LittleEndian(remaining[16..]));
             }
 
             if (nextOffset == 0)

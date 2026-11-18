@@ -80,6 +80,55 @@ public sealed class DirectoryAllocationTests
     }
 
     [Fact]
+    public async Task Walker_AttributesTheDirectoryIndexEvenWhenEveryFileIsEmpty()
+    {
+        var root = Directory.CreateTempSubdirectory("devtools-directory-index-");
+        try
+        {
+            var catalog = root.CreateSubdirectory("catalog");
+            var fileCount = 400;
+            for (var i = 0; i < fileCount; i++)
+            {
+                using var file = File.Create(Path.Combine(catalog.FullName, $"fixture-{i:D4}"));
+            }
+
+            var tree = await new ParallelFolderWalker().ScanAsync(root.FullName, null, CancellationToken.None, workerCount: 2);
+            var node = tree.Find(catalog.FullName);
+            Assert.Equal(fileCount, tree.GetFileCount(node));
+            Assert.Equal(0, tree.GetTotalBytes(node));
+            Assert.True(tree.GetAllocatedBytes(node) > 0, "The NTFS directory index consumes space.");
+            Assert.True(tree.GetAllocatedBytes(tree.Find(root.FullName)) >= tree.GetAllocatedBytes(node));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Walker_DoesNotCountResidentDataAsSeparateClusters()
+    {
+        var root = Directory.CreateTempSubdirectory("devtools-resident-");
+        try
+        {
+            var path = Path.Combine(root.FullName, "tiny.bin");
+            var bytes = new byte[] { 42 };
+            await File.WriteAllBytesAsync(path, bytes);
+            WriteNamedStream(path + ":resident", bytes);
+            WriteNamedStream(root.FullName + ":resident", bytes);
+
+            var tree = await new ParallelFolderWalker().ScanAsync(root.FullName, null, CancellationToken.None, workerCount: 1);
+            var node = tree.Find(root.FullName);
+            Assert.Equal(1L, tree.GetTotalBytes(node));
+            Assert.Equal(0L, tree.GetAllocatedBytes(node));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Walker_AccountsForNamedFileAndDirectoryStreamsWithoutCountingHardLinksTwice()
     {
         var root = Directory.CreateTempSubdirectory("devtools-streams-");

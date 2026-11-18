@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Diagnostics;
 using System.Text;
 using System.Threading.Channels;
+using DevTools.Services.FolderSizes;
 
 namespace DevTools.Services.BiggestFiles.Ntfs;
 
@@ -239,7 +240,6 @@ internal sealed class MftRecordTable
 /// </summary>
 internal static class MftTableLoader
 {
-    private const int TargetChunkBytes = 8 * 1024 * 1024;
     private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(250);
 
     public static async Task<MftRecordTable> LoadAsync(
@@ -274,6 +274,7 @@ internal static class MftTableLoader
         }
 
         var recordCount = (int)recordCountLong;
+        var (chunkBytes, parserCount, queueCapacity) = ScanResources.Capture().MftPlan(recordCount, keepFileNames);
 
         // Structure-of-arrays table, indexed by MFT record number.
         var parent = new uint[recordCount];
@@ -312,7 +313,7 @@ internal static class MftTableLoader
         }
 
         await ParseAllRecordsAsync(
-            volume, geometry, extents, recordSize, recordCount,
+            volume, geometry, extents, recordSize, recordCount, chunkBytes, parserCount, queueCapacity,
             parent, flags, realSize, allocSize, lastWrite, names, keepFileNames, recordAllocation, sequences,
             OnParsed,
             cancellationToken).ConfigureAwait(false);
@@ -348,6 +349,9 @@ internal static class MftTableLoader
         List<(long Lcn, long ClusterCount)> extents,
         int recordSize,
         int recordCount,
+        int targetChunkBytes,
+        int parserCount,
+        int queueCapacity,
         uint[] parent,
         byte[] flags,
         long[] realSize,
@@ -361,9 +365,9 @@ internal static class MftTableLoader
         CancellationToken cancellationToken)
     {
         var clusterBytes = (int)geometry.BytesPerCluster;
-        var clustersPerChunk = Math.Max(1, TargetChunkBytes / clusterBytes);
+        var clustersPerChunk = Math.Max(1, targetChunkBytes / clusterBytes);
 
-        var channel = Channel.CreateBounded<Block>(new BoundedChannelOptions(4)
+        var channel = Channel.CreateBounded<Block>(new BoundedChannelOptions(queueCapacity)
         {
             SingleReader = false,
             SingleWriter = true,
@@ -375,8 +379,7 @@ internal static class MftTableLoader
         var extensionLock = new object();
         var parsedCounter = 0;
 
-        // Half the cores at most: the read is mostly disk bound, and the laptop stays usable.
-        var parserCount = Math.Clamp(Environment.ProcessorCount / 2, 1, 6);
+
         var parsers = new Task[parserCount];
         for (var i = 0; i < parserCount; i++)
         {

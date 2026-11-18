@@ -1,6 +1,5 @@
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
-using DevTools.Services.Resources;
 using Microsoft.Win32.SafeHandles;
 
 namespace DevTools.Services.FolderSizes;
@@ -118,7 +117,7 @@ internal sealed class DirectoryAllocationIndex
         }
     }
 
-    public static DirectoryAllocationIndex? Create(string root)
+    public static DirectoryAllocationIndex? Create(string root, ScanResources resources)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -138,10 +137,8 @@ internal sealed class DirectoryAllocationIndex
             return null;
         }
 
-        var counters = NativeResourceApi.ReadSystemCounters();
-        var headroom = Math.Min(counters.PhysicalAvailableBytes, Math.Max(0, counters.CommitLimitBytes - counters.CommitTotalBytes));
         // Keep at least seven eighths of current memory headroom available to other work.
-        var entryLimit = (int)Math.Min(16_000_000, headroom / 8 / 48);
+        var entryLimit = (int)Math.Min(16_000_000, resources.MemoryHeadroom.GetValueOrDefault() / 8 / 48);
         return entryLimit >= ShardCount ? new DirectoryAllocationIndex(entryLimit) : null;
     }
 

@@ -33,7 +33,8 @@ public sealed class ParallelFolderWalker
         var fullRoot = Path.GetFullPath(rootPath);
         var driveRoot = FolderTree.NormalizeRoot(fullRoot);
         var stopwatch = Stopwatch.StartNew();
-        var allocationIndex = prioritize ? null : DirectoryAllocationIndex.Create(driveRoot);
+        var resources = ScanResources.Capture();
+        var allocationIndex = prioritize ? null : DirectoryAllocationIndex.Create(driveRoot, resources);
         var builder = new FolderTreeBuilder(driveRoot, trackAllocation: allocationIndex is not null);
         var builderLock = new object();
         int startNode;
@@ -47,9 +48,9 @@ public sealed class ParallelFolderWalker
         long filesSeen = 0;
         queue.Add((startNode, fullRoot), cancellationToken);
 
-        var workers = prioritize
-            ? Math.Clamp(workerCount ?? Environment.ProcessorCount, 4, 16)
-            : Math.Clamp(workerCount ?? Environment.ProcessorCount / 2, 2, 8);
+        var workers = workerCount is int requested
+            ? Math.Clamp(requested, 1, 16)
+            : resources.WalkWorkerCount(ScanResources.ReadSeekPenalty(driveRoot), prioritize);
         var threads = new List<Thread>(workers);
         Exception? failure = null;
         var options = new EnumerationOptions

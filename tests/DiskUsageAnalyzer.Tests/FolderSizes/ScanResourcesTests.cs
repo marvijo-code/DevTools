@@ -1,0 +1,40 @@
+using DevTools.Services.FolderSizes;
+using Xunit;
+
+namespace DiskUsageAnalyzer.Tests.FolderSizes;
+
+public sealed class ScanResourcesTests
+{
+    private const long MiB = 1024 * 1024;
+
+    [Theory]
+    [InlineData(32, 4096, true, false, 1)]
+    [InlineData(32, 4096, true, true, 2)]
+    [InlineData(32, 4096, false, false, 8)]
+    [InlineData(32, 4096, null, false, 4)]
+    [InlineData(32, 170, false, false, 1)]
+    [InlineData(2, 4096, false, false, 1)]
+    public void WalkWorkerCount_AdaptsToCpuMemoryAndDrive(int cores, long memory, bool? seek, bool prioritise, int workers)
+    {
+        var resources = new ScanResources(cores, memory * MiB);
+        Assert.Equal(workers, resources.WalkWorkerCount(seek, prioritise));
+    }
+
+    [Fact]
+    public void MftPlan_UsesSmallerBuffersWithLimitedMemory()
+    {
+        var high = new ScanResources(24, 4096 * MiB).MftPlan(1_000_000, includeFileNames: false);
+        var low = new ScanResources(24, 128 * MiB).MftPlan(1_000_000, includeFileNames: false);
+
+        Assert.True(low.ChunkBytes < high.ChunkBytes);
+        Assert.True(low.Parsers < high.Parsers);
+        Assert.True(low.QueueCapacity <= high.QueueCapacity);
+    }
+
+    [Fact]
+    public void MftPlan_RejectsATableThatWouldExhaustMemory()
+    {
+        var resources = new ScanResources(12, 128 * MiB);
+        Assert.Throws<InsufficientMemoryException>(() => resources.MftPlan(5_000_000, includeFileNames: true));
+    }
+}

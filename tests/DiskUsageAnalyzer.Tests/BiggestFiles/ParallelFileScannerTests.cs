@@ -43,10 +43,15 @@ public sealed class ParallelFileScannerTests : IDisposable
         WriteFile("other/mid.bin", 1_000_000);
 
         var scanner = new ParallelFileScanner();
-        var result = await scanner.ScanAsync(new BiggestFilesRequest(_root, TopCount: 3), progress: null, CancellationToken.None);
+        var progress = new RecordingProgress();
+        var result = await scanner.ScanAsync(new BiggestFilesRequest(_root, TopCount: 3), progress, CancellationToken.None);
 
         Assert.Equal("Parallel enumeration", result.EngineName);
         Assert.Equal(5, result.FilesSeen);
+        Assert.Equal(50_005_100, result.BytesSeen);
+        var done = Assert.Single(progress.Reports, report => report.IsCompleted);
+        Assert.Equal(result.FilesSeen, done.FilesSeen);
+        Assert.Equal(result.BytesSeen, done.BytesSeen);
         Assert.Equal(3, result.Top.Count);
         Assert.Equal(
             new[] { 40_000_000L, 9_000_000L, 1_000_000L },
@@ -94,5 +99,12 @@ public sealed class ParallelFileScannerTests : IDisposable
         Assert.Equal(5, result.Top.Count);
         Assert.Equal(20_000L, result.Top[0].SizeBytes);
         Assert.Equal(16_000L, result.Top[4].SizeBytes);
+    }
+
+    private sealed class RecordingProgress : IProgress<BiggestFilesProgress>
+    {
+        internal List<BiggestFilesProgress> Reports { get; } = [];
+
+        public void Report(BiggestFilesProgress value) => Reports.Add(value);
     }
 }

@@ -13,7 +13,14 @@ namespace DevTools.Services.BiggestFiles;
 public sealed class ParallelFileScanner
 {
     private const string EngineName = "Parallel enumeration";
+    private const int ProgressBatchFiles = 4096;
     private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly EnumerationOptions DirectoryOptions = new()
+    {
+        IgnoreInaccessible = true,
+        AttributesToSkip = 0,
+        BufferSize = 16 * 1024
+    };
 
     public async Task<BiggestFilesResult> ScanAsync(
         BiggestFilesRequest request,
@@ -27,6 +34,8 @@ public sealed class ParallelFileScanner
         }
 
         var topN = new TopNAccumulator<FileSizeHit>(request.TopCount);
+        using var scanCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var scanToken = scanCancellation.Token;
         var channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
         {
             SingleReader = false,
@@ -44,32 +53,39 @@ public sealed class ParallelFileScanner
 
         void ScanDirectory(string directory)
         {
-            var options = new EnumerationOptions
+            scanToken.ThrowIfCancellationRequested();
+            var batchFiles = 0;
+            long batchBytes = 0;
+
+            void PublishBatch()
             {
-                RecurseSubdirectories = false,
-                IgnoreInaccessible = true,
-                AttributesToSkip = 0,
-                ReturnSpecialDirectories = false
-            };
+                if (batchFiles == 0)
+                {
+                    return;
+                }
+
+                Interlocked.Add(ref filesSeen, batchFiles);
+                Interlocked.Add(ref bytesSeen, batchBytes);
+                batchFiles = 0;
+                batchBytes = 0;
+            }
 
             var enumerable = new FileSystemEnumerable<int>(
                 directory,
                 static (ref FileSystemEntry _) => 0,
-                options)
+                DirectoryOptions)
             {
                 ShouldIncludePredicate = (ref FileSystemEntry entry) =>
                 {
-                    if (cancellationToken.IsCancellationRequested)
-                    {
-                        return false;
-                    }
+                    scanToken.ThrowIfCancellationRequested();
 
                     if (entry.IsDirectory)
                     {
                         if ((entry.Attributes & System.IO.FileAttributes.ReparsePoint) == 0)
                         {
+                            var child = entry.ToFullPath();
                             Interlocked.Increment(ref pending);
-                            if (!writer.TryWrite(entry.ToFullPath()))
+                            if (!writer.TryWrite(child))
                             {
                                 Interlocked.Decrement(ref pending);
                             }
@@ -79,8 +95,11 @@ public sealed class ParallelFileScanner
                     }
 
                     var length = entry.Length;
-                    Interlocked.Increment(ref filesSeen);
-                    Interlocked.Add(ref bytesSeen, length);
+                    batchBytes += length;
+                    if (++batchFiles == ProgressBatchFiles)
+                    {
+                        PublishBatch();
+                    }
 
                     if (length > topN.Threshold)
                     {
@@ -102,35 +121,50 @@ public sealed class ParallelFileScanner
                 }
             };
 
-            foreach (var _ in enumerable)
+            try
             {
-                // Enumeration drives the predicate's side effects; no results are materialized.
+                foreach (var _ in enumerable)
+                {
+                    // The predicate reads file metadata and only materializes candidates for the ranking.
+                }
+            }
+            finally
+            {
+                PublishBatch();
             }
         }
 
         async Task WorkerAsync()
         {
-            while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+            try
             {
-                while (reader.TryRead(out var directory))
+                while (await reader.WaitToReadAsync(scanToken).ConfigureAwait(false))
                 {
-                    try
+                    while (reader.TryRead(out var directory))
                     {
-                        ScanDirectory(directory);
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
-                                                   or DirectoryNotFoundException or System.Security.SecurityException)
-                    {
-                        // Skip directories that vanish or deny access mid-scan.
-                    }
-                    finally
-                    {
-                        if (Interlocked.Decrement(ref pending) == 0)
+                        try
                         {
-                            writer.TryComplete();
+                            ScanDirectory(directory);
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+                        {
+                            // Skip directories that vanish or deny access mid-scan.
+                        }
+                        finally
+                        {
+                            if (Interlocked.Decrement(ref pending) == 0)
+                            {
+                                writer.TryComplete();
+                            }
                         }
                     }
                 }
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                writer.TryComplete(error);
+                scanCancellation.Cancel();
+                throw;
             }
         }
 
@@ -138,19 +172,47 @@ public sealed class ParallelFileScanner
         var workers = new Task[workerCount];
         for (var i = 0; i < workerCount; i++)
         {
-            workers[i] = Task.Run(WorkerAsync, cancellationToken);
+            workers[i] = Task.Run(WorkerAsync, scanToken);
         }
 
         var allWorkers = Task.WhenAll(workers);
 
-        while (!allWorkers.IsCompleted)
+        try
         {
-            var delay = Task.Delay(ProgressInterval, cancellationToken);
-            await Task.WhenAny(allWorkers, delay).ConfigureAwait(false);
-            PublishProgress(isCompleted: false);
+            if (progress is not null && !allWorkers.IsCompleted)
+            {
+                using var timer = new PeriodicTimer(ProgressInterval);
+                while (!allWorkers.IsCompleted)
+                {
+                    var tick = timer.WaitForNextTickAsync(cancellationToken).AsTask();
+                    if (await Task.WhenAny(allWorkers, tick).ConfigureAwait(false) == allWorkers)
+                    {
+                        break;
+                    }
+
+                    await tick.ConfigureAwait(false);
+                    PublishProgress();
+                }
+            }
+
+            await allWorkers.ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        catch
+        {
+            scanCancellation.Cancel();
+            try
+            {
+                await allWorkers.ConfigureAwait(false);
+            }
+            catch
+            {
+                // Drain all workers and keep the error that ended the scan.
+            }
+
+            throw;
         }
 
-        await allWorkers.ConfigureAwait(false);
         stopwatch.Stop();
 
         var finalTop = SnapshotTop();
@@ -171,7 +233,7 @@ public sealed class ParallelFileScanner
             EngineName,
             Warning: null);
 
-        void PublishProgress(bool isCompleted)
+        void PublishProgress()
         {
             progress?.Report(new BiggestFilesProgress(
                 "Enumerating",
@@ -180,7 +242,7 @@ public sealed class ParallelFileScanner
                 stopwatch.Elapsed,
                 ComputeRate(Interlocked.Read(ref filesSeen), stopwatch.Elapsed),
                 SnapshotTop(),
-                isCompleted));
+                IsCompleted: false));
         }
 
         IReadOnlyList<FileSizeHit> SnapshotTop()

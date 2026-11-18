@@ -117,9 +117,12 @@ public sealed partial class MainViewModel
 
         _folderBrowserPath = normalized;
         _canFolderBrowserGoUp = node != 0;
+        var allocation = tree.GetAllocatedBytes(node) is long allocatedBytes
+            ? $" {ByteFormatter.Format(allocatedBytes)} of attributed allocation."
+            : string.Empty;
         _folderBrowserSummary =
-            $"{ByteFormatter.Format(tree.GetTotalBytes(node))} in {tree.GetFileCount(node):N0} files. " +
-            $"Sized by {tree.EngineName} in {tree.Elapsed.TotalSeconds:F1}s. Largest first, files included. Use the arrows to expand folders, the name to open one.";
+            $"{ByteFormatter.Format(tree.GetTotalBytes(node))} of logical file size in {tree.GetFileCount(node):N0} files.{allocation} " +
+            $"Sized by {tree.EngineName} in {tree.Elapsed.TotalSeconds:F1}s. Use the arrows to expand folders or the name to open one.";
         RaisePropertyChanged(nameof(FolderBrowserPath));
         RaisePropertyChanged(nameof(FolderBrowserSummary));
         RaisePropertyChanged(nameof(CanFolderBrowserGoUp));
@@ -280,12 +283,15 @@ public sealed partial class MainViewModel
         var folderPath = tree.GetPath(node);
         var entries = new List<(long Bytes, string Name, FolderBrowserRow Row, int ChildNode)>();
 
-        foreach (var child in tree.GetChildren(node, FolderBrowserMaxRows))
+        var children = tree.GetChildren(node, FolderBrowserMaxRows);
+        var listedFolderBytes = 0L;
+        foreach (var child in children)
         {
             var size = tree.GetTotalBytes(child);
+            listedFolderBytes += size;
             var childPath = tree.GetPath(child);
             var expanded = _folderBrowserExpanded.Contains(childPath);
-            var hasContent = tree.HasChildFolders(child) || tree.GetDirectFileBytes(child) > 0;
+            var hasContent = tree.HasChildFolders(child) || tree.GetFileCount(child) > 0;
             var row = new FolderBrowserRow(
                 tree.GetName(child),
                 childPath,
@@ -293,7 +299,7 @@ public sealed partial class MainViewModel
                 $"{tree.GetFileCount(child):N0} files - {size * 100d / rootTotal:0.0}%",
                 size * 100d / rootTotal,
                 depth,
-                canOpen: tree.HasChildFolders(child),
+                canOpen: hasContent,
                 canExpand: hasContent,
                 isExpanded: expanded && hasContent,
                 isFile: false);
@@ -301,7 +307,17 @@ public sealed partial class MainViewModel
         }
 
         var directFiles = tree.GetDirectFileBytes(node);
-        if (directFiles > 0)
+        var otherFolderCount = tree.GetChildFolderCount(node) - children.Count;
+        if (otherFolderCount > 0)
+        {
+            var otherFolderBytes = Math.Max(0, tree.GetTotalBytes(node) - directFiles - listedFolderBytes);
+            var share = otherFolderBytes * 100d / rootTotal;
+            entries.Add((otherFolderBytes, string.Empty, new FolderBrowserRow(
+                "[other folders]", folderPath, otherFolderBytes, $"{otherFolderCount:N0} more folders - {share:0.0}%",
+                share, depth, canOpen: false, canExpand: false, isExpanded: false, isFile: false), -1));
+        }
+
+        if (directFiles > 0 || tree.GetDirectFileCount(node) > 0)
         {
             if (_folderBrowserFiles.TryGetValue(folderPath, out var files))
             {

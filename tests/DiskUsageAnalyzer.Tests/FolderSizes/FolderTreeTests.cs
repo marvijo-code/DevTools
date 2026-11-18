@@ -46,6 +46,27 @@ public sealed class FolderTreeTests
         Assert.Equal(@"G:\Photos\2025", tree.GetPath(tree.GetChildren(tree.Find(@"G:\Photos"))[0]));
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(25)]
+    [InlineData(200)]
+    public void GetChildren_WideFolderMatchesFullRanking(int max)
+    {
+        var builder = new FolderTreeBuilder(@"C:\");
+        for (var i = 1999; i >= 0; i--)
+        {
+            builder.AddFolder($@"C:\Folder-{i:D4}", (i * 39) % 17);
+        }
+
+        builder.AddFile(@"C:\empty.txt", 0);
+        var tree = builder.Build("test", TimeSpan.Zero);
+
+        Assert.Equal(tree.GetChildren(0).Take(max).ToArray(), tree.GetChildren(0, max).ToArray());
+        Assert.Equal(2000, tree.GetChildFolderCount(0));
+        Assert.Equal(1, tree.GetDirectFileCount(0));
+        Assert.Equal(0, tree.GetDirectFileBytes(0));
+    }
+
     [Fact]
     public async Task Walker_SizesNestedFoldersAndSkipsJunctions()
     {

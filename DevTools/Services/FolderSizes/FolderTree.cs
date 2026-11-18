@@ -92,15 +92,21 @@ public sealed class FolderTree
 
     public int GetParent(int node) => node == 0 ? -1 : _parent[node];
 
-    public bool HasChildFolders(int node) => _childStart[node + 1] > _childStart[node];
+    public bool HasChildFolders(int node) => GetChildFolderCount(node) > 0;
+    public int GetChildFolderCount(int node) => _childStart[node + 1] - _childStart[node];
 
-    /// <summary>Bytes held by files that sit directly in this folder (not in a subfolder).</summary>
-    public long GetDirectFileBytes(int node)
+    /// <summary>Bytes held by files directly in this folder.</summary>
+    public long GetDirectFileBytes(int node) => GetDirectFileTotal(node, _totalBytes);
+
+    /// <summary>Number of files directly in this folder.</summary>
+    public long GetDirectFileCount(int node) => GetDirectFileTotal(node, _fileCount);
+
+    private long GetDirectFileTotal(int node, long[] totals)
     {
-        var total = _totalBytes[node];
+        var total = totals[node];
         for (var i = _childStart[node]; i < _childStart[node + 1]; i++)
         {
-            total -= _totalBytes[_childIndex[i]];
+            total -= totals[_childIndex[i]];
         }
 
         return Math.Max(0, total);
@@ -109,16 +115,56 @@ public sealed class FolderTree
     /// <summary>Child folders of <paramref name="node"/>, largest first.</summary>
     public IReadOnlyList<int> GetChildren(int node, int max = int.MaxValue)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(max);
         var start = _childStart[node];
-        var end = _childStart[node + 1];
-        var children = new int[end - start];
-        Array.Copy(_childIndex, start, children, 0, children.Length);
-        Array.Sort(children, (a, b) =>
+        var count = GetChildFolderCount(node);
+        if (max == 0 || count == 0)
         {
-            var bySize = _totalBytes[b].CompareTo(_totalBytes[a]);
-            return bySize != 0 ? bySize : string.Compare(_names[a], _names[b], StringComparison.OrdinalIgnoreCase);
-        });
-        return children.Length <= max ? children : children[..max];
+            return [];
+        }
+
+        if (count >= 1024 && max <= count / 4)
+        {
+            // Retain only the requested children of wide folders. The lowest-ranked entry leaves first.
+            var worstFirst = Comparer<int>.Create((left, right) => CompareChildren(right, left));
+            var best = new PriorityQueue<int, int>(max, worstFirst);
+            for (var i = start; i < start + max; i++)
+            {
+                var child = _childIndex[i];
+                best.Enqueue(child, child);
+            }
+
+            for (var i = start + max; i < start + count; i++)
+            {
+                var child = _childIndex[i];
+                best.EnqueueDequeue(child, child);
+            }
+
+            var ranked = new int[max];
+            for (var i = ranked.Length - 1; i >= 0; i--)
+            {
+                ranked[i] = best.Dequeue();
+            }
+
+            return ranked;
+        }
+
+        var children = new int[count];
+        Array.Copy(_childIndex, start, children, 0, count);
+        Array.Sort(children, CompareChildren);
+        return count <= max ? children : children[..max];
+    }
+
+    private int CompareChildren(int left, int right)
+    {
+        var bySize = _totalBytes[right].CompareTo(_totalBytes[left]);
+        if (bySize != 0)
+        {
+            return bySize;
+        }
+
+        var byName = string.Compare(_names[left], _names[right], StringComparison.OrdinalIgnoreCase);
+        return byName != 0 ? byName : left.CompareTo(right);
     }
 
     public string GetPath(int node)

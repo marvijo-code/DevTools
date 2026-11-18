@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using DevTools.Services.BiggestFiles;
+using DevTools.Services.FolderSizes;
 
 namespace DevTools.Services.BiggestFiles.Ntfs;
 
@@ -20,15 +21,18 @@ public sealed class MftScanner
         var stopwatch = Stopwatch.StartNew();
         using var scan = await MftTableLoader.EnterScanAsync(cancellationToken).ConfigureAwait(false);
 
-        var table = await MftTableLoader.LoadAsync(
+        // Small rankings can reread just the winning names cheaply on a volume without seek penalties.
+        var deferFileNames = request.TopCount <= 100 && ScanResources.ReadSeekPenalty(Path.GetPathRoot(root)) is false;
+        var result = await MftTableLoader.UseVolumeAsync(
             root,
             (parsed, _ , elapsed) => progress?.Report(new BiggestFilesProgress(
                 "Reading MFT", parsed, 0, elapsed,
                 ComputeRate(parsed, elapsed), Array.Empty<FileSizeHit>(), IsCompleted: false)),
             stopwatch,
-            cancellationToken).ConfigureAwait(false);
-
-        var result = RankFiles(table, root, request.TopCount, stopwatch, cancellationToken);
+            cancellationToken,
+            keepFileNames: true,
+            deferFileNames,
+            table => RankFiles(table, root, request.TopCount, stopwatch, cancellationToken)).ConfigureAwait(false);
         progress?.Report(new BiggestFilesProgress(
             "Done", result.FilesSeen, result.BytesSeen, result.Elapsed,
             ComputeRate(result.FilesSeen, result.Elapsed), result.Top, IsCompleted: true));
@@ -95,6 +99,7 @@ public sealed class MftScanner
         }
 
         var winners = top.UnorderedItems.ToList();
+        table.LoadFileNames(winners.Select(winner => winner.Element), cancellationToken);
         winners.Sort(static (left, right) => right.Priority.CompareTo(left.Priority));
         var pathCache = new Dictionary<uint, string>();
         var hits = new List<FileSizeHit>(winners.Count);

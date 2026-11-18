@@ -180,9 +180,10 @@ public sealed class MftExtentMapReaderTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task LoadVolumeAsync_UsesVerifiedNamesFromExtensions(bool keepFileNames)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task LoadVolumeAsync_UsesVerifiedNamesFromExtensions(bool keepFileNames, bool deferFileNames)
     {
         var directory = Directory.CreateTempSubdirectory("devtools-mft-names-");
         var path = Path.Combine(directory.FullName, "image.bin");
@@ -210,7 +211,7 @@ public sealed class MftExtentMapReaderTests
             await File.WriteAllBytesAsync(path, disk);
             using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             var table = await MftTableLoader.LoadVolumeAsync(handle, @"C:\", Geometry, null,
-                Stopwatch.StartNew(), CancellationToken.None, keepFileNames);
+                Stopwatch.StartNew(), CancellationToken.None, keepFileNames, deferFileNames: deferFileNames);
             var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "fixture", Stopwatch.StartNew());
 
             Assert.True(table.IsNamedFile(25));
@@ -225,6 +226,43 @@ public sealed class MftExtentMapReaderTests
                 Assert.Equal(16 * ClusterSize, tree.GetAllocatedBytes(folder));
                 Assert.Equal(0, tree.NtfsAllocation?.UnlinkedBytes);
             }
+        }
+        finally
+        {
+            File.Delete(path);
+            directory.Delete();
+        }
+    }
+
+    [Fact]
+    public async Task RankFiles_ReadsDeferredNamesFromTheVerifiedRecords()
+    {
+        var directory = Directory.CreateTempSubdirectory("devtools-deferred-mft-names-");
+        var path = Path.Combine(directory.FullName, "image.bin");
+        try
+        {
+            await File.WriteAllBytesAsync(path, BuildDisk(nonResidentList: true));
+            using var volume = File.OpenHandle(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+            var eager = await MftTableLoader.LoadVolumeAsync(volume, @"C:\", Geometry, null, Stopwatch.StartNew(),
+                CancellationToken.None, keepFileNames: true);
+            var deferred = await MftTableLoader.LoadVolumeAsync(volume, @"C:\", Geometry, null, Stopwatch.StartNew(),
+                CancellationToken.None, keepFileNames: true, deferFileNames: true);
+            Assert.Equal("Folder", deferred.Names[24]);
+            Assert.Null(deferred.Names[25]);
+
+            var first = MftScanner.RankFiles(eager, @"C:\Folder", 1, Stopwatch.StartNew(), CancellationToken.None);
+            var second = MftScanner.RankFiles(deferred, @"C:\Folder", 1, Stopwatch.StartNew(), CancellationToken.None);
+            Assert.Equal(Assert.Single(first.Top), Assert.Single(second.Top));
+            Assert.Equal("data.bin", deferred.Names[25]);
+
+            var stale = await MftTableLoader.LoadVolumeAsync(volume, @"C:\", Geometry, null, Stopwatch.StartNew(),
+                CancellationToken.None, keepFileNames: true, deferFileNames: true);
+            var replacement = new MftRecordBuilder().Sequence(2).FileName("replacement.bin", (3UL << 48) | 24, 1)
+                .ResidentData(80).Build();
+            RandomAccess.Write(volume, replacement, 97 * ClusterSize);
+            var error = Assert.Throws<IOException>(() =>
+                MftScanner.RankFiles(stale, @"C:\Folder", 1, Stopwatch.StartNew(), CancellationToken.None));
+            Assert.Contains("NTFS record 25 changed", error.Message);
         }
         finally
         {

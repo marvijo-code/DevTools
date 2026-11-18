@@ -188,7 +188,7 @@ internal static class MftExtentMapReader
         return references;
     }
 
-    private static void ReadMapped(List<(long Lcn, long ClusterCount)> extents, long fileOffset,
+    internal static void ReadMapped(List<(long Lcn, long ClusterCount)> extents, long fileOffset,
         Span<byte> destination, Span<byte> scratch, ReadAt readAt, CancellationToken cancellationToken)
     {
         var clusterSize = scratch.Length;

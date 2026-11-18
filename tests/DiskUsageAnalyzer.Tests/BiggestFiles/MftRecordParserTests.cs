@@ -60,6 +60,34 @@ public sealed class MftRecordParserTests
     }
 
     [Fact]
+    public void TryParseRecord_ScanSkipsInactiveRecordsBeforeMutatingTheBuffer()
+    {
+        var record = new MftRecordBuilder().InUse(false).ResidentData(size: 4).Build();
+        var original = (byte[])record.Clone();
+        var info = new MftRecordInfo();
+
+        Assert.False(MftRecordParser.TryParseRecord(record, ref info, requireInUse: true, readLastWrite: false));
+        Assert.Equal(original, record);
+    }
+
+    [Fact]
+    public void TryParseRecord_FolderScanReadsSizesWithoutTimestamps()
+    {
+        var record = new MftRecordBuilder()
+            .FileName("test.bin", parent: 5, nameNamespace: 1)
+            .NonResidentData(realSize: 50, allocatedSize: 4096)
+            .LastWrite(133_000_000_000_000_000)
+            .Build();
+        var info = new MftRecordInfo();
+
+        Assert.True(MftRecordParser.TryParseRecord(record, ref info, requireInUse: true, readLastWrite: false));
+        Assert.True(info.HasName);
+        Assert.Equal(50, info.DataRealSize);
+        Assert.Equal(4096, info.DataAllocatedSize);
+        Assert.Equal(0, info.LastWriteFileTime);
+    }
+
+    [Fact]
     public void TryParseRecord_ReadsResidentDataSize()
     {
         var record = new MftRecordBuilder()

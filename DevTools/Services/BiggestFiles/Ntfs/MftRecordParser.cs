@@ -61,7 +61,10 @@ public static class MftRecordParser
     /// non-FILE signature or a torn record (fixup mismatch). A not-in-use record still parses;
     /// callers inspect <see cref="MftRecordInfo.InUse"/>.
     /// </summary>
-    public static bool TryParseRecord(Span<byte> record, ref MftRecordInfo info)
+    public static bool TryParseRecord(Span<byte> record, ref MftRecordInfo info) =>
+        TryParseRecord(record, ref info, requireInUse: false, readLastWrite: true);
+
+    internal static bool TryParseRecord(Span<byte> record, ref MftRecordInfo info, bool requireInUse, bool readLastWrite)
     {
         info = default;
 
@@ -76,13 +79,15 @@ public static class MftRecordParser
             return false;
         }
 
-        if (!ApplyFixups(record))
+        // The flags are in the record header, ahead of any sector trailer that needs fixups.
+        var flags = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x16, 2));
+        var inUse = (flags & 0x0001) != 0;
+        if ((requireInUse && !inUse) || !ApplyFixups(record))
         {
             return false;
         }
 
-        var flags = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x16, 2));
-        info.InUse = (flags & 0x0001) != 0;
+        info.InUse = inUse;
         info.IsDirectory = (flags & 0x0002) != 0;
         info.SequenceNumber = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x10, 2));
         info.BaseRecordNumber = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(0x20, 8)) & 0x0000FFFFFFFFFFFFUL;
@@ -116,7 +121,7 @@ public static class MftRecordParser
 
             switch (attributeType)
             {
-                case AttrStandardInformation when !nonResident:
+                case AttrStandardInformation when readLastWrite && !nonResident:
                     ReadStandardInformation(record, offset, ref info);
                     break;
                 case AttrAttributeList:

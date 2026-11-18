@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.Text;
 using System.Threading.Channels;
 
@@ -276,9 +277,8 @@ internal static class MftTableLoader
         var flags = new byte[recordCount];
         var realSize = new long[recordCount];
         var allocSize = new long[recordCount];
-        var lastWrite = new long[recordCount];
+        var lastWrite = keepFileNames ? new long[recordCount] : [];
         var names = new string?[recordCount];
-        var recordsParsed = 0;
 
         // Locate the MFT's own clusters from record 0.
         var extents = ReadMftExtents(volume, geometry);
@@ -287,7 +287,7 @@ internal static class MftTableLoader
             throw new NotSupportedException("Could not locate the MFT data runs.");
         }
 
-        var lastReportTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        var lastReportTicks = Stopwatch.GetTimestamp();
         void OnParsed(int parsed)
         {
             if (reportProgress is null)
@@ -295,24 +295,24 @@ internal static class MftTableLoader
                 return;
             }
 
-            var now = System.Diagnostics.Stopwatch.GetTimestamp();
-            if (now - lastReportTicks < ProgressInterval.Ticks)
+            var previous = Volatile.Read(ref lastReportTicks);
+            var now = Stopwatch.GetTimestamp();
+            if (Stopwatch.GetElapsedTime(previous, now) < ProgressInterval ||
+                Interlocked.CompareExchange(ref lastReportTicks, now, previous) != previous)
             {
                 return;
             }
 
-            lastReportTicks = now;
             reportProgress(parsed, recordCount, stopwatch.Elapsed);
         }
 
         await ParseAllRecordsAsync(
             volume, geometry, extents, recordSize, recordCount,
             parent, flags, realSize, allocSize, lastWrite, names, keepFileNames,
-            count => Volatile.Write(ref recordsParsed, count),
             OnParsed,
             cancellationToken).ConfigureAwait(false);
 
-        reportProgress?.Invoke(recordsParsed, recordCount, stopwatch.Elapsed);
+        reportProgress?.Invoke(recordCount, recordCount, stopwatch.Elapsed);
 
         return new MftRecordTable(volumeRoot, recordCount, parent, flags, realSize, allocSize, lastWrite, names);
     }
@@ -350,7 +350,6 @@ internal static class MftTableLoader
         long[] lastWrite,
         string?[] names,
         bool keepFileNames,
-        Action<int> reportParsed,
         Action<int> reportThrottled,
         CancellationToken cancellationToken)
     {
@@ -378,53 +377,69 @@ internal static class MftTableLoader
             {
                 var localExtensions = new List<(uint, long, long)>();
                 var info = new MftRecordInfo();
-                await foreach (var block in channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+                try
                 {
-                    var span = block.Buffer.AsSpan(0, block.RecordCount * recordSize);
-                    for (var r = 0; r < block.RecordCount; r++)
+                    await foreach (var block in channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
                     {
-                        var globalIndex = block.StartRecordIndex + r;
-                        var recordSpan = span.Slice(r * recordSize, recordSize);
-                        if (!MftRecordParser.TryParseRecord(recordSpan, ref info))
+                        try
                         {
-                            continue;
-                        }
-
-                        byte flag = 0;
-                        if (info.InUse) flag |= MftRecordTable.FlagInUse;
-                        if (info.IsDirectory) flag |= MftRecordTable.FlagDirectory;
-                        if (info.HasName) flag |= MftRecordTable.FlagHasName;
-
-                        if (info.BaseRecordNumber != 0)
-                        {
-                            flag |= MftRecordTable.FlagExtension;
-                            if (info.DataSizesValid)
+                            var span = block.Buffer.AsSpan(0, block.RecordCount * recordSize);
+                            for (var r = 0; r < block.RecordCount; r++)
                             {
-                                localExtensions.Add(((uint)info.BaseRecordNumber, info.DataRealSize, info.DataAllocatedSize));
+                                var globalIndex = block.StartRecordIndex + r;
+                                var recordSpan = span.Slice(r * recordSize, recordSize);
+                                if (!MftRecordParser.TryParseRecord(recordSpan, ref info, requireInUse: true, readLastWrite: keepFileNames))
+                                {
+                                    continue;
+                                }
+
+                                byte flag = MftRecordTable.FlagInUse;
+                                if (info.IsDirectory) flag |= MftRecordTable.FlagDirectory;
+                                if (info.HasName) flag |= MftRecordTable.FlagHasName;
+
+                                if (info.BaseRecordNumber != 0)
+                                {
+                                    flag |= MftRecordTable.FlagExtension;
+                                    if (info.DataSizesValid)
+                                    {
+                                        localExtensions.Add(((uint)info.BaseRecordNumber, info.DataRealSize, info.DataAllocatedSize));
+                                    }
+                                }
+                                else if (info.DataSizesValid)
+                                {
+                                    flag |= MftRecordTable.FlagHasSize;
+                                    realSize[globalIndex] = info.DataRealSize;
+                                    allocSize[globalIndex] = info.DataAllocatedSize;
+                                }
+
+                                parent[globalIndex] = (uint)info.ParentRecordNumber;
+                                if (keepFileNames)
+                                {
+                                    lastWrite[globalIndex] = info.LastWriteFileTime;
+                                }
+                                // File names cost hundreds of MB on a big drive; the folder-size scan only
+                                // needs folder names, so it skips them to stay light on a RAM-starved laptop.
+                                if (info.HasName && (keepFileNames || info.IsDirectory))
+                                {
+                                    names[globalIndex] = Encoding.Unicode.GetString(recordSpan.Slice(info.NameOffsetInRecord, info.NameLengthChars * 2));
+                                }
+
+                                flags[globalIndex] = flag;
                             }
-                        }
-                        else if (info.DataSizesValid)
-                        {
-                            flag |= MftRecordTable.FlagHasSize;
-                            realSize[globalIndex] = info.DataRealSize;
-                            allocSize[globalIndex] = info.DataAllocatedSize;
-                        }
 
-                        parent[globalIndex] = (uint)info.ParentRecordNumber;
-                        lastWrite[globalIndex] = info.LastWriteFileTime;
-                        // File names cost hundreds of MB on a big drive; the folder-size scan only
-                        // needs folder names, so it skips them to stay light on a RAM-starved laptop.
-                        if (info.HasName && (keepFileNames || info.IsDirectory))
-                        {
-                            names[globalIndex] = Encoding.Unicode.GetString(recordSpan.Slice(info.NameOffsetInRecord, info.NameLengthChars * 2));
+                            Interlocked.Add(ref parsedCounter, block.RecordCount);
+                            reportThrottled(Volatile.Read(ref parsedCounter));
                         }
-
-                        flags[globalIndex] = flag;
+                        finally
+                        {
+                            ArrayPool<byte>.Shared.Return(block.Buffer);
+                        }
                     }
-
-                    Interlocked.Add(ref parsedCounter, block.RecordCount);
-                    reportThrottled(Volatile.Read(ref parsedCounter));
-                    ArrayPool<byte>.Shared.Return(block.Buffer);
+                }
+                catch (Exception ex)
+                {
+                    channel.Writer.TryComplete(ex);
+                    throw;
                 }
 
                 if (localExtensions.Count > 0)
@@ -463,36 +478,40 @@ internal static class MftTableLoader
                     var chunkClusters = (int)Math.Min(clustersRemaining, clustersPerChunk);
                     var chunkBytes = chunkClusters * clusterBytes;
                     var blockBuffer = ArrayPool<byte>.Shared.Rent(carryLength + chunkBytes);
-
-                    if (carryLength > 0)
+                    var queued = false;
+                    try
                     {
-                        carry.AsSpan(0, carryLength).CopyTo(blockBuffer);
+                        if (carryLength > 0)
+                        {
+                            carry.AsSpan(0, carryLength).CopyTo(blockBuffer);
+                        }
+
+                        ReadExact(volume, blockBuffer.AsSpan(carryLength, chunkBytes), currentLcn * clusterBytes);
+
+                        var totalBytes = carryLength + chunkBytes;
+                        var recordsRemaining = recordCount - startRecordIndex;
+                        var fullRecords = Math.Min(totalBytes / recordSize, recordsRemaining);
+                        var consumedBytes = fullRecords * recordSize;
+                        // The last extent can include allocated space beyond the valid data length.
+                        carryLength = fullRecords == recordsRemaining ? 0 : totalBytes - consumedBytes;
+                        if (carryLength > 0)
+                        {
+                            blockBuffer.AsSpan(consumedBytes, carryLength).CopyTo(carry);
+                        }
+
+                        if (fullRecords > 0)
+                        {
+                            await channel.Writer.WriteAsync(new Block(blockBuffer, startRecordIndex, fullRecords), cancellationToken).ConfigureAwait(false);
+                            queued = true;
+                            startRecordIndex += fullRecords;
+                        }
                     }
-
-                    ReadExact(volume, blockBuffer.AsSpan(carryLength, chunkBytes), currentLcn * clusterBytes);
-
-                    var totalBytes = carryLength + chunkBytes;
-                    var fullRecords = totalBytes / recordSize;
-                    if (startRecordIndex + fullRecords > recordCount)
+                    finally
                     {
-                        fullRecords = recordCount - startRecordIndex;
-                    }
-
-                    var consumedBytes = fullRecords * recordSize;
-                    carryLength = totalBytes - consumedBytes;
-                    if (carryLength > 0)
-                    {
-                        blockBuffer.AsSpan(consumedBytes, carryLength).CopyTo(carry);
-                    }
-
-                    if (fullRecords > 0)
-                    {
-                        await channel.Writer.WriteAsync(new Block(blockBuffer, startRecordIndex, fullRecords), cancellationToken).ConfigureAwait(false);
-                        startRecordIndex += fullRecords;
-                    }
-                    else
-                    {
-                        ArrayPool<byte>.Shared.Return(blockBuffer);
+                        if (!queued)
+                        {
+                            ArrayPool<byte>.Shared.Return(blockBuffer);
+                        }
                     }
 
                     clustersRemaining -= chunkClusters;
@@ -505,15 +524,35 @@ internal static class MftTableLoader
                 }
             }
 
-            channel.Writer.Complete();
+            if (startRecordIndex != recordCount)
+            {
+                throw new IOException($"MFT extents covered {startRecordIndex:N0} of {recordCount:N0} records.");
+            }
+
+            channel.Writer.TryComplete();
+            await parserCompletion.ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             channel.Writer.TryComplete(ex);
+            try
+            {
+                await parserCompletion.ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Preserve the read or parse error that stopped the pipeline.
+            }
+
             throw;
         }
-
-        await parserCompletion.ConfigureAwait(false);
+        finally
+        {
+            while (channel.Reader.TryRead(out var pending))
+            {
+                ArrayPool<byte>.Shared.Return(pending.Buffer);
+            }
+        }
 
         // Merge extension-record sizes into their base records.
         foreach (var (baseNumber, real, alloc) in extensionSizes)

@@ -115,7 +115,9 @@ public sealed class MftFolderSizeScanner
         }
 
         var children = new int[childStart[recordCount]];
-        var cursor = (int[])childStart.Clone();
+        // Use the record-to-node map as the counting-sort cursor until numbering starts.
+        var recordToNode = new int[recordCount];
+        Array.Copy(childStart, recordToNode, recordCount);
         for (var r = 0; r < recordCount; r++)
         {
             if (r == root || !table.IsNamedDirectory(r))
@@ -126,12 +128,11 @@ public sealed class MftFolderSizeScanner
             var p = (int)table.Parent[r];
             if (p >= 0 && p < recordCount && p != r)
             {
-                children[cursor[p]++] = r;
+                children[recordToNode[p]++] = r;
             }
         }
 
         // Breadth-first numbering so every parent node index is lower than its children.
-        var recordToNode = new int[recordCount];
         Array.Fill(recordToNode, -1);
         var nodeParent = new List<int>(children.Length + 1) { 0 };
         var nodeNames = new List<string>(children.Length + 1) { string.Empty };

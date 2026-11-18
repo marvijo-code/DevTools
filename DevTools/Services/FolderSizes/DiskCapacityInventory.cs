@@ -30,7 +30,7 @@ internal static class DiskCapacityInventory
     private const uint GetVolumeExtents = 0x00560000;
     private const int MaximumBufferSize = 1024 * 1024;
 
-    internal static IReadOnlyList<DiskCapacity> Read(
+    internal static IReadOnlyList<VolumeDiskExtent> ReadVolumeTopology(
         IReadOnlyList<DriveDescriptor> volumes, CancellationToken cancellationToken, out int[][] backingDisks)
     {
         backingDisks = new int[volumes.Count][];
@@ -63,6 +63,18 @@ internal static class DiskCapacityInventory
             }
         }
 
+        return extents;
+    }
+
+    internal static IReadOnlyList<DiskCapacity> ReadPhysicalDisks(
+        IReadOnlyList<VolumeDiskExtent> extents, CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return [];
+        }
+
+        var buffer = new byte[4096];
         var disks = new List<DiskCapacity>();
         foreach (var disk in ReadDiskNumbers())
         {

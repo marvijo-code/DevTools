@@ -57,8 +57,12 @@ public sealed class DiskUsageExpansionTests
     {
         var analyzer = new DevTools.Services.DiskUsageAnalyzer();
         using var stopAfterInventory = new CancellationTokenSource();
+        var progress = new CancelOnProgress(stopAfterInventory);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            analyzer.CaptureAsync(new CancelOnProgress(stopAfterInventory), stopAfterInventory.Token));
+            analyzer.CaptureAsync(progress, stopAfterInventory.Token));
+        var first = Assert.IsType<DiskUsageProgress>(progress.First);
+        Assert.NotEmpty(Assert.IsAssignableFrom<IReadOnlyList<string>>(first.BrowseRoots));
+        Assert.DoesNotContain("Disk ", Assert.Single(first.Sections, section => section.Title == "Drive Summary").Summary);
         Assert.Empty(analyzer.Trees);
 
         var fixture = Directory.CreateTempSubdirectory("devtools-overlay-alias-");
@@ -106,6 +110,12 @@ public sealed class DiskUsageExpansionTests
 
     private sealed class CancelOnProgress(CancellationTokenSource source) : IProgress<DiskUsageProgress>
     {
-        public void Report(DiskUsageProgress value) => source.Cancel();
+        public DiskUsageProgress? First { get; private set; }
+
+        public void Report(DiskUsageProgress value)
+        {
+            First ??= value;
+            source.Cancel();
+        }
     }
 }

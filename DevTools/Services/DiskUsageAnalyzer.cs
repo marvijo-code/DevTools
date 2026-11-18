@@ -54,16 +54,7 @@ public sealed class DiskUsageAnalyzer
     private async Task<DiskUsageSnapshot> CaptureCoreAsync(IProgress<DiskUsageProgress>? progress, CancellationToken cancellationToken)
     {
         var capturedAt = DateTimeOffset.Now;
-        var drives = DriveUsageService.GetFixedDrives(includeVolumesWithoutDriveLetters: true);
-        var diskCapacities = DiskCapacityInventory.Read(drives, cancellationToken, out var backingDisks);
-        var diskCount = backingDisks.SelectMany(disks => disks).Distinct().Count();
-        var possibleParallelism = Math.Min(diskCount, drives.Count);
-        var useRawMft = possibleParallelism > 1 && OperatingSystem.IsWindows() && drives.Any(drive =>
-            string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)) && ElevationService.IsProcessElevated();
-        var concurrentWalks = possibleParallelism > 1 && !useRawMft
-            ? ScanResources.Capture().VolumeWalkParallelism(possibleParallelism)
-            : 1;
-        var browseRoots = drives.Select(drive => drive.RootPath).ToArray();
+        var drives = DriveUsageService.GetFixedDrives(includeVolumesWithoutDriveLetters: true);        var browseRoots = drives.Select(drive => drive.RootPath).ToArray();
         var mountAliases = WindowsVolumePaths.GetMountAliases(drives, cancellationToken);
         lock (_treesLock)
         {
@@ -89,15 +80,44 @@ public sealed class DiskUsageAnalyzer
             sections.Add(CreatePendingSection(title, $"Filled in from the {systemRoot} scan."));
         }
 
-        sections.Add(BuildDriveSummarySection(drives, new Dictionary<string, DriveScanResult>(StringComparer.OrdinalIgnoreCase), diskCapacities));
-        progress?.Report(new DiskUsageProgress(headline, $"Found {drives.Count} fixed volume(s). Scanning folders...", "Sizing folders. Results appear per drive as soon as each drive is done.", sections.ToList(), false)
+        var results = new Dictionary<string, DriveScanResult>(StringComparer.OrdinalIgnoreCase);
+        var currentStatus = $"Found {drives.Count} fixed volume(s). Scanning folders...";
+        var currentAnalysis = "Sizing folders. Results appear per drive as soon as each drive is done.";
+        var progressLock = new object();
+        sections.Add(BuildDriveSummarySection(drives, results));
+        progress?.Report(new DiskUsageProgress(headline, currentStatus, currentAnalysis, sections.ToList(), false)
         {
             BrowseRoots = browseRoots
         });
 
-        var results = new Dictionary<string, DriveScanResult>(StringComparer.OrdinalIgnoreCase);
-        var currentAnalysis = BuildAnalysis([]);
-        var progressLock = new object();
+        cancellationToken.ThrowIfCancellationRequested();
+        var extents = DiskCapacityInventory.ReadVolumeTopology(drives, cancellationToken, out var backingDisks);
+        var diskCount = backingDisks.SelectMany(disks => disks).Distinct().Count();
+        var possibleParallelism = Math.Min(diskCount, drives.Count);
+        var useRawMft = possibleParallelism > 1 && OperatingSystem.IsWindows() && drives.Any(drive =>
+            string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)) && ElevationService.IsProcessElevated();
+        var concurrentWalks = possibleParallelism > 1 && !useRawMft
+            ? ScanResources.Capture().VolumeWalkParallelism(possibleParallelism)
+            : 1;
+
+        IReadOnlyList<DriveDescriptor> currentDrives = drives;
+        IReadOnlyList<DiskCapacity>? diskCapacities = null;
+        using var inventoryCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var inventoryToken = inventoryCancellation.Token;
+        var inventory = Task.Run(() =>
+        {
+            var capacities = DiskCapacityInventory.ReadPhysicalDisks(extents, inventoryToken);
+            lock (progressLock)
+            {
+                inventoryToken.ThrowIfCancellationRequested();
+                diskCapacities = capacities;
+                if (capacities.Count > 0)
+                {
+                    sections[^1] = BuildDriveSummarySection(currentDrives, results, capacities);
+                    progress?.Report(new DiskUsageProgress(headline, currentStatus, currentAnalysis, sections.ToList(), false));
+                }
+            }
+        }, inventoryToken);
 
         async Task<DriveScanResult> ScanVolumeAsync(int sectionIndex, int workerShare, CancellationToken scanToken)
         {
@@ -117,7 +137,8 @@ public sealed class DiskUsageAnalyzer
                     lastStatus = now;
                     var elapsed = update.Elapsed > TimeSpan.Zero ? $" ({update.Elapsed.TotalSeconds:F0}s)" : string.Empty;
                     sections[sectionIndex] = CreatePendingSection(title, $"{update.EngineName}: {update.Message}{elapsed}");
-                    progress?.Report(new DiskUsageProgress(headline, $"Volume {sectionIndex + 1} of {drives.Count} ({drive.RootPath}): {update.Message}", currentAnalysis, sections.ToList(), false));
+                    currentStatus = $"Volume {sectionIndex + 1} of {drives.Count} ({drive.RootPath}): {update.Message}";
+                    progress?.Report(new DiskUsageProgress(headline, currentStatus, currentAnalysis, sections.ToList(), false));
                 }
             });
 
@@ -136,51 +157,71 @@ public sealed class DiskUsageAnalyzer
             }
         }
 
-        await foreach (var (sectionIndex, result) in ScanVolumesAsync(backingDisks, concurrentWalks, ScanVolumeAsync, cancellationToken)
-            .ConfigureAwait(false))
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var drive = drives[sectionIndex];
-            results[drive.RootPath] = result;
-            lock (_treesLock)
+            await foreach (var (sectionIndex, result) in ScanVolumesAsync(backingDisks, concurrentWalks, ScanVolumeAsync, cancellationToken)
+                .ConfigureAwait(false))
             {
-                if (result.Tree is { } tree)
+                cancellationToken.ThrowIfCancellationRequested();
+                var drive = drives[sectionIndex];
+                lock (_treesLock)
                 {
-                    _trees[drive.RootPath] = tree;
-                }
-                else
-                {
-                    _trees.Remove(drive.RootPath);
-                }
-            }
-
-            var driveSection = BuildDriveSection(result);
-            var derived = string.Equals(drive.RootPath, systemRoot, StringComparison.OrdinalIgnoreCase)
-                ? BuildDerivedSections(result.Tree)
-                : null;
-            var currentDrives = drives
-                .Select(item => results.TryGetValue(item.RootPath, out var completed) ? completed.Drive : item)
-                .ToArray();
-            lock (progressLock)
-            {
-                sections[sectionIndex] = driveSection;
-                if (derived is not null)
-                {
-                    for (var i = 0; i < derived.Count; i++)
+                    if (result.Tree is { } tree)
                     {
-                        sections[drives.Count + i] = derived[i];
+                        _trees[drive.RootPath] = tree;
+                    }
+                    else
+                    {
+                        _trees.Remove(drive.RootPath);
                     }
                 }
 
-                headline = BuildHeadline(currentDrives, capturedAt);
-                sections[^1] = BuildDriveSummarySection(currentDrives, results, diskCapacities);
-                currentAnalysis = BuildAnalysis(results.Values);
-                progress?.Report(new DiskUsageProgress(headline, $"Sized {results.Count} of {drives.Count} volume(s).", currentAnalysis, sections.ToList(), false)
+                var driveSection = BuildDriveSection(result);
+                var derived = string.Equals(drive.RootPath, systemRoot, StringComparison.OrdinalIgnoreCase)
+                    ? BuildDerivedSections(result.Tree)
+                    : null;
+                lock (progressLock)
                 {
-                    BrowseRoots = browseRoots,
-                    CompletedRoot = drive.RootPath
-                });
+                    results[drive.RootPath] = result;
+                    currentDrives = drives
+                        .Select(item => results.TryGetValue(item.RootPath, out var completed) ? completed.Drive : item)
+                        .ToArray();
+                    sections[sectionIndex] = driveSection;
+                    if (derived is not null)
+                    {
+                        for (var i = 0; i < derived.Count; i++)
+                        {
+                            sections[drives.Count + i] = derived[i];
+                        }
+                    }
+
+                    headline = BuildHeadline(currentDrives, capturedAt);
+                    sections[^1] = BuildDriveSummarySection(currentDrives, results, diskCapacities);
+                    currentAnalysis = BuildAnalysis(results.Values);
+                    currentStatus = $"Sized {results.Count} of {drives.Count} volume(s).";
+                    progress?.Report(new DiskUsageProgress(headline, currentStatus, currentAnalysis, sections.ToList(), false)
+                    {
+                        BrowseRoots = browseRoots,
+                        CompletedRoot = drive.RootPath
+                    });
+                }
             }
+
+            await inventory.ConfigureAwait(false);
+        }
+        catch
+        {
+            inventoryCancellation.Cancel();
+            try
+            {
+                await inventory.ConfigureAwait(false);
+            }
+            catch
+            {
+                // Keep the original scan, reporting, or cancellation error.
+            }
+
+            throw;
         }
 
         if (!results.ContainsKey(systemRoot))

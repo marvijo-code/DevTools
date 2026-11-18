@@ -76,12 +76,14 @@ public sealed partial class MainViewModel
 {
     private const int FolderBrowserMaxRows = 200;
     private const int FolderBrowserMaxFiles = 100;
+    private const int FolderBrowserRecentListingLimit = 32;
 
     private readonly ObservableCollection<FolderBrowserRow> _folderBrowserRows = [];
     private readonly ObservableCollection<FolderBrowserDrive> _folderBrowserDrives = [];
     private readonly HashSet<string> _folderBrowserExpanded = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, FolderFileSnapshot?> _folderBrowserFiles = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _folderBrowserFilesLoading = new(StringComparer.Ordinal);
+    private readonly Dictionary<int, FolderFileSnapshot?> _folderBrowserFiles = [];
+    private readonly HashSet<int> _folderBrowserFilesLoading = [];
+    private readonly OrderedDictionary<int, FolderFileSnapshot> _recentFolderBrowserFiles = new();
     private FolderTree? _folderBrowserFileTree;
     private string _folderBrowserPath = string.Empty;
     private string _folderBrowserSummary = "The folder browser fills in when the first drive scan finishes.";
@@ -127,7 +129,7 @@ public sealed partial class MainViewModel
         if (!string.Equals(normalized, _folderBrowserPath, StringComparison.Ordinal))
         {
             _folderBrowserExpanded.Clear();
-            ResetFolderBrowserFileCache();
+            CancelFolderBrowserFileLoads();
         }
 
         _folderBrowserPath = normalized;
@@ -271,8 +273,7 @@ public sealed partial class MainViewModel
     private void ShowPendingBrowserDrive(string path, bool scanCompleted = false)
     {
         _folderBrowserExpanded.Clear();
-        ResetFolderBrowserFileCache();
-        _folderBrowserFileTree = null;
+        ResetFolderBrowserFileCache(null);
         _folderBrowserRows.Clear();
         _folderBrowserPath = path;
         _canFolderBrowserGoUp = false;
@@ -286,13 +287,38 @@ public sealed partial class MainViewModel
         RaisePropertyChanged(nameof(CanFolderBrowserGoUp));
     }
 
-    private void ResetFolderBrowserFileCache()
+    private void CancelFolderBrowserFileLoads()
     {
         _folderBrowserFileLoadCts?.Cancel();
         _folderBrowserFileLoadCts?.Dispose();
         _folderBrowserFileLoadCts = null;
         _folderBrowserFiles.Clear();
         _folderBrowserFilesLoading.Clear();
+    }
+
+    private void ResetFolderBrowserFileCache(FolderTree? tree)
+    {
+        CancelFolderBrowserFileLoads();
+        _recentFolderBrowserFiles.Clear();
+        _folderBrowserFileTree = tree;
+    }
+
+    private bool TryGetFolderBrowserListing(int node, out FolderFileSnapshot? listing)
+    {
+        if (_folderBrowserFiles.TryGetValue(node, out listing))
+        {
+            return true;
+        }
+
+        if (!_recentFolderBrowserFiles.Remove(node, out var recent))
+        {
+            return false;
+        }
+
+        _recentFolderBrowserFiles.Add(node, recent);
+        _folderBrowserFiles.Add(node, recent);
+        listing = recent;
+        return true;
     }
 
     private void RebuildFolderBrowserRows()
@@ -304,8 +330,7 @@ public sealed partial class MainViewModel
 
         if (!ReferenceEquals(tree, _folderBrowserFileTree))
         {
-            ResetFolderBrowserFileCache();
-            _folderBrowserFileTree = tree;
+            ResetFolderBrowserFileCache(tree);
         }
 
         var showAllocation = FolderBrowserUseAllocation;
@@ -317,7 +342,7 @@ public sealed partial class MainViewModel
         }
 
         var rows = new List<FolderBrowserRow>();
-        var pendingFolders = new List<string>();
+        var pendingFolders = new List<FolderFileRequest>();
         AppendLevel(tree, node, 0, Math.Max(1, total.Value), showAllocation, rows, pendingFolders);
 
         _folderBrowserRows.Clear();
@@ -336,7 +361,7 @@ public sealed partial class MainViewModel
     /// <summary>Adds the largest entries and recurses into expanded folders.</summary>
     private void AppendLevel(
         FolderTree tree, int node, int depth, long rootTotal, bool showAllocation,
-        List<FolderBrowserRow> output, List<string> pendingFolders)
+        List<FolderBrowserRow> output, List<FolderFileRequest> pendingFolders)
     {
         var folderPath = tree.GetPath(node);
         var entries = new List<(long Bytes, string Name, FolderBrowserRow Row, int ChildNode)>();
@@ -398,11 +423,11 @@ public sealed partial class MainViewModel
         }
         else if (directBytes > 0 || directFiles.FileCount > 0)
         {
-            if (!_folderBrowserFiles.TryGetValue(folderPath, out var listing))
+            if (!TryGetFolderBrowserListing(node, out var listing))
             {
-                if (_folderBrowserFilesLoading.Add(folderPath))
+                if (_folderBrowserFilesLoading.Add(node))
                 {
-                    pendingFolders.Add(folderPath);
+                    pendingFolders.Add(new FolderFileRequest(node, folderPath, directBytes, directFiles.FileCount));
                 }
 
                 AddFileSummary("[files in this folder]", directBytes, "loading file names");
@@ -459,15 +484,14 @@ public sealed partial class MainViewModel
         }
     }
 
-    private async Task LoadFolderFilesAsync(List<string> folders, CancellationToken cancellationToken)
+    private async Task LoadFolderFilesAsync(List<FolderFileRequest> folders, CancellationToken cancellationToken)
     {
-        Dictionary<string, FolderFileSnapshot?> loaded;
+        (FolderFileRequest Folder, FolderFileSnapshot? Listing)[] loaded;
         try
         {
-            loaded = await Task.Run(() => folders.ToDictionary(
-                folder => folder,
-                folder => FolderFileListing.ReadLargest(folder, FolderBrowserMaxFiles, cancellationToken),
-                StringComparer.Ordinal), cancellationToken);
+            loaded = await Task.Run(() => folders.Select(folder =>
+                (folder, FolderFileListing.ReadLargest(folder.Path, FolderBrowserMaxFiles, cancellationToken)))
+                .ToArray(), cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -475,12 +499,26 @@ public sealed partial class MainViewModel
             return;
         }
 
-        foreach (var (folder, files) in loaded)
+        foreach (var (folder, listing) in loaded)
         {
-            _folderBrowserFilesLoading.Remove(folder);
-            _folderBrowserFiles[folder] = files;
+            _folderBrowserFilesLoading.Remove(folder.Node);
+            _folderBrowserFiles[folder.Node] = listing;
+            if (listing is null || !listing.Matches(folder.Bytes, folder.FileCount))
+            {
+                continue;
+            }
+
+            // Keep every result needed by the open view, and only a bounded history for navigation.
+            if (_recentFolderBrowserFiles.Count == FolderBrowserRecentListingLimit)
+            {
+                _recentFolderBrowserFiles.RemoveAt(0);
+            }
+
+            _recentFolderBrowserFiles.Add(folder.Node, listing);
         }
 
         RebuildFolderBrowserRows();
     }
+
+    private readonly record struct FolderFileRequest(int Node, string Path, long Bytes, long FileCount);
 }

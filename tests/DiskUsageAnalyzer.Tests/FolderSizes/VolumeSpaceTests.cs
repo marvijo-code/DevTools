@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using DiskUsage = DevTools.Services.DiskUsageAnalyzer;
 using DevTools.Services.BiggestFiles.Ntfs;
 using DevTools.Services.FolderSizes;
@@ -108,6 +109,53 @@ public sealed class VolumeSpaceTests
         var summary = DiskUsage.BuildDriveSummarySection([drive], results);
 
         Assert.Contains("Access denied. 700 used bytes have no folder attribution.", Assert.Single(summary.Entries).Note);
+    }
+
+    [Fact]
+    public void DriveSummary_ReconcilesPartitionRangesAndMatchedVolumeCapacity()
+    {
+        var logicalPartition = new DiskRange(200, 300);
+        var otherPartition = new DiskRange(600, 100);
+        var capacity = DiskCapacityInventory.Reconcile(0, 900, [new DiskRange(100, 500), logicalPartition, otherPartition],
+        [
+            new VolumeDiskExtent(0, logicalPartition, 280),
+            new VolumeDiskExtent(0, logicalPartition, 280),
+            new VolumeDiskExtent(1, otherPartition, 90)
+        ]);
+
+        Assert.Equal(new DiskCapacity(0, 900, 600, 300, 280), capacity);
+        var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
+        Assert.Contains("Disk 0 has 900 bytes.", summary.Summary);
+        Assert.Contains("280 bytes in matched filesystem capacities", summary.Summary);
+        Assert.Contains("20 inside matched partitions beyond their filesystem capacities", summary.Summary);
+        Assert.Contains("300 in other partition ranges and 300 outside partition ranges.", summary.Summary);
+    }
+
+    [Fact]
+    public void PhysicalDiskCapacity_OmitsAmbiguousVolumeMappings()
+    {
+        var partitions = new HashSet<DiskRange> { new(100, 500), new(200, 300) };
+        var extents = new VolumeDiskExtent[]
+        {
+            new(0, new DiskRange(100, 500), 450),
+            new(0, new DiskRange(200, 300), 290)
+        };
+
+        Assert.Equal(new DiskCapacity(0, 900, 500, 0, 0), DiskCapacityInventory.Reconcile(0, 900, partitions, extents));
+    }
+
+    [Fact]
+    public void ReadPartitionRanges_RejectsTruncatedAndOutOfDiskPartitions()
+    {
+        var layout = new byte[48 + 2 * 144];
+        BinaryPrimitives.WriteInt32LittleEndian(layout.AsSpan(4), 2);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(48 + 8), 100);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(48 + 16), 500);
+
+        var ranges = DiskCapacityInventory.ReadPartitionRanges(layout, 900);
+        Assert.Equal(new DiskRange(100, 500), Assert.Single(Assert.IsType<HashSet<DiskRange>>(ranges)));
+        Assert.Null(DiskCapacityInventory.ReadPartitionRanges(layout.AsSpan(0, layout.Length - 1), 900));
+        Assert.Null(DiskCapacityInventory.ReadPartitionRanges(layout, 599));
     }
 
     [Theory]

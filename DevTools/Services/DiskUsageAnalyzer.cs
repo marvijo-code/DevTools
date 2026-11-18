@@ -50,6 +50,7 @@ public sealed class DiskUsageAnalyzer
     {
         var capturedAt = DateTimeOffset.Now;
         var drives = DriveUsageService.GetFixedDrives(includeVolumesWithoutDriveLetters: true);
+        var diskCapacities = DiskCapacityInventory.Read(drives, cancellationToken);
         var browseRoots = drives.Select(drive => drive.RootPath).ToArray();
         lock (_treesLock)
         {
@@ -74,7 +75,7 @@ public sealed class DiskUsageAnalyzer
             sections.Add(CreatePendingSection(title, $"Filled in from the {systemRoot} scan."));
         }
 
-        sections.Add(BuildDriveSummarySection(drives, new Dictionary<string, DriveScanResult>(StringComparer.OrdinalIgnoreCase)));
+        sections.Add(BuildDriveSummarySection(drives, new Dictionary<string, DriveScanResult>(StringComparer.OrdinalIgnoreCase), diskCapacities));
         progress?.Report(new DiskUsageProgress(headline, $"Found {drives.Count} fixed volume(s). Scanning folders...", "Sizing folders. Results appear per drive as soon as each drive is done.", sections.ToList(), false)
         {
             BrowseRoots = browseRoots
@@ -145,7 +146,7 @@ public sealed class DiskUsageAnalyzer
                 .Select(item => results.TryGetValue(item.RootPath, out var completed) ? completed.Drive : item)
                 .ToArray();
             headline = BuildHeadline(currentDrives, capturedAt);
-            sections[^1] = BuildDriveSummarySection(currentDrives, results);
+            sections[^1] = BuildDriveSummarySection(currentDrives, results, diskCapacities);
             currentAnalysis = BuildAnalysis(results.Values);
             progress?.Report(new DiskUsageProgress(headline, $"Sized {results.Count} of {drives.Count} volume(s).", currentAnalysis, sections.ToList(), false)
             {
@@ -417,7 +418,10 @@ public sealed class DiskUsageAnalyzer
         ];
     }
 
-    internal static DiskUsageSection BuildDriveSummarySection(IReadOnlyList<DriveDescriptor> drives, IReadOnlyDictionary<string, DriveScanResult> results)
+    internal static DiskUsageSection BuildDriveSummarySection(
+        IReadOnlyList<DriveDescriptor> drives,
+        IReadOnlyDictionary<string, DriveScanResult> results,
+        IReadOnlyList<DiskCapacity>? diskCapacities = null)
     {
         var entries = new List<DiskUsageEntry>();
         foreach (var drive in drives)
@@ -493,7 +497,29 @@ public sealed class DiskUsageAnalyzer
                 $"{FormatBytes(space.UsedBytes)} used", note, display));
         }
 
-        return new DiskUsageSection("Drive Summary", "Space reported by Windows for each fixed drive. Logical file sizes are shown separately.", entries);
+        var summary = "Space reported by Windows for each fixed volume.";
+        if (diskCapacities is { Count: > 0 })
+        {
+            summary += Environment.NewLine + string.Join(Environment.NewLine, diskCapacities.Select(DescribeDiskCapacity));
+        }
+
+        return new DiskUsageSection("Drive Summary", summary, entries);
+    }
+
+    private static string DescribeDiskCapacity(DiskCapacity disk)
+    {
+        var total = $"Disk {disk.DiskNumber} has {disk.TotalBytes:N0} bytes.";
+        if (disk.PartitionedBytes is not long partitioned)
+        {
+            return $"{total} Partition ranges are unavailable.";
+        }
+
+        var partitionRemainder = disk.MatchedPartitionBytes - disk.FileSystemBytes;
+        var unmatched = partitioned - disk.MatchedPartitionBytes;
+        var outside = disk.TotalBytes - partitioned;
+        return $"{total} {disk.FileSystemBytes:N0} bytes in matched filesystem capacities, " +
+            $"{partitionRemainder:N0} inside matched partitions beyond their filesystem capacities, " +
+            $"{unmatched:N0} in other partition ranges and {outside:N0} outside partition ranges.";
     }
 
     private static string DescribeNtfsBitmap(NtfsBitmapAllocation? allocation)

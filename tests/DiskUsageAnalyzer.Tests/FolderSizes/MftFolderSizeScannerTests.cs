@@ -138,7 +138,7 @@ public sealed class MftFolderSizeScannerTests
     }
 
     [Fact]
-    public void BuildTree_CountsVolumeMetadataAndRollsUpFileAndDirectoryAllocation()
+    public void BuildTree_ReportsReservedRecordsApartFromFolderAllocation()
     {
         var table = CreateTable(160, new long[160]);
         AddDirectory(table, 24, Root, "Users");
@@ -150,7 +150,8 @@ public sealed class MftFolderSizeScannerTests
         var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "NTFS MFT", System.Diagnostics.Stopwatch.StartNew());
 
         Assert.Equal(25, tree.TotalBytes);
-        Assert.Equal(20_480, tree.GetAllocatedBytes(0));
+        Assert.Equal(12_288, tree.GetAllocatedBytes(0));
+        Assert.Equal(new NtfsRecordAllocation(8192, 0), tree.NtfsAllocation);
         Assert.Equal(12_288, tree.GetAllocatedBytes(tree.Find(@"C:\Users")));
     }
 
@@ -161,6 +162,7 @@ public sealed class MftFolderSizeScannerTests
         AddDirectory(table, Root, Root, ".");
         AddDirectory(table, 24, Root, "Current");
         AddDirectory(table, 25, Root, "Old");
+        AddDirectory(table, 26, 25, "Nested");
         AddFile(table, 40, 24, "current.bin", 20);
         AddFile(table, 41, 24, "stale.bin", 50);
         AddFile(table, 42, 40, "parent-is-a-file.bin", 60);
@@ -172,6 +174,7 @@ public sealed class MftFolderSizeScannerTests
         references[Root] = (9U << 16) | 9U;
         references[24] = (7U << 16) | 9U;
         references[25] = (2U << 16) | 8U;
+        references[26] = (3U << 16) | 2U;
         references[40] = (3U << 16) | 7U;
         references[41] = 6;
         references[42] = 3;
@@ -190,7 +193,9 @@ public sealed class MftFolderSizeScannerTests
         Assert.All(new[] { 41, 42, 43, 45 }, index => Assert.False(table.IsNamedFile(index)));
         Assert.Equal(20, tree.TotalBytes);
         Assert.Equal(4096, tree.GetAllocatedBytes(0));
+        Assert.Equal(new NtfsRecordAllocation(0, 16_384), tree.NtfsAllocation);
         Assert.Equal(-1, tree.Find(@"C:\Old"));
+        Assert.Equal(2, tree.FolderCount);
     }
 
     [Fact]

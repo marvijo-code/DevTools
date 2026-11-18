@@ -100,7 +100,7 @@ The Storage workspace sizes **every folder on every fixed drive** once, in the b
 
 The app scans in the background using its built-in NTFS Master File Table reader when elevated. It falls back to a folder walk on volumes where the NTFS reader is unavailable. Each drive section names the engine and elapsed scan time.
 
-Drive Summary shows Windows' total, used, free, reserved and pool-unavailable bytes. Folder Browser can also scan fixed volumes without drive letters using their Windows volume paths. Cleanup is disabled for those paths. The summary reports logical file lengths, attributed allocation and any remaining used space.
+Drive Summary shows Windows' total, used, free, reserved and pool-unavailable bytes. Folder Browser can also scan fixed volumes without drive letters using their Windows volume paths. Cleanup is disabled for those paths. The summary reports logical file lengths, folder allocation and any remaining used space. The raw NTFS scan also reports allocation recorded in reserved entries and records without a verified folder.
 
 The **Biggest Files** card below it lists the largest individual files. It uses the same fast NTFS path when elevated.
 

@@ -1,5 +1,7 @@
 namespace DevTools.Services.FolderSizes;
 
+internal readonly record struct NtfsRecordAllocation(long ReservedBytes, long UnlinkedBytes);
+
 /// <summary>
 /// Immutable in-memory size tree for every folder on one drive. Node 0 is the drive root.
 /// Children are stored once in a compact index (CSR layout) so a drive with a million folders
@@ -23,7 +25,8 @@ public sealed class FolderTree
         long[] fileCount,
         string engineName,
         TimeSpan elapsed,
-        long[]? allocatedBytes = null)
+        long[]? allocatedBytes = null,
+        NtfsRecordAllocation? ntfsAllocation = null)
     {
         if (parent.Length == 0 || parent.Length != names.Length || parent.Length != totalBytes.Length ||
             parent.Length != fileCount.Length || (allocatedBytes is not null && parent.Length != allocatedBytes.Length))
@@ -37,6 +40,7 @@ public sealed class FolderTree
         _totalBytes = totalBytes;
         _fileCount = fileCount;
         _allocatedBytes = allocatedBytes;
+        NtfsAllocation = ntfsAllocation;
         EngineName = engineName;
         Elapsed = elapsed;
 
@@ -82,6 +86,9 @@ public sealed class FolderTree
     public long TotalBytes => _totalBytes[0];
 
     public long TotalFiles => _fileCount[0];
+
+    internal NtfsRecordAllocation? NtfsAllocation { get; }
+
     public long? GetAllocatedBytes(int node) => _allocatedBytes?[node];
 
     public long GetTotalBytes(int node) => _totalBytes[node];

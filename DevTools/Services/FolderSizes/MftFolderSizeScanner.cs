@@ -136,11 +136,15 @@ public sealed class MftFolderSizeScanner
 
         // Breadth-first numbering so every parent node index is lower than its children.
         Array.Fill(recordToNode, -1);
-        var nodeParent = new List<int>(children.Length + 1) { 0 };
-        var nodeNames = new List<string>(children.Length + 1) { string.Empty };
-        var nodeRecords = new List<int>(children.Length + 1) { root };
+        var capacity = children.Length + 1;
+        var nodeParents = new int[capacity];
+        var nodeNames = new string[capacity];
+        var nodeRecords = new int[capacity];
+        nodeNames[0] = string.Empty;
+        nodeRecords[0] = root;
         recordToNode[root] = 0;
-        for (var head = 0; head < nodeRecords.Count; head++)
+        var count = 1;
+        for (var head = 0; head < count; head++)
         {
             var record = nodeRecords[head];
             for (var i = childStart[record]; i < childStart[record + 1]; i++)
@@ -151,18 +155,27 @@ public sealed class MftFolderSizeScanner
                     continue;
                 }
 
-                recordToNode[child] = nodeRecords.Count;
-                nodeParent.Add(head);
-                nodeNames.Add(table.Names[child] ?? "<unnamed>");
-                nodeRecords.Add(child);
+                recordToNode[child] = count;
+                nodeParents[count] = head;
+                nodeNames[count] = table.Names[child] ?? "<unnamed>";
+                nodeRecords[count] = child;
+                count++;
             }
         }
 
-        var count = nodeRecords.Count;
+        if (count < capacity)
+        {
+            // Some directory records have no verified path from the root.
+            Array.Resize(ref nodeParents, count);
+            Array.Resize(ref nodeNames, count);
+        }
+
         var totals = new long[count];
         var files = new long[count];
         var recordAllocation = table.RecordAllocation;
         var allocated = recordAllocation is null ? null : new long[count];
+        long reservedBytes = 0;
+        long unlinkedBytes = 0;
         for (var r = 0; r < recordCount; r++)
         {
             var parent = table.Parent[r];
@@ -179,29 +192,38 @@ public sealed class MftFolderSizeScanner
                 continue;
             }
 
-            // System records have no browsable owner. Their allocation belongs to the volume root.
-            var allocationNode = r < MftRecordTable.FirstUserRecordNumber ? 0
-                : recordToNode[r] >= 0 ? recordToNode[r]
-                : isUserFile ? parentNode : -1;
+            var bytes = recordAllocation[r];
+            if (r < MftRecordTable.FirstUserRecordNumber)
+            {
+                reservedBytes = checked(reservedBytes + bytes);
+                continue;
+            }
+
+            var allocationNode = recordToNode[r] >= 0 ? recordToNode[r] : isUserFile ? parentNode : -1;
             if (allocationNode >= 0)
             {
-                allocated[allocationNode] += recordAllocation[r];
+                allocated[allocationNode] = checked(allocated[allocationNode] + bytes);
+            }
+            else
+            {
+                unlinkedBytes = checked(unlinkedBytes + bytes);
             }
         }
 
-        var parentArray = nodeParent.ToArray();
         for (var i = count - 1; i > 0; i--)
         {
-            totals[parentArray[i]] += totals[i];
-            files[parentArray[i]] += files[i];
+            var parent = nodeParents[i];
+            totals[parent] += totals[i];
+            files[parent] += files[i];
             if (allocated is not null)
             {
-                allocated[parentArray[i]] += allocated[i];
+                allocated[parent] = checked(allocated[parent] + allocated[i]);
             }
         }
 
         stopwatch.Stop();
-        return new FolderTree(rootPath, parentArray, nodeNames.ToArray(), totals, files, engineName, stopwatch.Elapsed, allocated);
+        return new FolderTree(rootPath, nodeParents, nodeNames, totals, files, engineName, stopwatch.Elapsed,
+            allocated, allocated is null ? null : new NtfsRecordAllocation(reservedBytes, unlinkedBytes));
     }
 
     /// <summary>

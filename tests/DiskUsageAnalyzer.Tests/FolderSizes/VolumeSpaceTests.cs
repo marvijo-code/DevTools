@@ -26,7 +26,7 @@ public sealed class VolumeSpaceTests
     [InlineData(false, true, null, true, "700 used bytes have no folder attribution.")]
     [InlineData(true, true, null, true, "700 used bytes have no folder attribution.")]
     [InlineData(true, true, 500L, true, "200 used bytes remain unattributed.")]
-    [InlineData(true, true, 800L, true, "File allocation exceeded reported usage by 100 bytes")]
+    [InlineData(true, true, 800L, true, "Observed allocation exceeded reported usage by 100 bytes")]
     [InlineData(true, true, 500L, false, "Volume-wide usage is unavailable for reconciliation.")]
     [InlineData(false, true, null, false, "Folder allocation is unavailable.")]
     public void DriveSummary_DistinguishesPendingAndUnattributedUsage(
@@ -50,6 +50,26 @@ public sealed class VolumeSpaceTests
         {
             Assert.Contains($"{allocatedBytes:N0} bytes of allocation attributed by the scan.", note);
         }
+    }
+
+    [Fact]
+    public void DriveSummary_ReconcilesFolderAllocationReservedRecordsAndUnlinkedRecords()
+    {
+        var drive = new DriveDescriptor(@"C:\", "Test", "NTFS",
+            new VolumeSpace(1_000, 300, 700, 0, 0, IsVolumeWide: true));
+        var tree = new FolderTree(drive.RootPath, [-1], [""], [400], [1], "NTFS", TimeSpan.Zero,
+            [100], new NtfsRecordAllocation(150, 200));
+        var results = new Dictionary<string, DriveScanResult>
+        {
+            [drive.RootPath] = new DriveScanResult(drive, tree, "NTFS", "")
+        };
+
+        var note = Assert.Single(DiskUsage.BuildDriveSummarySection([drive], results).Entries).Note;
+
+        Assert.Contains("100 bytes assigned to folders", note);
+        Assert.Contains("150 in reserved NTFS records", note);
+        Assert.Contains("200 in NTFS records without a verified folder", note);
+        Assert.Contains("250 used bytes remain unattributed", note);
     }
 
     [Fact]

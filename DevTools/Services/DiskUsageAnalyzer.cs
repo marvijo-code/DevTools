@@ -449,18 +449,30 @@ public sealed class DiskUsageAnalyzer
             }
 
             results.TryGetValue(drive.RootPath, out var result);
-            var scanNote = result?.Tree is { } tree
-                ? $"Logical file size: {tree.TotalBytes:N0} bytes ({result.EngineName}, {tree.Elapsed.TotalSeconds:F1}s)."
+            var tree = result?.Tree;
+            var scanNote = tree is not null
+                ? $"Logical file size: {tree.TotalBytes:N0} bytes ({tree.EngineName}, {tree.Elapsed.TotalSeconds:F1}s)."
                 : result?.Note ?? "Folder scan pending.";
-            if (result?.Tree?.GetAllocatedBytes(0) is long allocatedBytes)
+            if (tree?.GetAllocatedBytes(0) is long allocatedBytes)
             {
-                scanNote += $" {allocatedBytes:N0} bytes of allocation attributed by the scan.";
+                var observed = (Int128)allocatedBytes;
+                if (tree.NtfsAllocation is { } ntfs)
+                {
+                    observed += (Int128)ntfs.ReservedBytes + ntfs.UnlinkedBytes;
+                    scanNote += $" {allocatedBytes:N0} bytes assigned to folders, {ntfs.ReservedBytes:N0} in reserved NTFS records, " +
+                        $"and {ntfs.UnlinkedBytes:N0} in NTFS records without a verified folder.";
+                }
+                else
+                {
+                    scanNote += $" {allocatedBytes:N0} bytes of allocation attributed by the scan.";
+                }
+
                 if (space.IsVolumeWide)
                 {
-                    var remainingUsed = space.UsedBytes - allocatedBytes;
+                    var remainingUsed = space.UsedBytes - observed;
                     scanNote += remainingUsed >= 0
                         ? $" {remainingUsed:N0} used bytes remain unattributed."
-                        : $" File allocation exceeded reported usage by {-remainingUsed:N0} bytes during the scan.";
+                        : $" Observed allocation exceeded reported usage by {-remainingUsed:N0} bytes during the scan.";
                 }
                 else
                 {

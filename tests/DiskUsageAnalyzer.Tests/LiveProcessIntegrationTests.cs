@@ -1,12 +1,33 @@
 using System.Diagnostics;
 using DevTools.Services;
+using DevTools.Services.Resources;
 using Xunit;
 
 namespace DiskUsageAnalyzer.Tests;
-
-// Local integration checks are opt-in and use only an explicitly selected Firefox test port.
 public sealed class LiveProcessIntegrationTests
 {
+    [Fact]
+    public void ProcessCapture_IncludesTheCurrentProcess()
+    {
+        var processes = new RunningProcessCollector().Capture(new CodexSessionCatalog());
+        var current = Assert.Single(processes, row => row.ProcessId == Environment.ProcessId);
+
+        Assert.True(current.WorkingSetBytes > 0);
+        Assert.False(string.IsNullOrWhiteSpace(current.ProcessName));
+        Assert.False(string.IsNullOrWhiteSpace(current.DisplayName));
+    }
+
+    [Fact]
+    public void ProcessDetails_RejectsAReusedPidFromTheKernelSnapshot()
+    {
+        var current = Assert.Single(NativeResourceApi.ReadProcessCounters(), row => row.ProcessId == Environment.ProcessId);
+        var details = ProcessDetailsReader.ReadCurrent(current.ProcessId, current.StartTime);
+
+        Assert.False(string.IsNullOrWhiteSpace(details.CommandLine));
+        Assert.Equal(ProcessDetails.Empty, ProcessDetailsReader.ReadCurrent(current.ProcessId, current.StartTime.AddTicks(1)));
+    }
+
+    // This check is opt-in and uses only an explicitly selected Firefox test port.
     [LocalFirefoxFact]
     public async Task RealFirefoxTitlesJoinRealProcessMemory()
     {

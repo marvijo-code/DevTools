@@ -1,4 +1,5 @@
 using System.Management;
+using System.Runtime.InteropServices;
 using DevTools.Models;
 using DevTools.Services.Resources;
 
@@ -22,7 +23,9 @@ public sealed class RunningProcessCollector
         {
             using var searcher = new ManagementObjectSearcher(
                 "SELECT ProcessId, ParentProcessId, Name, CommandLine, ExecutablePath, WorkingSetSize FROM Win32_Process");
-            foreach (ManagementObject processObject in searcher.Get())
+            searcher.Options.Rewindable = false;
+            using var results = searcher.Get();
+            foreach (ManagementObject processObject in results)
             {
                 using (processObject)
                 {
@@ -43,36 +46,45 @@ public sealed class RunningProcessCollector
                         continue;
                     }
 
-                    var measurementPath = ProcessDisplayNameResolver.TryExtractExecutablePath(commandLine) ??
-                                          executablePath ??
-                                          commandLine;
-                    var displayName = ProcessDisplayNameResolver.Resolve(
-                        commandLine,
-                        processName,
-                        processId,
-                        parentProcessId,
-                        workingSetBytes,
-                        catalog);
-
-                    processes.Add(new RunningProcessSnapshot(
-                        processId,
-                        parentProcessId,
-                        processName ?? Path.GetFileName(measurementPath),
-                        commandLine,
-                        measurementPath,
-                        displayName,
-                        workingSetBytes,
-                        _detailsReader.Read(processId).WorkingDirectory,
-                        firefoxTitles.TryGetValue(processId, out var tabTitles) ? tabTitles : string.Empty));
+                    AddProcess(processId, parentProcessId, processName, commandLine, executablePath,
+                        workingSetBytes, _detailsReader.Read(processId).WorkingDirectory);
                 }
             }
         }
-        catch (ManagementException)
+        catch (Exception error) when (error is ManagementException or COMException or UnauthorizedAccessException)
         {
-            return [];
+            // WMI can be unavailable even when the kernel can still enumerate processes.
+            processes.Clear();
+        }
+
+        if (processes.Count == 0 && OperatingSystem.IsWindows() && Environment.Is64BitProcess)
+        {
+            foreach (var process in NativeResourceApi.ReadProcessCounters())
+            {
+                if (process.ProcessId <= 0 || string.IsNullOrWhiteSpace(process.ImageName))
+                {
+                    continue;
+                }
+
+                var details = ProcessDetailsReader.ReadCurrent(process.ProcessId, process.StartTime);
+                var commandLine = string.IsNullOrWhiteSpace(details.CommandLine) ? process.ImageName : details.CommandLine;
+                AddProcess(process.ProcessId, process.ParentProcessId, process.ImageName, commandLine,
+                    executablePath: null, process.WorkingSetBytes, details.WorkingDirectory);
+            }
         }
 
         return OrderSnapshot(processes);
+
+        void AddProcess(int processId, int parentProcessId, string? processName, string commandLine, string? executablePath,
+            long workingSetBytes, string workingDirectory)
+        {
+            var measurementPath = ProcessDisplayNameResolver.TryExtractExecutablePath(commandLine) ?? executablePath ?? commandLine;
+            var displayName = ProcessDisplayNameResolver.Resolve(commandLine, processName, processId, parentProcessId,
+                workingSetBytes, catalog);
+            processes.Add(new RunningProcessSnapshot(processId, parentProcessId, processName ?? Path.GetFileName(measurementPath),
+                commandLine, measurementPath, displayName, workingSetBytes, workingDirectory,
+                firefoxTitles.TryGetValue(processId, out var tabTitles) ? tabTitles : string.Empty));
+        }
     }
 
     public static IReadOnlyList<RunningProcessSnapshot> OrderSnapshot(IEnumerable<RunningProcessSnapshot> processes)

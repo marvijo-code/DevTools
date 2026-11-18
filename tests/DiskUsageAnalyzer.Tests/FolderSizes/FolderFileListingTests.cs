@@ -5,8 +5,10 @@ namespace DiskUsageAnalyzer.Tests.FolderSizes;
 
 public sealed class FolderFileListingTests
 {
-    [Fact]
-    public void ReadLargest_IncludesHiddenFilesButExcludesNestedFiles()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReadLargest_IncludesHiddenFilesButExcludesNestedFiles(bool relativePath)
     {
         var fixture = Directory.CreateTempSubdirectory("devtools-file-ranking-");
         var nested = Path.Combine(fixture.FullName, "nested");
@@ -24,7 +26,8 @@ public sealed class FolderFileListingTests
             File.WriteAllBytes(small, []);
             File.WriteAllBytes(deep, new byte[50]);
 
-            var results = FolderFileListing.ReadLargest(fixture.FullName, 2);
+            var folder = relativePath ? Path.GetRelativePath(Environment.CurrentDirectory, fixture.FullName) : fixture.FullName;
+            var results = FolderFileListing.ReadLargest(folder, 2);
 
             Assert.Equal([hidden, visible], results.Select(item => item.Path));
             Assert.Equal([10L, 5L], results.Select(item => item.Bytes));

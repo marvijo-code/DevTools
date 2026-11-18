@@ -83,6 +83,7 @@ public sealed partial class MainViewModel
     private const int FolderBrowserMaxRows = 200;
     private const int FolderBrowserMaxFiles = 100;
     private const int FolderBrowserRecentListingLimit = 32;
+    private const int FolderBrowserWideLayoutLimit = 32;
 
     private readonly ObservableCollection<FolderBrowserRow> _folderBrowserRows = [];
     private readonly ObservableCollection<FolderBrowserDrive> _folderBrowserDrives = [];
@@ -90,6 +91,7 @@ public sealed partial class MainViewModel
     private readonly Dictionary<int, FolderFileSnapshot?> _folderBrowserFiles = [];
     private readonly HashSet<int> _folderBrowserFilesLoading = [];
     private readonly OrderedDictionary<int, FolderFileSnapshot> _recentFolderBrowserFiles = new();
+    private OrderedDictionary<(int Node, bool Allocation), FolderBrowserLayout>? _folderBrowserLayouts;
     private FolderTree? _folderBrowserFileTree;
     private string _folderBrowserPath = string.Empty;
     private string _folderBrowserSummary = "The folder browser fills in when the first drive scan finishes.";
@@ -285,7 +287,7 @@ public sealed partial class MainViewModel
     private void ShowPendingBrowserDrive(string path, bool scanCompleted = false)
     {
         _folderBrowserExpanded.Clear();
-        ResetFolderBrowserFileCache(null);
+        ResetFolderBrowserCaches(null);
         if (_folderBrowserRows.Count > 0)
         {
             _folderBrowserRows.Clear();
@@ -311,10 +313,11 @@ public sealed partial class MainViewModel
         _folderBrowserFilesLoading.Clear();
     }
 
-    private void ResetFolderBrowserFileCache(FolderTree? tree)
+    private void ResetFolderBrowserCaches(FolderTree? tree)
     {
         CancelFolderBrowserFileLoads();
         _recentFolderBrowserFiles.Clear();
+        _folderBrowserLayouts?.Clear();
         _folderBrowserFileTree = tree;
     }
 
@@ -350,7 +353,7 @@ public sealed partial class MainViewModel
     {
         if (!ReferenceEquals(tree, _folderBrowserFileTree))
         {
-            ResetFolderBrowserFileCache(tree);
+            ResetFolderBrowserCaches(tree);
         }
 
         var showAllocation = FolderBrowserUseAllocation;
@@ -415,22 +418,64 @@ public sealed partial class MainViewModel
         }
     }
 
+    private FolderBrowserLayout GetFolderBrowserLayout(FolderTree tree, int node, bool showAllocation)
+    {
+        var childCount = tree.GetChildFolderCount(node);
+        var key = (node, showAllocation);
+        var cache = _folderBrowserLayouts;
+        if (childCount > FolderBrowserMaxRows && cache is not null &&
+            cache.TryGetValue(key, out var saved, out var position))
+        {
+            if (position != cache.Count - 1)
+            {
+                cache.RemoveAt(position);
+                cache.Add(key, saved);
+            }
+
+            return saved;
+        }
+
+        var children = showAllocation
+            ? tree.GetChildrenByAllocation(node, FolderBrowserMaxRows)
+            : tree.GetChildren(node, FolderBrowserMaxRows);
+        var directFiles = showAllocation ? default : tree.GetDirectFileStatistics(node);
+        var directBytes = showAllocation ? tree.GetDirectAllocatedBytes(node)!.Value : directFiles.Bytes;
+        var otherFolderCount = childCount - children.Count;
+        if (otherFolderCount == 0)
+        {
+            return new FolderBrowserLayout(children, directBytes, directFiles.FileCount, 0, 0);
+        }
+
+        var otherFolderBytes = (showAllocation ? tree.GetAllocatedBytes(node)!.Value : tree.GetTotalBytes(node)) - directBytes;
+        foreach (var child in children)
+        {
+            otherFolderBytes -= showAllocation ? tree.GetAllocatedBytes(child)!.Value : tree.GetTotalBytes(child);
+        }
+
+        var layout = new FolderBrowserLayout(children, directBytes, directFiles.FileCount,
+            otherFolderCount, Math.Max(0, otherFolderBytes));
+        var recentLayouts = _folderBrowserLayouts ??= new();
+        if (recentLayouts.Count == FolderBrowserWideLayoutLimit)
+        {
+            recentLayouts.RemoveAt(0);
+        }
+
+        recentLayouts.Add(key, layout);
+        return layout;
+    }
+
     /// <summary>Adds the largest entries and recurses into expanded folders.</summary>
     private void AppendLevel(
         FolderTree tree, int node, int depth, long rootTotal, bool showAllocation,
         List<FolderBrowserRow> output, List<FolderFileRequest> pendingFolders)
     {
         var folderPath = tree.GetPath(node);
+        var layout = GetFolderBrowserLayout(tree, node, showAllocation);
         var entries = new List<(long Bytes, string Name, FolderBrowserRow Row, int ChildNode)>();
 
-        var children = showAllocation
-            ? tree.GetChildrenByAllocation(node, FolderBrowserMaxRows)
-            : tree.GetChildren(node, FolderBrowserMaxRows);
-        var listedFolderBytes = 0L;
-        foreach (var child in children)
+        foreach (var child in layout.Children)
         {
             var size = showAllocation ? tree.GetAllocatedBytes(child)!.Value : tree.GetTotalBytes(child);
-            listedFolderBytes += size;
             var name = tree.GetName(child);
             var childPath = Path.Join(folderPath, name);
             var share = size * 100d / rootTotal;
@@ -455,16 +500,12 @@ public sealed partial class MainViewModel
             entries.Add((size, row.Name, row, expanded && hasContent ? child : -1));
         }
 
-        var directFiles = showAllocation ? default : tree.GetDirectFileStatistics(node);
-        var directBytes = showAllocation ? tree.GetDirectAllocatedBytes(node)!.Value : directFiles.Bytes;
-        var otherFolderCount = tree.GetChildFolderCount(node) - children.Count;
-        if (otherFolderCount > 0)
+        var directBytes = layout.DirectBytes;
+        if (layout.OtherFolderCount > 0)
         {
-            var totalBytes = showAllocation ? tree.GetAllocatedBytes(node)!.Value : tree.GetTotalBytes(node);
-            var otherFolderBytes = Math.Max(0, totalBytes - directBytes - listedFolderBytes);
-            var share = otherFolderBytes * 100d / rootTotal;
-            entries.Add((otherFolderBytes, string.Empty, new FolderBrowserRow(
-                "[other folders]", folderPath, otherFolderBytes, $"{otherFolderCount:N0} more folders - {share:0.0}%",
+            var share = layout.OtherFolderBytes * 100d / rootTotal;
+            entries.Add((layout.OtherFolderBytes, string.Empty, new FolderBrowserRow(
+                "[other folders]", folderPath, layout.OtherFolderBytes, $"{layout.OtherFolderCount:N0} more folders - {share:0.0}%",
                 share, depth, canOpen: false, canExpand: false, isExpanded: false, isFile: false), -1));
         }
 
@@ -478,13 +519,13 @@ public sealed partial class MainViewModel
                     share, depth, canOpen: false, canExpand: false, isExpanded: false, isFile: false), -1));
             }
         }
-        else if (directBytes > 0 || directFiles.FileCount > 0)
+        else if (directBytes > 0 || layout.DirectFileCount > 0)
         {
             if (!TryGetFolderBrowserListing(node, out var listing))
             {
                 if (_folderBrowserFilesLoading.Add(node))
                 {
-                    pendingFolders.Add(new FolderFileRequest(node, folderPath, directBytes, directFiles.FileCount));
+                    pendingFolders.Add(new FolderFileRequest(node, folderPath, directBytes, layout.DirectFileCount));
                 }
 
                 AddFileSummary("[files in this folder]", directBytes, "loading file names");
@@ -493,7 +534,7 @@ public sealed partial class MainViewModel
             {
                 AddFileSummary("[files in this scan]", directBytes, "live file listing unavailable");
             }
-            else if (!listing.Matches(directBytes, directFiles.FileCount))
+            else if (!listing.Matches(directBytes, layout.DirectFileCount))
             {
                 AddFileSummary("[files in this scan]", directBytes, "live file listing differs from the scan");
             }
@@ -509,7 +550,7 @@ public sealed partial class MainViewModel
                         share, depth, canOpen: false, canExpand: false, isExpanded: false, isFile: true), -1));
                 }
 
-                var otherFiles = directFiles.FileCount - listing.Files.Count;
+                var otherFiles = layout.DirectFileCount - listing.Files.Count;
                 if (otherFiles > 0)
                 {
                     AddFileSummary("[other files]", directBytes - listed, $"{otherFiles:N0} smaller files");
@@ -540,6 +581,9 @@ public sealed partial class MainViewModel
             }
         }
     }
+
+    private readonly record struct FolderBrowserLayout(
+        IReadOnlyList<int> Children, long DirectBytes, long DirectFileCount, int OtherFolderCount, long OtherFolderBytes);
 
     private async Task LoadFolderFilesAsync(List<FolderFileRequest> folders, CancellationToken cancellationToken)
     {

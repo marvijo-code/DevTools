@@ -198,12 +198,8 @@ public sealed class DriveUsageService
         }
 
         Report(ParallelFolderWalker.EngineName, $"Walking every folder on {root} (slow path)...");
-        // Share the normal background worker budget among independent volume walks.
-        int? workerCount = concurrentWalks > 1
-            ? Math.Max(1, ScanResources.Capture().WalkWorkerCount(ScanResources.ReadSeekPenalty(root), prioritize: false) / concurrentWalks)
-            : null;
         var walked = await TryEngineAsync(
-            () => _walker.ScanAsync(root, progress, cancellationToken, workerCount),
+            () => _walker.ScanVolumeAsync(root, progress, cancellationToken, concurrentWalks),
             ParallelFolderWalker.EngineName, root, notes, cancellationToken).ConfigureAwait(false);
         return walked is not null
             ? Done(drive, walked, notes)

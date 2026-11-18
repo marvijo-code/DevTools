@@ -56,10 +56,12 @@ public sealed class DiskUsageAnalyzer
         var capturedAt = DateTimeOffset.Now;
         var drives = DriveUsageService.GetFixedDrives(includeVolumesWithoutDriveLetters: true);
         var diskCapacities = DiskCapacityInventory.Read(drives, cancellationToken, out var backingDisks);
-        var hasSeparateDisks = backingDisks.Where(disk => disk.HasValue).Distinct().Skip(1).Any();
-        var useRawMft = hasSeparateDisks && OperatingSystem.IsWindows() && drives.Any(drive =>
+        var independentDisks = backingDisks.Where(disk => disk.HasValue).Distinct().Count();
+        var useRawMft = independentDisks > 1 && OperatingSystem.IsWindows() && drives.Any(drive =>
             string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)) && ElevationService.IsProcessElevated();
-        var concurrentWalks = hasSeparateDisks && !useRawMft && ScanResources.Capture().CanOverlapVolumeWalks ? 2 : 1;
+        var concurrentWalks = independentDisks > 1 && !useRawMft
+            ? ScanResources.Capture().VolumeWalkParallelism(independentDisks)
+            : 1;
         var browseRoots = drives.Select(drive => drive.RootPath).ToArray();
         var mountAliases = WindowsVolumePaths.GetMountAliases(drives, cancellationToken);
         lock (_treesLock)
@@ -199,6 +201,8 @@ public sealed class DiskUsageAnalyzer
         using var activeScans = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var pending = Enumerable.Range(0, backingDisks.Count).ToList();
         var running = new List<(int Index, Task<DriveScanResult> Scan)>(parallelism);
+        var remainingByDisk = backingDisks.Where(disk => disk.HasValue).GroupBy(disk => disk.GetValueOrDefault())
+            .ToDictionary(group => group.Key, group => group.Count());
 
         bool CanOverlap(int left, int right) =>
             backingDisks[left] is int leftDisk && backingDisks[right] is int rightDisk && leftDisk != rightDisk;
@@ -220,15 +224,21 @@ public sealed class DiskUsageAnalyzer
 
                     var index = pending[next];
                     pending.RemoveAt(next);
-                    var canRunWithAnother = running.Count > 0 ||
-                        (parallelism > 1 && pending.Exists(other => CanOverlap(index, other)));
-                    running.Add((index, scan(index, canRunWithAnother ? parallelism : 1, activeScans.Token)));
+                    // Count active and pending disks. A disk can use more workers once another
+                    // disk finishes its last volume, even if this scan has several volumes left.
+                    var workerShare = backingDisks[index].HasValue ? Math.Min(parallelism, remainingByDisk.Count) : 1;
+                    running.Add((index, scan(index, workerShare, activeScans.Token)));
                 }
 
                 var complete = await Task.WhenAny(running.Select(item => item.Scan)).ConfigureAwait(false);
                 var slot = running.FindIndex(item => item.Scan == complete);
                 var indexCompleted = running[slot].Index;
                 running.RemoveAt(slot);
+                if (backingDisks[indexCompleted] is int disk && --remainingByDisk[disk] == 0)
+                {
+                    remainingByDisk.Remove(disk);
+                }
+
                 yield return (indexCompleted, await complete.ConfigureAwait(false));
             }
         }

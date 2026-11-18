@@ -17,14 +17,21 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
         return new ScanResources(Environment.ProcessorCount, headroom);
     }
 
-    internal bool CanOverlapVolumeWalks => LogicalProcessors >= 4 && MemoryHeadroom >= 2048L * MiB;
-
-    public int WalkWorkerCount(bool? seekPenalty, bool prioritize)
+    internal int VolumeWalkParallelism(int independentDisks)
     {
-        var cpuLimit = Math.Max(1, prioritize ? LogicalProcessors - 1 : LogicalProcessors / 2);
+        const int maximumConcurrentWalks = 4;
+        var byCpu = LogicalProcessors / 2;
+        var byMemory = MemoryHeadroom.GetValueOrDefault() / (1024L * MiB);
+        return (int)Math.Max(1, Math.Min(Math.Min(independentDisks, maximumConcurrentWalks), Math.Min(byCpu, byMemory)));
+    }
+
+    public int WalkWorkerCount(bool? seekPenalty, bool prioritize, int volumeShare = 1)
+    {
+        var cpuBudget = prioritize ? LogicalProcessors - 1 : LogicalProcessors / 2;
+        var cpuLimit = Math.Max(1, cpuBudget / volumeShare);
         var memoryLimit = MemoryHeadroom is long available
-            ? (int)Math.Clamp(available / (128 * MiB), 1, 12)
-            : 4;
+            ? (int)Math.Clamp(available / (128L * MiB * volumeShare), 1, 12)
+            : Math.Max(1, 4 / volumeShare);
         var deviceLimit = seekPenalty switch
         {
             true => prioritize ? 2 : 1,

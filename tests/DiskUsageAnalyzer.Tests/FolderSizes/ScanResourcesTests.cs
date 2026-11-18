@@ -22,13 +22,32 @@ public sealed class ScanResourcesTests
     }
 
     [Theory]
-    [InlineData(4, 2048L, true)]
-    [InlineData(2, 4096L, false)]
-    [InlineData(8, 1024L, false)]
-    [InlineData(8, null, false)]
-    public void VolumeOverlap_RequiresCpuAndMemoryHeadroom(int processors, long? memoryMiB, bool expected)
+    [InlineData(4, 2048L, 2, 2)]
+    [InlineData(2, 4096L, 4, 1)]
+    [InlineData(8, 1024L, 4, 1)]
+    [InlineData(8, null, 4, 1)]
+    [InlineData(8, 4096L, 1, 1)]
+    [InlineData(8, 4096L, 0, 1)]
+    [InlineData(8, 3072L, 4, 3)]
+    [InlineData(12, 6144L, 6, 4)]
+    public void VolumeWalkParallelism_UsesCpuMemoryAndIndependentDisks(
+        int processors, long? memoryMiB, int independentDisks, int expected)
     {
-        Assert.Equal(expected, new ScanResources(processors, memoryMiB * MiB).CanOverlapVolumeWalks);
+        Assert.Equal(expected, new ScanResources(processors, memoryMiB * MiB).VolumeWalkParallelism(independentDisks));
+    }
+
+    [Theory]
+    [InlineData(32, 4096, false, 2, 8)]
+    [InlineData(32, 4096, false, 4, 4)]
+    [InlineData(8, 4096, false, 2, 2)]
+    [InlineData(32, 512, false, 2, 2)]
+    [InlineData(32, 4096, true, 2, 1)]
+    [InlineData(32, 4096, null, 2, 4)]
+    public void WalkWorkerCount_SharesCpuAndMemoryBeforeApplyingTheDeviceLimit(
+        int processors, long memoryMiB, bool? seekPenalty, int volumeShare, int expected)
+    {
+        var resources = new ScanResources(processors, memoryMiB * MiB);
+        Assert.Equal(expected, resources.WalkWorkerCount(seekPenalty, prioritize: false, volumeShare));
     }
 
     [Fact]

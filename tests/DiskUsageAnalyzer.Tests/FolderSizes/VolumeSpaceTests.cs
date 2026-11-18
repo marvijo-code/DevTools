@@ -133,6 +133,37 @@ public sealed class VolumeSpaceTests
     }
 
     [Fact]
+    public async Task VolumeScheduler_GivesTheLastDiskItsFullWorkerBudget()
+    {
+        int?[] disks = [0, 1, 2, 0, 0, null];
+        var workerShares = new int[disks.Length];
+        var finishFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        async Task<DriveScanResult> ScanAsync(int index, int workerShare, CancellationToken token)
+        {
+            workerShares[index] = workerShare;
+            if (index == 0)
+            {
+                await finishFirst.Task.WaitAsync(token);
+            }
+
+            return VolumeResult(index);
+        }
+
+        var otherDisksCompleted = 0;
+        await foreach (var (index, _) in DiskUsage.ScanVolumesAsync(disks, 3, ScanAsync, timeout.Token))
+        {
+            if (index is 1 or 2 && ++otherDisksCompleted == 2)
+            {
+                finishFirst.SetResult();
+            }
+        }
+
+        Assert.Equal([3, 3, 3, 1, 1, 1], workerShares);
+    }
+
+    [Fact]
     public async Task VolumeScheduler_CancelsAndJoinsBothRunningWalks()
     {
         var bothStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -22,14 +22,23 @@ public sealed class ParallelFolderWalker
         int? workerCount = null,
         bool prioritize = false)
     {
-        return Task.Run(() => Scan(rootPath, progress, cancellationToken, workerCount, prioritize), cancellationToken);
+        return Task.Run(() => Scan(rootPath, progress, cancellationToken, workerCount, prioritize, volumeShare: 1),
+            cancellationToken);
+    }
+
+    internal Task<FolderTree> ScanVolumeAsync(string rootPath, IProgress<FolderScanProgress>? progress,
+        CancellationToken cancellationToken, int volumeShare)
+    {
+        return Task.Run(() => Scan(rootPath, progress, cancellationToken, workerCount: null, prioritize: false, volumeShare),
+            cancellationToken);
     }
 
     /// <param name="prioritize">
     /// True for a folder the user just clicked: normal thread priority, many threads, and it never waits
     /// on <see cref="ScanGate"/>. Background scans wait while one of these runs.
     /// </param>
-    private static FolderTree Scan(string rootPath, IProgress<FolderScanProgress>? progress, CancellationToken cancellationToken, int? workerCount, bool prioritize)
+    private static FolderTree Scan(string rootPath, IProgress<FolderScanProgress>? progress,
+        CancellationToken cancellationToken, int? workerCount, bool prioritize, int volumeShare)
     {
         var fullRoot = Path.GetFullPath(rootPath);
         var driveRoot = FolderTree.NormalizeRoot(fullRoot);
@@ -59,7 +68,7 @@ public sealed class ParallelFolderWalker
 
         var workers = workerCount is int requested
             ? Math.Clamp(requested, 1, 16)
-            : resources.WalkWorkerCount(ScanResources.ReadSeekPenalty(volumeRoot), prioritize);
+            : resources.WalkWorkerCount(ScanResources.ReadSeekPenalty(volumeRoot), prioritize, volumeShare);
         DirectoryAllocationReader.TryScheduleStreams? scheduleStreams = allocationIndex is not null && workers > 1
             ? TryQueueStreams
             : null;

@@ -138,8 +138,9 @@ public sealed class ParallelFolderWalker
         {
             try
             {
-                var allocationReader = trackAllocation
-                    ? new DirectoryAllocationReader(allocationIndex, allocationUnitBytes, workers, prioritize)
+                var directoryReader = OperatingSystem.IsWindows()
+                    ? new DirectoryAllocationReader(allocationIndex, allocationUnitBytes, workers, prioritize,
+                        measureAllocation: trackAllocation)
                     : null;
                 var subfolders = new List<string>();
                 foreach (var (node, directory, streams) in queue.GetConsumingEnumerable(scanToken))
@@ -154,7 +155,7 @@ public sealed class ParallelFolderWalker
                     {
                         Interlocked.Decrement(ref queuedStreamBatches);
                         var incompleteStreams = false;
-                        var streamBytes = allocationReader!.ReadFileStreams(streams.Hint, streams.FileIds, scanToken, ref incompleteStreams);
+                        var streamBytes = directoryReader!.ReadFileStreams(streams.Hint, streams.FileIds, scanToken, ref incompleteStreams);
                         lock (builderLock)
                         {
                             builder.AddFilesToFolder(node, 0, 0, streamBytes);
@@ -175,12 +176,12 @@ public sealed class ParallelFolderWalker
                     var incomplete = false;
                     var incompleteAllocation = false;
                     subfolders.Clear();
-                    if (allocationReader is null ||
-                        !allocationReader.TryRead(path, node, subfolders, scheduleStreams, scanToken,
+                    if (directoryReader is null ||
+                        !directoryReader.TryRead(path, node, subfolders, scheduleStreams, scanToken,
                             out bytes, out allocatedBytes, out files, out incompleteAllocation))
                     {
-                        // Retry the logical listing if the filesystem cannot return allocation data.
-                        incompleteAllocation = allocationReader is not null;
+                        // Retry the listing with the managed enumerator when the native read cannot finish.
+                        incompleteAllocation = trackAllocation;
                         bytes = 0;
                         files = 0;
                         subfolders.Clear();

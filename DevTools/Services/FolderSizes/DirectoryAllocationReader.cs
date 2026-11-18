@@ -5,9 +5,9 @@ using Microsoft.Win32.SafeHandles;
 
 namespace DevTools.Services.FolderSizes;
 
-/// <summary>Reads allocation for files and directories, including NTFS named data streams.</summary>
+/// <summary>Reads directory entries and optionally measures allocation, including NTFS named data streams.</summary>
 internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identities, uint allocationUnitBytes,
-    int streamWorkers = 1, bool prioritize = false)
+    int streamWorkers = 1, bool prioritize = false, bool measureAllocation = true)
 {
     // The variable-length UTF-16 name follows the fixed fields in each information class.
     private const int FullEntryHeaderBytes = 68;
@@ -31,9 +31,12 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
     private const uint OpenNoRecall = 0x00100000;
     private const uint OpenReparsePoint = 0x00200000;
     private const uint BackupSemantics = 0x02000000;
-    private readonly byte[] _buffer = GC.AllocateUninitializedArray<byte>(64 * 1024);
-    private readonly ulong[] _fileIds = GC.AllocateUninitializedArray<ulong>(StreamBatchSize);
-    private byte[] _streamBuffer = GC.AllocateUninitializedArray<byte>(1024);
+    private readonly DirectoryAllocationIndex? _identities = measureAllocation ? identities : null;
+    private readonly byte[] _buffer = GC.AllocateUninitializedArray<byte>(measureAllocation ? 64 * 1024 : 16 * 1024);
+    private readonly ulong[] _fileIds = measureAllocation && identities is not null
+        ? GC.AllocateUninitializedArray<ulong>(StreamBatchSize)
+        : [];
+    private byte[] _streamBuffer = measureAllocation ? GC.AllocateUninitializedArray<byte>(1024) : [];
 
     internal delegate bool TryScheduleStreams(int node, SafeFileHandle hint, ReadOnlySpan<ulong> fileIds);
 
@@ -68,16 +71,17 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
         logicalBytes = 0;
         allocatedBytes = 0;
         files = 0;
-        incompleteAllocation = identities is not null && allocationUnitBytes == 0;
-        var entryHeaderBytes = identities is null ? FullEntryHeaderBytes : ExtendedEntryHeaderBytes;
-        var informationClass = identities is null ? FileFullDirectoryInfo : FileIdExtdDirectoryInfo;
+        incompleteAllocation = _identities is not null && allocationUnitBytes == 0;
+        var entryHeaderBytes = _identities is null ? FullEntryHeaderBytes : ExtendedEntryHeaderBytes;
+        var informationClass = _identities is null ? FileFullDirectoryInfo : FileIdExtdDirectoryInfo;
 
         var nativePath = path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path : @"\\?\" + path;
-        // List directory, share with other processes, open existing, and handle reparse points themselves.
-        using var handle = OpenDirectory(nativePath, 1, 7, IntPtr.Zero, 3, BackupSemantics | OpenReparsePoint, IntPtr.Zero);
+        // Open the directory itself so a replacement junction cannot redirect this listing.
+        using var handle = OpenDirectory(nativePath, 1, 7, IntPtr.Zero, 3,
+            BackupSemantics | OpenReparsePoint | OpenNoRecall, IntPtr.Zero);
         if (handle.IsInvalid)
         {
-            if (Marshal.GetLastPInvokeError() == ErrorAccessDenied)
+            if (measureAllocation && Marshal.GetLastPInvokeError() == ErrorAccessDenied)
             {
                 WaitForScan(cancellationToken);
                 // Windows can allow metadata access to the directory itself when it denies listing its children.
@@ -87,32 +91,35 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
                     isMetadataDirectory)
                 {
                     allocatedBytes = directoryBytes;
-                    if (identities is not null)
+                    if (_identities is not null)
                     {
                         allocatedBytes += ReadNamedStreamAllocation(metadata, ref incompleteAllocation);
                     }
                 }
             }
 
-            incompleteAllocation = true;
+            incompleteAllocation = measureAllocation;
             return false;
         }
 
-        if (TryReadOwnDirectoryAllocation(handle, out allocatedBytes, out var isDirectory))
+        if (measureAllocation)
         {
-            if (!isDirectory)
+            if (TryReadOwnDirectoryAllocation(handle, out allocatedBytes, out var isDirectory))
             {
-                return false;
+                if (!isDirectory)
+                {
+                    return false;
+                }
             }
-        }
-        else
-        {
-            incompleteAllocation = true;
-        }
+            else
+            {
+                incompleteAllocation = true;
+            }
 
-        if (identities is not null)
-        {
-            allocatedBytes += ReadNamedStreamAllocation(handle, ref incompleteAllocation);
+            if (_identities is not null)
+            {
+                allocatedBytes += ReadNamedStreamAllocation(handle, ref incompleteAllocation);
+            }
         }
 
         while (true)
@@ -150,23 +157,26 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
                             subfolders.Add(new string(name));
                         }
                     }
-                    else if (identities is not null)
+                    else if (_identities is not null)
                     {
                         WaitForScan(cancellationToken);
                         // Attribute the link's own storage to the containing folder. Its target stays outside this walk.
                         var low = BinaryPrimitives.ReadUInt64LittleEndian(remaining[72..]);
                         var high = BinaryPrimitives.ReadUInt64LittleEndian(remaining[80..]);
-                        allocatedBytes += ReadReparseDirectoryAllocation(identities, handle, low, high, ref incompleteAllocation);
+                        allocatedBytes += ReadReparseDirectoryAllocation(_identities, handle, low, high, ref incompleteAllocation);
                     }
-                    else
+                    else if (measureAllocation)
                     {
                         incompleteAllocation = true;
                     }
                 }
-                else if (identities is null)
+                else if (_identities is null)
                 {
                     logicalBytes += Math.Max(0, BinaryPrimitives.ReadInt64LittleEndian(remaining[40..]));
-                    allocatedBytes += Math.Max(0, BinaryPrimitives.ReadInt64LittleEndian(remaining[48..]));
+                    if (measureAllocation)
+                    {
+                        allocatedBytes += Math.Max(0, BinaryPrimitives.ReadInt64LittleEndian(remaining[48..]));
+                    }
                     files++;
                 }
                 else
@@ -174,7 +184,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
                     logicalBytes += Math.Max(0, BinaryPrimitives.ReadInt64LittleEndian(remaining[40..]));
                     var low = BinaryPrimitives.ReadUInt64LittleEndian(remaining[72..]);
                     var high = BinaryPrimitives.ReadUInt64LittleEndian(remaining[80..]);
-                    var claim = high == 0 ? identities.Claim(low) : identities.Claim(new UInt128(high, low));
+                    var claim = high == 0 ? _identities.Claim(low) : _identities.Claim(new UInt128(high, low));
                     if (claim == DirectoryAllocationIndex.ClaimResult.New)
                     {
                         allocatedBytes += PhysicalAllocation(BinaryPrimitives.ReadInt64LittleEndian(remaining[48..]));
@@ -277,7 +287,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex? identi
         if (isDirectory)
         {
             var reported = BinaryPrimitives.ReadInt64LittleEndian(_streamBuffer);
-            allocatedBytes = identities is null ? Math.Max(0, reported) : PhysicalAllocation(reported);
+            allocatedBytes = _identities is null ? Math.Max(0, reported) : PhysicalAllocation(reported);
         }
 
         return true;

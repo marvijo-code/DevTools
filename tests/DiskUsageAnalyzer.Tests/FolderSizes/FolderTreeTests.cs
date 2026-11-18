@@ -255,6 +255,19 @@ public sealed class FolderTreeTests
             Assert.Equal(-1, tree.Find(link));
             Assert.Equal(baselineBytes + payloadAllocation, tree.GetAllocatedBytes(node));
             Assert.False(tree.HasIncompleteAllocation(node));
+
+            var logical = await walker.ScanAsync(root, null, CancellationToken.None, workerCount: 2, prioritize: true);
+            var logicalNode = logical.Find(root);
+            Assert.Equal(tree.GetTotalBytes(node), logical.GetTotalBytes(logicalNode));
+            Assert.Equal(tree.GetFileCount(node), logical.GetFileCount(logicalNode));
+            Assert.Null(logical.GetAllocatedBytes(logicalNode));
+            Assert.Equal(-1, logical.Find(link));
+
+            var junction = await walker.ScanAsync(link, null, CancellationToken.None, workerCount: 2, prioritize: true);
+            var junctionNode = junction.Find(link);
+            Assert.Equal(0, junction.GetTotalBytes(junctionNode));
+            Assert.Equal(0, junction.GetFileCount(junctionNode));
+            Assert.False(junction.HasIncompleteScan(junctionNode));
             Assert.Equal(1024 * 1024, new FileInfo(outsideFile).Length);
         }
         finally

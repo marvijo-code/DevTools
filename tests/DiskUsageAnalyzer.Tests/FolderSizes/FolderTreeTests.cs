@@ -49,8 +49,10 @@ public sealed class FolderTreeTests
 
     [Theory]
     [InlineData(1)]
+    [InlineData(2)]
     [InlineData(25)]
     [InlineData(200)]
+    [InlineData(500)]
     public void GetChildren_WideFolderMatchesFullRanking(int max)
     {
         var builder = new FolderTreeBuilder(@"C:\");

@@ -139,33 +139,58 @@ public sealed class FolderTree
         if (count >= 1024 && max <= count / 4)
         {
             // Retain only the requested children of wide folders. The lowest-ranked entry leaves first.
-            var worstFirst = Comparer<int>.Create((left, right) => CompareChildren(right, left));
-            var best = new PriorityQueue<int, int>(max, worstFirst);
-            for (var i = start; i < start + max; i++)
+            var heap = new int[max];
+            Array.Copy(_childIndex, start, heap, 0, max);
+            for (var i = heap.Length / 2 - 1; i >= 0; i--)
             {
-                var child = _childIndex[i];
-                best.Enqueue(child, child);
+                SiftWorstDown(heap, i, heap[i]);
             }
 
+            var worst = heap[0];
+            var cutoff = _totalBytes[worst];
             for (var i = start + max; i < start + count; i++)
             {
                 var child = _childIndex[i];
-                best.EnqueueDequeue(child, child);
+                var size = _totalBytes[child];
+                if (size > cutoff || (size == cutoff && CompareChildNames(child, worst) < 0))
+                {
+                    SiftWorstDown(heap, 0, child);
+                    worst = heap[0];
+                    cutoff = _totalBytes[worst];
+                }
             }
 
-            var ranked = new int[max];
-            for (var i = ranked.Length - 1; i >= 0; i--)
-            {
-                ranked[i] = best.Dequeue();
-            }
-
-            return ranked;
+            Array.Sort(heap, CompareChildren);
+            return heap;
         }
 
         var children = new int[count];
         Array.Copy(_childIndex, start, children, 0, count);
         Array.Sort(children, CompareChildren);
         return count <= max ? children : children[..max];
+    }
+
+    private void SiftWorstDown(int[] heap, int position, int node)
+    {
+        while (position < heap.Length / 2)
+        {
+            var child = position * 2 + 1;
+            var right = child + 1;
+            if (right < heap.Length && CompareChildren(heap[right], heap[child]) > 0)
+            {
+                child = right;
+            }
+
+            if (CompareChildren(heap[child], node) <= 0)
+            {
+                break;
+            }
+
+            heap[position] = heap[child];
+            position = child;
+        }
+
+        heap[position] = node;
     }
 
     private int CompareChildren(int left, int right)
@@ -176,6 +201,11 @@ public sealed class FolderTree
             return bySize;
         }
 
+        return CompareChildNames(left, right);
+    }
+
+    private int CompareChildNames(int left, int right)
+    {
         var byName = string.Compare(_names[left], _names[right], StringComparison.OrdinalIgnoreCase);
         return byName != 0 ? byName : left.CompareTo(right);
     }

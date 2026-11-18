@@ -12,15 +12,7 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
 
     public static ScanResources Capture()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return new ScanResources(Environment.ProcessorCount, null);
-        }
-
-        var counters = NativeResourceApi.ReadSystemCounters();
-        long? headroom = counters.PhysicalTotalBytes > 0 && counters.CommitLimitBytes > 0
-            ? Math.Min(counters.PhysicalAvailableBytes, Math.Max(0, counters.CommitLimitBytes - counters.CommitTotalBytes))
-            : null;
+        var headroom = OperatingSystem.IsWindows() ? NativeResourceApi.ReadMemoryHeadroom() : null;
         return new ScanResources(Environment.ProcessorCount, headroom);
     }
 

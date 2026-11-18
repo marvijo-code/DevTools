@@ -142,6 +142,20 @@ public sealed class FolderTree
     /// <summary>Number of files directly in this folder.</summary>
     public long GetDirectFileCount(int node) => GetDirectChildRemainder(node, _fileCount);
 
+    internal (long Bytes, long FileCount) GetDirectFileStatistics(int node)
+    {
+        var bytes = _totalBytes[node];
+        var files = _fileCount[node];
+        for (var i = _childStart[node]; i < _childStart[node + 1]; i++)
+        {
+            var child = _childIndex[i];
+            bytes -= _totalBytes[child];
+            files -= _fileCount[child];
+        }
+
+        return (Math.Max(0, bytes), Math.Max(0, files));
+    }
+
     internal long? GetDirectAllocatedBytes(int node) =>
         _allocatedBytes is null ? null : GetDirectChildRemainder(node, _allocatedBytes);
 

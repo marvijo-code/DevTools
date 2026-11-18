@@ -80,7 +80,7 @@ public sealed partial class MainViewModel
     private readonly ObservableCollection<FolderBrowserRow> _folderBrowserRows = [];
     private readonly ObservableCollection<FolderBrowserDrive> _folderBrowserDrives = [];
     private readonly HashSet<string> _folderBrowserExpanded = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, IReadOnlyList<FolderFile>> _folderBrowserFiles = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FolderFileSnapshot?> _folderBrowserFiles = new(StringComparer.Ordinal);
     private readonly HashSet<string> _folderBrowserFilesLoading = new(StringComparer.Ordinal);
     private FolderTree? _folderBrowserFileTree;
     private string _folderBrowserPath = string.Empty;
@@ -373,7 +373,8 @@ public sealed partial class MainViewModel
             entries.Add((size, row.Name, row, expanded && hasContent ? child : -1));
         }
 
-        var directBytes = showAllocation ? tree.GetDirectAllocatedBytes(node)!.Value : tree.GetDirectFileBytes(node);
+        var directFiles = showAllocation ? default : tree.GetDirectFileStatistics(node);
+        var directBytes = showAllocation ? tree.GetDirectAllocatedBytes(node)!.Value : directFiles.Bytes;
         var otherFolderCount = tree.GetChildFolderCount(node) - children.Count;
         if (otherFolderCount > 0)
         {
@@ -395,63 +396,51 @@ public sealed partial class MainViewModel
                     share, depth, canOpen: false, canExpand: false, isExpanded: false, isFile: false), -1));
             }
         }
-        else if (directBytes > 0 || tree.GetDirectFileCount(node) > 0)
+        else if (directBytes > 0 || directFiles.FileCount > 0)
         {
-            if (_folderBrowserFiles.TryGetValue(folderPath, out var files))
+            if (!_folderBrowserFiles.TryGetValue(folderPath, out var listing))
             {
-                var listed = 0L;
-                foreach (var file in files)
-                {
-                    listed += file.Bytes;
-                    entries.Add((file.Bytes, file.Name, new FolderBrowserRow(
-                        file.Name,
-                        file.Path,
-                        file.Bytes,
-                        $"file - {file.Bytes * 100d / rootTotal:0.0}%",
-                        file.Bytes * 100d / rootTotal,
-                        depth,
-                        canOpen: false,
-                        canExpand: false,
-                        isExpanded: false,
-                        isFile: true), -1));
-                }
-
-                var rest = directBytes - listed;
-                if (rest > 0)
-                {
-                    entries.Add((rest, string.Empty, new FolderBrowserRow(
-                        "[other files]",
-                        folderPath,
-                        rest,
-                        $"smaller or unreadable files directly in this folder - {rest * 100d / rootTotal:0.0}%",
-                        rest * 100d / rootTotal,
-                        depth,
-                        canOpen: false,
-                        canExpand: false,
-                        isExpanded: false,
-                        isFile: true), -1));
-                }
-            }
-            else
-            {
-                // Real file names load in the background; show the aggregate meanwhile.
                 if (_folderBrowserFilesLoading.Add(folderPath))
                 {
                     pendingFolders.Add(folderPath);
                 }
 
-                entries.Add((directBytes, string.Empty, new FolderBrowserRow(
-                    "[files in this folder]",
-                    folderPath,
-                    directBytes,
-                    $"loading file names - {directBytes * 100d / rootTotal:0.0}%",
-                    directBytes * 100d / rootTotal,
-                    depth,
-                    canOpen: false,
-                    canExpand: false,
-                    isExpanded: false,
-                    isFile: true), -1));
+                AddFileSummary("[files in this folder]", directBytes, "loading file names");
             }
+            else if (listing is null)
+            {
+                AddFileSummary("[files in this scan]", directBytes, "live file listing unavailable");
+            }
+            else if (!listing.Matches(directBytes, directFiles.FileCount))
+            {
+                AddFileSummary("[files in this scan]", directBytes, "live file listing differs from the scan");
+            }
+            else
+            {
+                var listed = 0L;
+                foreach (var file in listing.Files)
+                {
+                    listed += file.Bytes;
+                    var share = file.Bytes * 100d / rootTotal;
+                    entries.Add((file.Bytes, file.Name, new FolderBrowserRow(
+                        file.Name, file.Path, file.Bytes, $"file - {share:0.0}%",
+                        share, depth, canOpen: false, canExpand: false, isExpanded: false, isFile: true), -1));
+                }
+
+                var otherFiles = directFiles.FileCount - listing.Files.Count;
+                if (otherFiles > 0)
+                {
+                    AddFileSummary("[other files]", directBytes - listed, $"{otherFiles:N0} smaller files");
+                }
+            }
+        }
+
+        void AddFileSummary(string title, long bytes, string detail)
+        {
+            var share = bytes * 100d / rootTotal;
+            entries.Add((bytes, string.Empty, new FolderBrowserRow(
+                title, folderPath, bytes, $"{detail} - {share:0.0}%",
+                share, depth, canOpen: false, canExpand: false, isExpanded: false, isFile: true), -1));
         }
 
         entries.Sort((a, b) =>
@@ -472,7 +461,7 @@ public sealed partial class MainViewModel
 
     private async Task LoadFolderFilesAsync(List<string> folders, CancellationToken cancellationToken)
     {
-        Dictionary<string, IReadOnlyList<FolderFile>> loaded;
+        Dictionary<string, FolderFileSnapshot?> loaded;
         try
         {
             loaded = await Task.Run(() => folders.ToDictionary(

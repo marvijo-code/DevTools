@@ -34,6 +34,16 @@ public static class ScanGate
         }
     }
 
+    /// <summary>Lets an asynchronous background worker yield until priority work finishes.</summary>
+    internal static async ValueTask WaitAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        while (Volatile.Read(ref _resume) is { } resume)
+        {
+            await resume.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private sealed class Releaser : IDisposable
     {
         private int _released;

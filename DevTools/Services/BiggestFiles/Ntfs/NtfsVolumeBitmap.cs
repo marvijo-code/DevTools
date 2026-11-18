@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using DevTools.Services.FolderSizes;
 
 namespace DevTools.Services.BiggestFiles.Ntfs;
 
@@ -44,7 +45,7 @@ internal sealed class NtfsVolumeBitmap
 
         if (query is not null)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            ScanGate.Wait(cancellationToken);
             var probe = ArrayPool<byte>.Shared.Rent(ProbeBytes);
             try
             {
@@ -97,7 +98,7 @@ internal sealed class NtfsVolumeBitmap
             long recordedFree = 0;
             while (next < _clusters)
             {
-                cancellationToken.ThrowIfCancellationRequested();
+                ScanGate.Wait(cancellationToken);
                 var bytes = query(next, buffer);
                 if (!TryDescribeReply(buffer, bytes, _clusters, next, out var offset, out var end))
                 {

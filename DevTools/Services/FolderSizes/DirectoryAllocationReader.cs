@@ -105,7 +105,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
                     }
                     else
                     {
-                        cancellationToken.ThrowIfCancellationRequested();
+                        ScanGate.Wait(cancellationToken);
                         // Attribute the link's own storage to the containing folder. Its target stays outside this walk.
                         var low = BinaryPrimitives.ReadUInt64LittleEndian(remaining[72..]);
                         var high = BinaryPrimitives.ReadUInt64LittleEndian(remaining[80..]);
@@ -213,7 +213,7 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
         long allocatedBytes = 0;
         foreach (var fileId in fileIds)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            ScanGate.Wait(cancellationToken);
             var id = new FileIdDescriptor(fileId);
             // Metadata access only. Prevent reparse resolution and remote file recall.
             using var file = OpenFileById(hint, in id, 0, 7, IntPtr.Zero, OpenReparsePoint | OpenNoRecall);

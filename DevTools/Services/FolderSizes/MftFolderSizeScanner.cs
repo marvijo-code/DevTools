@@ -79,9 +79,7 @@ public sealed class MftFolderSizeScanner
                 stopwatch,
                 cancellationToken,
                 keepFileNames: false).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            var tree = BuildTree(table, root, EngineName, stopwatch);
-            return tree;
+            return BuildTree(table, root, EngineName, stopwatch, cancellationToken);
         }, cancellationToken);
     }
 
@@ -90,8 +88,11 @@ public sealed class MftFolderSizeScanner
     /// (breadth first from the root), then every file adds its size to its folder and a reverse
     /// pass rolls the totals up. Hard links count once, like the biggest-files scan.
     /// </summary>
-    internal static FolderTree BuildTree(MftRecordTable table, string rootPath, string engineName, Stopwatch stopwatch)
+    internal static FolderTree BuildTree(
+        MftRecordTable table, string rootPath, string engineName, Stopwatch stopwatch,
+        CancellationToken cancellationToken = default)
     {
+        ScanGate.Wait(cancellationToken);
         var recordCount = table.RecordCount;
         var root = (int)MftRecordTable.RootRecordNumber;
 
@@ -101,12 +102,14 @@ public sealed class MftFolderSizeScanner
         var directoryCount = 0;
         for (var record = 0; record < recordCount; record++)
         {
+            WaitForTreeBatch(record, cancellationToken);
             directoryCount += table.IsNamedDirectory(record) ? 1 : 0;
         }
 
         var children = new List<(int Record, int Next)>(directoryCount);
         for (var record = recordCount - 1; record >= 0; record--)
         {
+            WaitForTreeBatch(record, cancellationToken);
             if (record == root || !table.IsNamedDirectory(record))
             {
                 continue;
@@ -131,8 +134,10 @@ public sealed class MftFolderSizeScanner
         var count = 1;
         for (var head = 0; head < count; head++)
         {
+            WaitForTreeBatch(head, cancellationToken);
             for (var edge = nodeChildHeads[head]; edge > 0;)
             {
+                WaitForTreeBatch(count, cancellationToken);
                 var (child, next) = children[edge - 1];
                 edge = next;
                 var childHead = recordLinks[child];
@@ -164,13 +169,18 @@ public sealed class MftFolderSizeScanner
         long unlinkedBytes = 0;
         for (var r = 0; r < recordCount; r++)
         {
-            var parent = table.Parent[r];
-            var parentNode = parent < (uint)recordCount && recordLinks[parent] < 0 ? ~recordLinks[parent] : -1;
+            WaitForTreeBatch(r, cancellationToken);
+            var parentNode = -1;
             var isUserFile = r >= MftRecordTable.FirstUserRecordNumber && table.IsNamedFile(r);
-            if (isUserFile && parentNode >= 0)
+            if (isUserFile)
             {
-                totals[parentNode] += Math.Max(0, table.RealSize[r]);
-                files[parentNode]++;
+                var parent = table.Parent[r];
+                if (parent < (uint)recordCount && recordLinks[parent] < 0)
+                {
+                    parentNode = ~recordLinks[parent];
+                    totals[parentNode] += Math.Max(0, table.RealSize[r]);
+                    files[parentNode]++;
+                }
             }
 
             if (allocated is null || recordAllocation![r] <= 0)
@@ -198,6 +208,7 @@ public sealed class MftFolderSizeScanner
 
         for (var i = count - 1; i > 0; i--)
         {
+            WaitForTreeBatch(i, cancellationToken);
             var parent = nodeParents[i];
             totals[parent] += totals[i];
             files[parent] += files[i];
@@ -207,9 +218,20 @@ public sealed class MftFolderSizeScanner
             }
         }
 
+        ScanGate.Wait(cancellationToken);
         stopwatch.Stop();
-        return new FolderTree(rootPath, nodeParents, nodeNames, totals, files, engineName, stopwatch.Elapsed,
+        var tree = new FolderTree(rootPath, nodeParents, nodeNames, totals, files, engineName, stopwatch.Elapsed,
             allocated, allocated is null ? null : new NtfsRecordAllocation(reservedBytes, unlinkedBytes, table.BitmapAllocation));
+        cancellationToken.ThrowIfCancellationRequested();
+        return tree;
+    }
+
+    private static void WaitForTreeBatch(int index, CancellationToken cancellationToken)
+    {
+        if ((index & 4095) == 0)
+        {
+            ScanGate.Wait(cancellationToken);
+        }
     }
 
     /// <summary>

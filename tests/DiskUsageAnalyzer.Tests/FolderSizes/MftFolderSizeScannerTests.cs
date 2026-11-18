@@ -26,6 +26,25 @@ public sealed class MftFolderSizeScannerTests
     }
 
     [Fact]
+    public void BuildTree_PausesForPriorityWorkAndCancelsTheWait()
+    {
+        var table = CreateTable(64);
+        AddDirectory(table, 24, Root, "fixture");
+        AddFile(table, 25, 24, "content.bin", 42);
+
+        using (ScanGate.Pause())
+        using (var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(40)))
+        {
+            Assert.ThrowsAny<OperationCanceledException>(() =>
+                MftFolderSizeScanner.BuildTree(table, @"C:\", "fixture", System.Diagnostics.Stopwatch.StartNew(), timeout.Token));
+        }
+
+        var result = MftFolderSizeScanner.BuildTree(table, @"C:\", "fixture", System.Diagnostics.Stopwatch.StartNew());
+        Assert.Equal(42, result.TotalBytes);
+        Assert.Equal(1, result.TotalFiles);
+    }
+
+    [Fact]
     public void RankChildFolders_RanksDirectChildrenBySubtreeSize()
     {
         var table = CreateTable(160);

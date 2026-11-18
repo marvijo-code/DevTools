@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using DevTools.Services.BiggestFiles.Ntfs;
+using DevTools.Services.FolderSizes;
 using Xunit;
 
 namespace DiskUsageAnalyzer.Tests.BiggestFiles;
@@ -33,6 +34,31 @@ public sealed class NtfsVolumeBitmapTests
 
         Assert.Equal([0L, 64L], requests);
         Assert.Equal(new NtfsBitmapAllocation(86 * clusterBytes, 73 * clusterBytes, 16 * clusterBytes), result);
+    }
+
+    [Fact]
+    public void Reconcile_PausesAfterTheCurrentReplyAndCancelsBeforeTheNextRead()
+    {
+        const int clusters = 128;
+        var map = Assert.IsType<NtfsVolumeBitmap>(NtfsVolumeBitmap.TryCreate(clusters, 1024 * 1024));
+        var firstWord = new byte[8];
+        using var cancellation = new CancellationTokenSource();
+        IDisposable? priorityScan = null;
+        try
+        {
+            Assert.ThrowsAny<OperationCanceledException>(() => map.Reconcile(512, (start, output) =>
+            {
+                Assert.Equal(0, start);
+                priorityScan = ScanGate.Pause();
+                cancellation.CancelAfter(TimeSpan.FromMilliseconds(50));
+                return WriteReply(0, clusters, firstWord, output);
+            }, cancellation.Token));
+            Assert.NotNull(priorityScan);
+        }
+        finally
+        {
+            priorityScan?.Dispose();
+        }
     }
 
     [Theory]

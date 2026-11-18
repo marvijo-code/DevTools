@@ -71,21 +71,15 @@ internal sealed class MftRecordTable
     /// <summary>True when the record is a base (non-extension) directory that carries a name.</summary>
     public bool IsNamedDirectory(int index)
     {
-        var flag = Flags[index];
-        return (flag & FlagInUse) != 0 &&
-               (flag & FlagHasName) != 0 &&
-               (flag & FlagDirectory) != 0 &&
-               (flag & FlagExtension) == 0;
+        const byte namedDirectory = FlagInUse | FlagHasName | FlagDirectory;
+        return (Flags[index] & (namedDirectory | FlagExtension)) == namedDirectory;
     }
 
     /// <summary>True when the record is a base (non-extension) file with a name.</summary>
     public bool IsNamedFile(int index)
     {
-        var flag = Flags[index];
-        return (flag & FlagInUse) != 0 &&
-               (flag & FlagHasName) != 0 &&
-               (flag & FlagDirectory) == 0 &&
-               (flag & FlagExtension) == 0 &&
+        const byte namedFile = FlagInUse | FlagHasName;
+        return (Flags[index] & (namedFile | FlagDirectory | FlagExtension)) == namedFile &&
                Parent[index] != InvalidParentRecord;
     }
 
@@ -296,6 +290,7 @@ internal static class MftTableLoader
         }
 
         var volumeRoot = FolderTree.NormalizeRoot(root);
+        await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         using var volume = NativeMethods.OpenVolume(devicePath);
         var geometry = NativeMethods.GetVolumeData(volume);
         return await LoadVolumeAsync(volume, volumeRoot, geometry, reportProgress, stopwatch, cancellationToken, keepFileNames,
@@ -319,7 +314,12 @@ internal static class MftTableLoader
         var (chunkBytes, parserCount, queueCapacity) = resources.MftPlan(recordCount, geometry.MftValidDataLength, keepFileNames);
 
         // Check the full MFT mapping before allocating its in-memory columns.
-        var extents = MftExtentMapReader.Read(geometry, (offset, buffer) => ReadExact(volume, buffer, offset), cancellationToken);
+        await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var extents = MftExtentMapReader.Read(geometry, (offset, buffer) =>
+        {
+            ScanGate.Wait(cancellationToken);
+            ReadExact(volume, buffer, offset);
+        }, cancellationToken);
         ValidateMftExtents(geometry, extents);
 
         // The last chunk of each physical extent can be partial.
@@ -512,6 +512,7 @@ internal static class MftTableLoader
                     {
                         try
                         {
+                            await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                             var span = block.Buffer.AsSpan(0, block.RecordCount * recordSize);
                             for (var r = 0; r < block.RecordCount; r++)
                             {
@@ -628,8 +629,7 @@ internal static class MftTableLoader
                 var currentLcn = lcn;
                 while (clustersRemaining > 0 && startRecordIndex < recordCount)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    DevTools.Services.FolderSizes.ScanGate.Wait(cancellationToken);
+                    await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                     if (parserCompletion.IsCompleted)
                     {
                         // Parsers died (fault/cancel): stop writing or the bounded channel deadlocks.
@@ -720,8 +720,14 @@ internal static class MftTableLoader
 
         // Keep extension data on its own record until its base reference is verified.
         Dictionary<int, (int Record, int Rank)>? recoveredNames = null;
-        foreach (var extension in extensions)
+        for (var index = 0; index < extensions.Count; index++)
         {
+            if ((index & 4095) == 0)
+            {
+                await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            var extension = extensions[index];
             var baseNumber = extension.BaseNumber;
             if ((flags[baseNumber] & (MftRecordTable.FlagInUse | MftRecordTable.FlagExtension)) != MftRecordTable.FlagInUse ||
                 extension.BaseSequence == 0 || (referenceSequences[baseNumber] >> 16) != extension.BaseSequence)
@@ -763,8 +769,14 @@ internal static class MftTableLoader
 
         if (recoveredNames is not null)
         {
+            var index = 0;
             foreach (var (baseNumber, name) in recoveredNames)
             {
+                if ((index++ & 4095) == 0)
+                {
+                    await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+
                 var isDirectory = (flags[baseNumber] & MftRecordTable.FlagDirectory) != 0;
                 flags[baseNumber] |= MftRecordTable.FlagHasName;
                 parent[baseNumber] = parent[name.Record];
@@ -791,7 +803,7 @@ internal static class MftTableLoader
         {
             if ((index & 4095) == 0)
             {
-                cancellationToken.ThrowIfCancellationRequested();
+                ScanGate.Wait(cancellationToken);
             }
 
             if (index == MftRecordTable.RootRecordNumber ||

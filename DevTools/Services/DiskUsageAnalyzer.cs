@@ -18,6 +18,8 @@ public sealed class DiskUsageAnalyzer
     /// <summary>Title prefix of the per-drive largest-folders sections.</summary>
     public const string LargestFoldersSectionTitle = "Largest Folders";
 
+    internal const string DriveSummarySectionTitle = "Drive Summary";
+
     private const int DefaultTopCount = 10;
     private const int LargestFolderCount = 25;
     private const int LargestFolderChildren = 15;
@@ -686,7 +688,7 @@ public sealed class DiskUsageAnalyzer
             long? volumeUsed = drive.Space is { IsVolumeWide: true } reported ? reported.UsedBytes : null;
 
             var scanNote = tree is not null
-                ? $"Logical file size: {tree.TotalBytes:N0} bytes ({tree.EngineName}, {tree.Elapsed.TotalSeconds:F1}s)."
+                ? $"Logical file size: {tree.TotalBytes:N0} bytes in {tree.TotalFiles:N0} files ({tree.EngineName}, {tree.Elapsed.TotalSeconds:F1}s)."
                 : result?.Note ?? "Folder scan pending.";
             if (tree?.GetAllocatedBytes(0) is long allocatedBytes)
             {
@@ -747,7 +749,7 @@ public sealed class DiskUsageAnalyzer
             summary += Environment.NewLine + string.Join(Environment.NewLine, diskCapacities.Select(DescribeDiskCapacity));
         }
 
-        return new DiskUsageSection("Drive Summary", summary, entries);
+        return new DiskUsageSection(DriveSummarySectionTitle, summary, entries);
     }
 
     private static string DescribeVolumeTotals(VolumeSpace space)

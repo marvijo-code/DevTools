@@ -96,6 +96,7 @@ public sealed partial class MainViewModel
     private FolderTree? _folderBrowserFileTree;
     private string _folderBrowserPath = string.Empty;
     private string _folderBrowserSummary = "The folder browser fills in when the first drive scan finishes.";
+    private bool _showFolderBrowserVolumeSummary;
     private bool _canFolderBrowserGoUp;
     private bool _folderBrowserUseAllocation;
     private CancellationTokenSource? _folderBrowserFileLoadCts;
@@ -110,7 +111,19 @@ public sealed partial class MainViewModel
 
     public string FolderBrowserPath => _folderBrowserPath;
 
-    public string FolderBrowserSummary => _folderBrowserSummary;
+    public string FolderBrowserSummary => GetSelectedVolumeNote() ?? _folderBrowserSummary;
+
+    private string? GetSelectedVolumeNote()
+    {
+        if (!_showFolderBrowserVolumeSummary || string.IsNullOrEmpty(_folderBrowserPath))
+        {
+            return null;
+        }
+
+        var index = FindDiskUsageSectionIndex(DiskUsageAnalyzer.DriveSummarySectionTitle);
+        return index < 0 ? null : _diskUsageSections[index].Entries.FirstOrDefault(entry =>
+            string.Equals(entry.Path, _folderBrowserPath, StringComparison.OrdinalIgnoreCase))?.Note;
+    }
 
     public bool CanFolderBrowserGoUp => _canFolderBrowserGoUp;
 
@@ -166,6 +179,7 @@ public sealed partial class MainViewModel
 
         _folderBrowserPath = normalized;
         _canFolderBrowserGoUp = node != 0;
+        _showFolderBrowserVolumeSummary = node == 0;
         var allocation = tree.GetAllocatedBytes(node) is long allocatedBytes
             ? $" {ByteFormatter.Format(allocatedBytes)} of attributed allocation."
             : FolderBrowserUseAllocation ? " Allocation is unavailable for this scan." : string.Empty;
@@ -219,6 +233,7 @@ public sealed partial class MainViewModel
         }
 
         var cts = _folderBrowserClickCts = new CancellationTokenSource();
+        _showFolderBrowserVolumeSummary = false;
         _folderBrowserSummary = $"Sizing {path} first. The all-drive scan pauses until this finishes.";
         RaisePropertyChanged(nameof(FolderBrowserSummary));
         try
@@ -323,6 +338,7 @@ public sealed partial class MainViewModel
         }
         _folderBrowserPath = path;
         _canFolderBrowserGoUp = false;
+        _showFolderBrowserVolumeSummary = true;
         _folderBrowserSummary = string.IsNullOrEmpty(path)
             ? "No fixed volumes are available."
             : scanCompleted

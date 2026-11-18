@@ -1674,6 +1674,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void SetDiskUsageSections(IReadOnlyList<DiskUsageSection> sections)
     {
+        var previousVolumeNote = GetSelectedVolumeNote();
         RememberDiskUsageSectionExpansionStates();
         var incomingTitles = new HashSet<string>(sections.Select(section => section.Title), StringComparer.OrdinalIgnoreCase);
 
@@ -1710,6 +1711,11 @@ public sealed partial class MainViewModel : ObservableObject
             {
                 _diskUsageSections.RemoveAt(i);
             }
+        }
+
+        if (!string.Equals(previousVolumeNote, GetSelectedVolumeNote(), StringComparison.Ordinal))
+        {
+            RaisePropertyChanged(nameof(FolderBrowserSummary));
         }
     }
 

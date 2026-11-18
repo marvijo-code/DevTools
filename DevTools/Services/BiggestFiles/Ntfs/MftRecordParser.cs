@@ -17,6 +17,7 @@ public struct MftRecordInfo
     public long AllocatedClusters;
 
     public bool HasName;
+    public ushort ParentRecordSequence;
 
     /// <summary>Parent directory record number (low 48 bits of the parent file reference).</summary>
     public ulong ParentRecordNumber;
@@ -242,7 +243,9 @@ public static class MftRecordParser
 
         bestNamespaceRank = rank;
         info.HasName = true;
-        info.ParentRecordNumber = BinaryPrimitives.ReadUInt64LittleEndian(value) & 0x0000FFFFFFFFFFFFUL;
+        var parentReference = BinaryPrimitives.ReadUInt64LittleEndian(value);
+        info.ParentRecordNumber = parentReference & 0x0000FFFFFFFFFFFFUL;
+        info.ParentRecordSequence = (ushort)(parentReference >> 48);
         info.NameOffsetInRecord = attributeOffset + contentOffset + 0x42;
         info.NameLengthChars = nameLengthChars;
         info.FileNameNamespace = nameNamespace;

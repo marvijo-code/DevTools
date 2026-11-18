@@ -154,6 +154,66 @@ public sealed class MftFolderSizeScannerTests
         Assert.Equal(12_288, tree.GetAllocatedBytes(tree.Find(@"C:\Users")));
     }
 
+    [Fact]
+    public void ValidateParentReferences_KeepsStaleAndInvalidLinksOutOfFolderTotals()
+    {
+        var table = CreateTable(80, new long[80]);
+        AddDirectory(table, Root, Root, ".");
+        AddDirectory(table, 24, Root, "Current");
+        AddDirectory(table, 25, Root, "Old");
+        AddFile(table, 40, 24, "current.bin", 20);
+        AddFile(table, 41, 24, "stale.bin", 50);
+        AddFile(table, 42, 40, "parent-is-a-file.bin", 60);
+        AddFile(table, 43, 24, "unsequenced.bin", 70);
+        AddFile(table, 44, 25, "detached.bin", 90);
+        AddFile(table, 45, uint.MaxValue, "missing-parent.bin", 80);
+
+        var references = new uint[80];
+        references[Root] = (9U << 16) | 9U;
+        references[24] = (7U << 16) | 9U;
+        references[25] = (2U << 16) | 8U;
+        references[40] = (3U << 16) | 7U;
+        references[41] = 6;
+        references[42] = 3;
+        references[44] = 2;
+        references[45] = 7;
+        table.RecordAllocation![40] = 4096;
+        table.RecordAllocation[41] = 8192;
+        table.RecordAllocation[44] = 8192;
+
+        MftTableLoader.ValidateParentReferences(table.Parent, table.Flags, references, CancellationToken.None);
+        var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "test", System.Diagnostics.Stopwatch.StartNew());
+
+        Assert.Equal(24U, table.Parent[40]);
+        Assert.Equal(25U, table.Parent[44]);
+        Assert.Equal(MftRecordTable.InvalidParentRecord, table.Parent[25]);
+        Assert.All(new[] { 41, 42, 43, 45 }, index => Assert.False(table.IsNamedFile(index)));
+        Assert.Equal(20, tree.TotalBytes);
+        Assert.Equal(4096, tree.GetAllocatedBytes(0));
+        Assert.Equal(-1, tree.Find(@"C:\Old"));
+    }
+
+    [Fact]
+    public void IsUnder_CachesValidAndInvalidPathsIncludingCycles()
+    {
+        var table = CreateTable(80);
+        table.Parent[Root] = Root;
+        table.Parent[24] = Root;
+        table.Parent[26] = 24;
+        table.Parent[27] = 26;
+        table.Parent[30] = 31;
+        table.Parent[31] = 30;
+        table.Parent[40] = MftRecordTable.InvalidParentRecord;
+        var state = new byte[table.RecordCount];
+
+        Assert.True(table.IsUnder(27, 24, state));
+        Assert.True(table.IsUnder(26, 24, state));
+        Assert.False(table.IsUnder(30, 24, state));
+        Assert.False(table.IsUnder(31, 24, state));
+        Assert.False(table.IsUnder(40, 24, state));
+        Assert.DoesNotContain((byte)3, state);
+    }
+
     private static MftRecordTable CreateTable(int recordCount, long[]? recordAllocation = null)
     {
         return new MftRecordTable(

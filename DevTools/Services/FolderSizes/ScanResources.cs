@@ -44,7 +44,7 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
     {
         // Estimate the indexed columns, temporary tree indexes and decoded names. Leave half of the
         // available commit and physical memory alone so a drive refresh can coexist with other apps.
-        var estimatedTableBytes = (long)records * (includeFileNames ? 96 : 48);
+        var estimatedTableBytes = (long)records * (includeFileNames ? 100 : 50);
         if (MemoryHeadroom is long available && estimatedTableBytes > available / 2)
         {
             throw new InsufficientMemoryException("Available memory is too low for an in-memory NTFS table.");

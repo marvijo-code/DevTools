@@ -143,6 +143,21 @@ public sealed class MftRecordParserTests
     }
 
     [Fact]
+    public void TryParseRecord_PreservesTheFullParentReference()
+    {
+        const ulong parentNumber = (1UL << 37) | 24;
+        const ushort parentSequence = 0xB079;
+        var record = new MftRecordBuilder()
+            .FileName("data.bin", ((ulong)parentSequence << 48) | parentNumber, nameNamespace: 1)
+            .Build();
+        var info = new MftRecordInfo();
+
+        Assert.True(MftRecordParser.TryParseRecord(record, ref info));
+        Assert.Equal(parentNumber, info.ParentRecordNumber);
+        Assert.Equal(parentSequence, info.ParentRecordSequence);
+    }
+
+    [Fact]
     public void TryParseRecord_RecognisesExtensionsOfRecordZero()
     {
         var record = new MftRecordBuilder().BaseRecord(7UL << 48).Build();

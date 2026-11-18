@@ -21,6 +21,7 @@ internal sealed class MftRecordTable
     public const byte FlagHasSize = 0x10;
 
     public const uint RootRecordNumber = 5;
+    public const uint InvalidParentRecord = uint.MaxValue;
     public const uint FirstUserRecordNumber = 24;
     public const int MaxAncestryDepth = 1024;
 
@@ -80,7 +81,8 @@ internal sealed class MftRecordTable
         return (flag & FlagInUse) != 0 &&
                (flag & FlagHasName) != 0 &&
                (flag & FlagDirectory) == 0 &&
-               (flag & FlagExtension) == 0;
+               (flag & FlagExtension) == 0 &&
+               Parent[index] != InvalidParentRecord;
     }
 
     /// <summary>Resolves an absolute directory path to its MFT record number, or null when not found.</summary>
@@ -131,7 +133,6 @@ internal sealed class MftRecordTable
     public bool IsUnder(int index, uint target, byte[] state)
     {
         // state: 0 unknown, 1 inside, 2 outside, 3 visiting
-        var chain = new List<int>();
         var current = index;
         var result = (byte)2;
 
@@ -170,7 +171,6 @@ internal sealed class MftRecordTable
             }
 
             state[current] = 3;
-            chain.Add(current);
 
             if (current == RootRecordNumber)
             {
@@ -181,9 +181,12 @@ internal sealed class MftRecordTable
             current = (int)Parent[current];
         }
 
-        foreach (var node in chain)
+        // Follow the marked links again to cache the answer without allocating a path per file.
+        current = index;
+        while ((uint)current < (uint)Parent.Length && state[current] == 3)
         {
-            state[node] = result;
+            state[current] = result;
+            current = (int)Parent[current];
         }
 
         return result == 1;
@@ -296,7 +299,8 @@ internal static class MftTableLoader
         var allocSize = keepFileNames ? new long[recordCount] : [];
         var lastWrite = keepFileNames ? new long[recordCount] : [];
         var recordAllocation = keepFileNames ? null : new long[recordCount];
-        var sequences = recordAllocation is null ? null : new ushort[recordCount];
+        // The record sequence and its parent reference sequence share one temporary column.
+        var referenceSequences = new uint[recordCount];
         var names = new string?[recordCount];
 
 
@@ -321,7 +325,7 @@ internal static class MftTableLoader
 
         await ParseAllRecordsAsync(
             volume, geometry, extents, recordSize, recordCount, chunkBytes, parserCount, queueCapacity,
-            parent, flags, realSize, allocSize, lastWrite, names, keepFileNames, recordAllocation, sequences,
+            parent, flags, realSize, allocSize, lastWrite, names, keepFileNames, recordAllocation, referenceSequences,
             OnParsed,
             cancellationToken).ConfigureAwait(false);
 
@@ -442,7 +446,7 @@ internal static class MftTableLoader
         string?[] names,
         bool keepFileNames,
         long[]? recordAllocation,
-        ushort[]? sequences,
+        uint[] referenceSequences,
         Action<int> reportThrottled,
         CancellationToken cancellationToken)
     {
@@ -506,10 +510,9 @@ internal static class MftTableLoader
                                 }
                                 else
                                 {
-                                    if (recordAllocation is not null && sequences is not null)
+                                    if (recordAllocation is not null)
                                     {
                                         recordAllocation[globalIndex] = allocated;
-                                        sequences[globalIndex] = info.SequenceNumber;
                                     }
 
                                     if (info.DataSizesValid)
@@ -523,7 +526,10 @@ internal static class MftTableLoader
                                     }
                                 }
 
-                                parent[globalIndex] = (uint)info.ParentRecordNumber;
+                                parent[globalIndex] = info.ParentRecordNumber < (ulong)recordCount
+                                    ? (uint)info.ParentRecordNumber
+                                    : MftRecordTable.InvalidParentRecord;
+                                referenceSequences[globalIndex] = ((uint)info.SequenceNumber << 16) | info.ParentRecordSequence;
                                 if (keepFileNames)
                                 {
                                     lastWrite[globalIndex] = info.LastWriteFileTime;
@@ -665,12 +671,14 @@ internal static class MftTableLoader
             }
         }
 
+        ValidateParentReferences(parent, flags, referenceSequences, cancellationToken);
+
         // Merge extension-record sizes into their base records.
         foreach (var extension in extensionSizes)
         {
             var baseNumber = extension.BaseNumber;
             if ((flags[baseNumber] & (MftRecordTable.FlagInUse | MftRecordTable.FlagExtension)) != MftRecordTable.FlagInUse ||
-                (sequences is not null && sequences[baseNumber] != extension.BaseSequence))
+                extension.BaseSequence == 0 || (referenceSequences[baseNumber] >> 16) != extension.BaseSequence)
             {
                 continue;
             }
@@ -689,6 +697,34 @@ internal static class MftTableLoader
                 }
 
                 flags[baseNumber] |= MftRecordTable.FlagHasSize;
+            }
+        }
+    }
+
+    internal static void ValidateParentReferences(uint[] parents, byte[] flags, uint[] sequences, CancellationToken cancellationToken)
+    {
+        const byte namedBase = MftRecordTable.FlagInUse | MftRecordTable.FlagHasName;
+        const byte baseDirectory = MftRecordTable.FlagInUse | MftRecordTable.FlagDirectory;
+        for (var index = 0; index < parents.Length; index++)
+        {
+            if ((index & 4095) == 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
+            if (index == MftRecordTable.RootRecordNumber ||
+                (flags[index] & (namedBase | MftRecordTable.FlagExtension)) != namedBase)
+            {
+                continue;
+            }
+
+            var parent = parents[index];
+            var expectedSequence = (ushort)sequences[index];
+            if (parent >= (uint)parents.Length || parent == index || expectedSequence == 0 ||
+                (flags[parent] & (baseDirectory | MftRecordTable.FlagExtension)) != baseDirectory ||
+                expectedSequence != sequences[parent] >> 16)
+            {
+                parents[index] = MftRecordTable.InvalidParentRecord;
             }
         }
     }

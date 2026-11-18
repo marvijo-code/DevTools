@@ -117,6 +117,43 @@ public sealed class MftRecordParserTests
     }
 
     [Fact]
+    public void TryParseRecord_AccountsForPhysicalRunsInAllStreams()
+    {
+        var record = new MftRecordBuilder()
+            .NonResidentData(32_768, 32_768, runs: [0x11, 3, 4, 0x01, 5, 0])
+            .NamedData([0x11, 2, 9, 0])
+            .Build();
+        var info = new MftRecordInfo();
+
+        Assert.True(MftRecordParser.TryParseRecord(record, ref info, requireInUse: true, readLastWrite: false, countAllocation: true));
+        Assert.Equal(32_768, info.DataRealSize);
+        Assert.Equal(5, info.AllocatedClusters);
+    }
+
+    [Fact]
+    public void TryParseRecord_DoesNotAddSeparateAllocationForResidentData()
+    {
+        var record = new MftRecordBuilder().ResidentData(size: 25).Build();
+        var info = new MftRecordInfo();
+
+        Assert.True(MftRecordParser.TryParseRecord(record, ref info, requireInUse: true, readLastWrite: false, countAllocation: true));
+        Assert.Equal(25, info.DataRealSize);
+        Assert.Equal(0, info.AllocatedClusters);
+    }
+
+    [Fact]
+    public void TryParseRecord_RecognisesExtensionsOfRecordZero()
+    {
+        var record = new MftRecordBuilder().BaseRecord(7UL << 48).Build();
+        var info = new MftRecordInfo();
+
+        Assert.True(MftRecordParser.TryParseRecord(record, ref info));
+        Assert.True(info.IsExtension);
+        Assert.Equal(0UL, info.BaseRecordNumber);
+        Assert.Equal(7, info.BaseRecordSequence);
+    }
+
+    [Fact]
     public void TryParseRecord_NeverUsesFileNameSizes()
     {
         // The builder stamps 999_999 into the stale $FILE_NAME size fields; the parser must ignore them.

@@ -418,7 +418,7 @@ public sealed class DiskUsageAnalyzer
             if (space.IsVolumeWide && result?.Tree?.GetAllocatedBytes(0) is long allocatedBytes)
             {
                 var remainingUsed = space.UsedBytes - allocatedBytes;
-                scanNote += $" {allocatedBytes:N0} bytes of allocation attributed to files.";
+                scanNote += $" {allocatedBytes:N0} bytes of allocation attributed by the scan.";
                 scanNote += remainingUsed >= 0
                     ? $" {remainingUsed:N0} used bytes remain unattributed."
                     : $" File allocation exceeded reported usage by {-remainingUsed:N0} bytes during the scan.";

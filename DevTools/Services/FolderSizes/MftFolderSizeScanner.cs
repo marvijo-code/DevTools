@@ -159,27 +159,32 @@ public sealed class MftFolderSizeScanner
         var count = nodeRecords.Count;
         var totals = new long[count];
         var files = new long[count];
+        var recordAllocation = table.RecordAllocation;
+        var allocated = recordAllocation is null ? null : new long[count];
         for (var r = 0; r < recordCount; r++)
         {
-            if (r < MftRecordTable.FirstUserRecordNumber || !table.IsNamedFile(r))
+            var parent = table.Parent[r];
+            var parentNode = parent < (uint)recordCount ? recordToNode[parent] : -1;
+            var isUserFile = r >= MftRecordTable.FirstUserRecordNumber && table.IsNamedFile(r);
+            if (isUserFile && parentNode >= 0)
+            {
+                totals[parentNode] += Math.Max(0, table.RealSize[r]);
+                files[parentNode]++;
+            }
+
+            if (allocated is null || recordAllocation![r] <= 0)
             {
                 continue;
             }
 
-            var p = (int)table.Parent[r];
-            if (p < 0 || p >= recordCount)
+            // System records have no browsable owner. Their allocation belongs to the volume root.
+            var allocationNode = r < MftRecordTable.FirstUserRecordNumber ? 0
+                : recordToNode[r] >= 0 ? recordToNode[r]
+                : isUserFile ? parentNode : -1;
+            if (allocationNode >= 0)
             {
-                continue;
+                allocated[allocationNode] += recordAllocation[r];
             }
-
-            var node = recordToNode[p];
-            if (node < 0)
-            {
-                continue;
-            }
-
-            totals[node] += Math.Max(0, table.RealSize[r]);
-            files[node]++;
         }
 
         var parentArray = nodeParent.ToArray();
@@ -187,10 +192,14 @@ public sealed class MftFolderSizeScanner
         {
             totals[parentArray[i]] += totals[i];
             files[parentArray[i]] += files[i];
+            if (allocated is not null)
+            {
+                allocated[parentArray[i]] += allocated[i];
+            }
         }
 
         stopwatch.Stop();
-        return new FolderTree(rootPath, parentArray, nodeNames.ToArray(), totals, files, engineName, stopwatch.Elapsed);
+        return new FolderTree(rootPath, parentArray, nodeNames.ToArray(), totals, files, engineName, stopwatch.Elapsed, allocated);
     }
 
     /// <summary>

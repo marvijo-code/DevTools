@@ -25,14 +25,14 @@ internal sealed class MftRecordBuilder
     private long? _lastWriteFileTime;
     private DataAttr? _data;
     private bool _addAttributeList;
-    private bool _addNamedData;
+    private byte[]? _namedDataRuns;
 
     public MftRecordBuilder Sequence(ushort value) { _sequence = value; return this; }
     public MftRecordBuilder InUse(bool value) { _inUse = value; return this; }
     public MftRecordBuilder Directory(bool value) { _isDirectory = value; return this; }
     public MftRecordBuilder BaseRecord(ulong value) { _baseRecordNumber = value; return this; }
     public MftRecordBuilder AttributeList() { _addAttributeList = true; return this; }
-    public MftRecordBuilder NamedData() { _addNamedData = true; return this; }
+    public MftRecordBuilder NamedData(byte[]? runs = null) { _namedDataRuns = runs ?? [0]; return this; }
     public MftRecordBuilder LastWrite(long fileTime) { _lastWriteFileTime = fileTime; return this; }
 
     public MftRecordBuilder FileName(string name, ulong parent, byte nameNamespace)
@@ -43,13 +43,13 @@ internal sealed class MftRecordBuilder
 
     public MftRecordBuilder ResidentData(long size)
     {
-        _data = new DataAttr(false, size, size, 0);
+        _data = new DataAttr(false, size, size, 0, null);
         return this;
     }
 
-    public MftRecordBuilder NonResidentData(long realSize, long allocatedSize, long lowestVcn = 0)
+    public MftRecordBuilder NonResidentData(long realSize, long allocatedSize, long lowestVcn = 0, byte[]? runs = null)
     {
-        _data = new DataAttr(true, realSize, allocatedSize, lowestVcn);
+        _data = new DataAttr(true, realSize, allocatedSize, lowestVcn, runs);
         return this;
     }
 
@@ -85,9 +85,9 @@ internal sealed class MftRecordBuilder
             offset = WriteFileName(buffer, offset, fileName);
         }
 
-        if (_addNamedData)
+        if (_namedDataRuns is not null)
         {
-            offset = WriteNamedData(buffer, offset);
+            offset = WriteNamedData(buffer, offset, _namedDataRuns);
         }
 
         if (_data is not null)
@@ -136,7 +136,7 @@ internal sealed class MftRecordBuilder
         return offset + attributeLength;
     }
 
-    private static int WriteNamedData(byte[] buffer, int offset)
+    private static int WriteNamedData(byte[] buffer, int offset, byte[] runs)
     {
         // Non-resident named $DATA (an alternate data stream) that the parser must ignore.
         var nameChars = "ads";
@@ -144,11 +144,12 @@ internal sealed class MftRecordBuilder
         var nameOffset = 0x40;
         var runListOffset = nameOffset + nameBytes.Length;
         runListOffset = Align8(runListOffset);
-        var attributeLength = Align8(runListOffset + 1);
+        var attributeLength = Align8(runListOffset + runs.Length);
 
         WriteNonResidentHeader(buffer, offset, 0x80, (byte)nameChars.Length, (byte)nameOffset,
             realSize: 12345, allocatedSize: 16384, lowestVcn: 0, runListOffset: (ushort)runListOffset, attributeLength);
         nameBytes.CopyTo(buffer, offset + nameOffset);
+        runs.CopyTo(buffer, offset + runListOffset);
         return offset + attributeLength;
     }
 
@@ -162,9 +163,10 @@ internal sealed class MftRecordBuilder
         }
 
         const ushort runListOffset = 0x40;
-        var attributeLength = Align8(runListOffset + 1);
+        var attributeLength = Align8(runListOffset + (data.Runs?.Length ?? 1));
         WriteNonResidentHeader(buffer, offset, 0x80, nameLength: 0, nameOffset: 0,
             data.RealSize, data.AllocatedSize, data.LowestVcn, runListOffset, attributeLength);
+        data.Runs?.CopyTo(buffer, offset + runListOffset);
         return offset + attributeLength;
     }
 
@@ -224,5 +226,5 @@ internal sealed class MftRecordBuilder
     private static int Align8(int value) => (value + 7) & ~7;
 
     private readonly record struct FileNameAttr(string Name, ulong Parent, byte Namespace);
-    private readonly record struct DataAttr(bool NonResident, long RealSize, long AllocatedSize, long LowestVcn);
+    private readonly record struct DataAttr(bool NonResident, long RealSize, long AllocatedSize, long LowestVcn, byte[]? Runs);
 }

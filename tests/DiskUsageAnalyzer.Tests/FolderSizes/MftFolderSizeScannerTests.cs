@@ -120,7 +120,24 @@ public sealed class MftFolderSizeScannerTests
         Assert.Equal([@"C:\Users", @"C:\Windows"], tree.GetChildren(0).Select(tree.GetPath).ToArray());
     }
 
-    private static MftRecordTable CreateTable(int recordCount)
+    [Fact]
+    public void BuildTree_CountsVolumeMetadataAndRollsUpFileAndDirectoryAllocation()
+    {
+        var table = CreateTable(160, new long[160]);
+        AddDirectory(table, 24, Root, "Users");
+        AddFile(table, 40, 24, "data.bin", 25);
+        table.RecordAllocation![0] = 8192;
+        table.RecordAllocation[24] = 4096;
+        table.RecordAllocation[40] = 8192;
+
+        var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "NTFS MFT", System.Diagnostics.Stopwatch.StartNew());
+
+        Assert.Equal(25, tree.TotalBytes);
+        Assert.Equal(20_480, tree.GetAllocatedBytes(0));
+        Assert.Equal(12_288, tree.GetAllocatedBytes(tree.Find(@"C:\Users")));
+    }
+
+    private static MftRecordTable CreateTable(int recordCount, long[]? recordAllocation = null)
     {
         return new MftRecordTable(
             @"C:\",
@@ -130,7 +147,7 @@ public sealed class MftFolderSizeScannerTests
             new long[recordCount],
             new long[recordCount],
             new long[recordCount],
-            new string?[recordCount]);
+            new string?[recordCount], recordAllocation);
     }
 
     private static void AddDirectory(MftRecordTable table, int index, uint parent, string name)

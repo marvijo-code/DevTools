@@ -12,6 +12,9 @@ public struct MftRecordInfo
 
     /// <summary>Base record number (low 48 bits) when this is an extension record; 0 for a base record.</summary>
     public ulong BaseRecordNumber;
+    public ushort BaseRecordSequence;
+    public bool IsExtension;
+    public long AllocatedClusters;
 
     public bool HasName;
 
@@ -64,7 +67,12 @@ public static class MftRecordParser
     public static bool TryParseRecord(Span<byte> record, ref MftRecordInfo info) =>
         TryParseRecord(record, ref info, requireInUse: false, readLastWrite: true);
 
-    internal static bool TryParseRecord(Span<byte> record, ref MftRecordInfo info, bool requireInUse, bool readLastWrite)
+    internal static bool TryParseRecord(
+        Span<byte> record,
+        ref MftRecordInfo info,
+        bool requireInUse,
+        bool readLastWrite,
+        bool countAllocation = false)
     {
         info = default;
 
@@ -90,7 +98,10 @@ public static class MftRecordParser
         info.InUse = inUse;
         info.IsDirectory = (flags & 0x0002) != 0;
         info.SequenceNumber = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x10, 2));
-        info.BaseRecordNumber = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(0x20, 8)) & 0x0000FFFFFFFFFFFFUL;
+        var baseReference = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(0x20, 8));
+        info.BaseRecordNumber = baseReference & 0x0000FFFFFFFFFFFFUL;
+        info.BaseRecordSequence = (ushort)(baseReference >> 48);
+        info.IsExtension = baseReference != 0;
 
         var firstAttributeOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x14, 2));
         if (firstAttributeOffset < 0x18 || firstAttributeOffset >= record.Length)
@@ -111,13 +122,18 @@ public static class MftRecordParser
             }
 
             var attributeLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(offset + 4, 4));
-            if (attributeLength < 0x10 || offset + attributeLength > record.Length)
+            if (attributeLength < 0x10 || attributeLength > record.Length - offset)
             {
                 break;
             }
 
             var nonResident = record[offset + 8] != 0;
             var nameLength = record[offset + 9];
+            if (countAllocation && nonResident &&
+                TryCountAttributeClusters(record.Slice(offset, attributeLength), out var allocated))
+            {
+                info.AllocatedClusters = checked(info.AllocatedClusters + allocated);
+            }
 
             switch (attributeType)
             {
@@ -139,6 +155,19 @@ public static class MftRecordParser
         }
 
         return true;
+    }
+
+    private static bool TryCountAttributeClusters(ReadOnlySpan<byte> attribute, out long clusters)
+    {
+        clusters = 0;
+        if (attribute.Length < 0x40)
+        {
+            return false;
+        }
+
+        var runOffset = BinaryPrimitives.ReadUInt16LittleEndian(attribute[0x20..]);
+        return runOffset >= 0x40 && runOffset < attribute.Length &&
+               TryDecodeRunList(attribute[runOffset..], null, out clusters);
     }
 
     private static void ReadStandardInformation(ReadOnlySpan<byte> record, int attributeOffset, ref MftRecordInfo info)
@@ -291,7 +320,7 @@ public static class MftRecordParser
             }
 
             var attributeLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(offset + 4, 4));
-            if (attributeLength < 0x10 || offset + attributeLength > record.Length)
+            if (attributeLength < 0x10 || attributeLength > record.Length - offset)
             {
                 break;
             }
@@ -321,9 +350,14 @@ public static class MftRecordParser
     /// Decodes an NTFS data-run list into absolute (LCN, clusterCount) extents. Used to locate the
     /// <c>$MFT</c>'s own clusters from record 0. Sparse runs (offset size 0) are skipped.
     /// </summary>
-    public static bool TryDecodeRunList(ReadOnlySpan<byte> runList, List<(long Lcn, long ClusterCount)> extents)
+    public static bool TryDecodeRunList(ReadOnlySpan<byte> runList, List<(long Lcn, long ClusterCount)> extents) =>
+        TryDecodeRunList(runList, extents, out _);
+
+    private static bool TryDecodeRunList(
+        ReadOnlySpan<byte> runList, List<(long Lcn, long ClusterCount)>? extents, out long allocatedClusters)
     {
-        extents.Clear();
+        extents?.Clear();
+        allocatedClusters = 0;
         var index = 0;
         long currentLcn = 0;
 
@@ -337,12 +371,17 @@ public static class MftRecordParser
 
             var lengthSize = header & 0x0F;
             var offsetSize = (header >> 4) & 0x0F;
-            if (lengthSize == 0 || index + lengthSize + offsetSize > runList.Length)
+            if (lengthSize is < 1 or > 8 || offsetSize > 8 || lengthSize + offsetSize > runList.Length - index)
             {
                 return false;
             }
 
             var clusterCount = ReadUnsignedLittleEndian(runList.Slice(index, lengthSize));
+            if (clusterCount <= 0)
+            {
+                return false;
+            }
+
             index += lengthSize;
 
             if (offsetSize == 0)
@@ -351,14 +390,28 @@ public static class MftRecordParser
                 continue;
             }
 
-            var deltaLcn = ReadSignedLittleEndian(runList.Slice(index, offsetSize));
-            index += offsetSize;
-            currentLcn += deltaLcn;
+            if (long.MaxValue - allocatedClusters < clusterCount)
+            {
+                return false;
+            }
 
-            extents.Add((currentLcn, clusterCount));
+            allocatedClusters += clusterCount;
+            if (extents is not null)
+            {
+                var deltaLcn = ReadSignedLittleEndian(runList.Slice(index, offsetSize));
+                if (deltaLcn < -currentLcn || (deltaLcn > 0 && currentLcn > long.MaxValue - deltaLcn))
+                {
+                    return false;
+                }
+
+                currentLcn += deltaLcn;
+                extents.Add((currentLcn, clusterCount));
+            }
+
+            index += offsetSize;
         }
 
-        return true;
+        return false;
     }
 
     private static long ReadUnsignedLittleEndian(ReadOnlySpan<byte> bytes)
@@ -382,7 +435,7 @@ public static class MftRecordParser
 
         // Sign-extend from the top bit of the most significant byte.
         var signBit = 1L << (8 * bytes.Length - 1);
-        if ((value & signBit) != 0)
+        if (bytes.Length < sizeof(long) && (value & signBit) != 0)
         {
             value -= 1L << (8 * bytes.Length);
         }

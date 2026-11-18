@@ -31,7 +31,8 @@ internal sealed class MftRecordTable
         long[] realSize,
         long[] allocSize,
         long[] lastWrite,
-        string?[] names)
+        string?[] names,
+        long[]? recordAllocation = null)
     {
         VolumeRoot = volumeRoot;
         RecordCount = recordCount;
@@ -41,6 +42,7 @@ internal sealed class MftRecordTable
         AllocSize = allocSize;
         LastWrite = lastWrite;
         Names = names;
+        RecordAllocation = recordAllocation;
     }
 
     public string VolumeRoot { get; }
@@ -58,6 +60,7 @@ internal sealed class MftRecordTable
     public long[] LastWrite { get; }
 
     public string?[] Names { get; }
+    public long[]? RecordAllocation { get; }
 
     /// <summary>True when the record is a base (non-extension) directory that carries a name.</summary>
     public bool IsNamedDirectory(int index)
@@ -276,8 +279,10 @@ internal static class MftTableLoader
         var parent = new uint[recordCount];
         var flags = new byte[recordCount];
         var realSize = new long[recordCount];
-        var allocSize = new long[recordCount];
+        var allocSize = keepFileNames ? new long[recordCount] : [];
         var lastWrite = keepFileNames ? new long[recordCount] : [];
+        var recordAllocation = keepFileNames ? null : new long[recordCount];
+        var sequences = recordAllocation is null ? null : new ushort[recordCount];
         var names = new string?[recordCount];
 
         // Locate the MFT's own clusters from record 0.
@@ -308,13 +313,13 @@ internal static class MftTableLoader
 
         await ParseAllRecordsAsync(
             volume, geometry, extents, recordSize, recordCount,
-            parent, flags, realSize, allocSize, lastWrite, names, keepFileNames,
+            parent, flags, realSize, allocSize, lastWrite, names, keepFileNames, recordAllocation, sequences,
             OnParsed,
             cancellationToken).ConfigureAwait(false);
 
         reportProgress?.Invoke(recordCount, recordCount, stopwatch.Elapsed);
 
-        return new MftRecordTable(volumeRoot, recordCount, parent, flags, realSize, allocSize, lastWrite, names);
+        return new MftRecordTable(volumeRoot, recordCount, parent, flags, realSize, allocSize, lastWrite, names, recordAllocation);
     }
 
     private static List<(long Lcn, long ClusterCount)> ReadMftExtents(Microsoft.Win32.SafeHandles.SafeFileHandle volume, NtfsVolumeData geometry)
@@ -350,6 +355,8 @@ internal static class MftTableLoader
         long[] lastWrite,
         string?[] names,
         bool keepFileNames,
+        long[]? recordAllocation,
+        ushort[]? sequences,
         Action<int> reportThrottled,
         CancellationToken cancellationToken)
     {
@@ -364,7 +371,7 @@ internal static class MftTableLoader
         });
 
         // Extension records whose LowestVCN==0 $DATA carries the real size for a fragmented base file.
-        var extensionSizes = new List<(uint BaseNumber, long Real, long Alloc)>();
+        var extensionSizes = new List<ExtensionAllocation>();
         var extensionLock = new object();
         var parsedCounter = 0;
 
@@ -375,7 +382,7 @@ internal static class MftTableLoader
         {
             parsers[i] = Task.Run(async () =>
             {
-                var localExtensions = new List<(uint, long, long)>();
+                var localExtensions = new List<ExtensionAllocation>();
                 var info = new MftRecordInfo();
                 try
                 {
@@ -388,7 +395,8 @@ internal static class MftTableLoader
                             {
                                 var globalIndex = block.StartRecordIndex + r;
                                 var recordSpan = span.Slice(r * recordSize, recordSize);
-                                if (!MftRecordParser.TryParseRecord(recordSpan, ref info, requireInUse: true, readLastWrite: keepFileNames))
+                                if (!MftRecordParser.TryParseRecord(recordSpan, ref info,
+                                    requireInUse: true, readLastWrite: keepFileNames, countAllocation: recordAllocation is not null))
                                 {
                                     continue;
                                 }
@@ -397,19 +405,36 @@ internal static class MftTableLoader
                                 if (info.IsDirectory) flag |= MftRecordTable.FlagDirectory;
                                 if (info.HasName) flag |= MftRecordTable.FlagHasName;
 
-                                if (info.BaseRecordNumber != 0)
+                                var allocated = recordAllocation is null
+                                    ? 0
+                                    : checked(info.AllocatedClusters * geometry.BytesPerCluster);
+                                if (info.IsExtension)
                                 {
                                     flag |= MftRecordTable.FlagExtension;
-                                    if (info.DataSizesValid)
+                                    if (info.BaseRecordNumber < (ulong)recordCount && (info.DataSizesValid || allocated > 0))
                                     {
-                                        localExtensions.Add(((uint)info.BaseRecordNumber, info.DataRealSize, info.DataAllocatedSize));
+                                        localExtensions.Add(new ExtensionAllocation(
+                                            (int)info.BaseRecordNumber, info.BaseRecordSequence,
+                                            info.DataSizesValid, info.DataRealSize, info.DataAllocatedSize, allocated));
                                     }
                                 }
-                                else if (info.DataSizesValid)
+                                else
                                 {
-                                    flag |= MftRecordTable.FlagHasSize;
-                                    realSize[globalIndex] = info.DataRealSize;
-                                    allocSize[globalIndex] = info.DataAllocatedSize;
+                                    if (recordAllocation is not null && sequences is not null)
+                                    {
+                                        recordAllocation[globalIndex] = allocated;
+                                        sequences[globalIndex] = info.SequenceNumber;
+                                    }
+
+                                    if (info.DataSizesValid)
+                                    {
+                                        flag |= MftRecordTable.FlagHasSize;
+                                        realSize[globalIndex] = info.DataRealSize;
+                                        if (keepFileNames)
+                                        {
+                                            allocSize[globalIndex] = info.DataAllocatedSize;
+                                        }
+                                    }
                                 }
 
                                 parent[globalIndex] = (uint)info.ParentRecordNumber;
@@ -555,17 +580,28 @@ internal static class MftTableLoader
         }
 
         // Merge extension-record sizes into their base records.
-        foreach (var (baseNumber, real, alloc) in extensionSizes)
+        foreach (var extension in extensionSizes)
         {
-            if (baseNumber >= (uint)recordCount)
+            var baseNumber = extension.BaseNumber;
+            if ((flags[baseNumber] & (MftRecordTable.FlagInUse | MftRecordTable.FlagExtension)) != MftRecordTable.FlagInUse ||
+                (sequences is not null && sequences[baseNumber] != extension.BaseSequence))
             {
                 continue;
             }
 
-            if ((flags[baseNumber] & MftRecordTable.FlagHasSize) == 0)
+            if (recordAllocation is not null)
             {
-                realSize[baseNumber] = real;
-                allocSize[baseNumber] = alloc;
+                recordAllocation[baseNumber] = checked(recordAllocation[baseNumber] + extension.RecordBytes);
+            }
+
+            if (extension.HasLogicalSize && (flags[baseNumber] & MftRecordTable.FlagHasSize) == 0)
+            {
+                realSize[baseNumber] = extension.LogicalBytes;
+                if (keepFileNames)
+                {
+                    allocSize[baseNumber] = extension.UnnamedDataAllocation;
+                }
+
                 flags[baseNumber] |= MftRecordTable.FlagHasSize;
             }
         }
@@ -585,6 +621,9 @@ internal static class MftTableLoader
             totalRead += read;
         }
     }
+
+    private readonly record struct ExtensionAllocation(
+        int BaseNumber, ushort BaseSequence, bool HasLogicalSize, long LogicalBytes, long UnnamedDataAllocation, long RecordBytes);
 
     private readonly record struct Block(byte[] Buffer, int StartRecordIndex, int RecordCount);
 }

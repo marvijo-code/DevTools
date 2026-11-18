@@ -111,6 +111,25 @@ public sealed class DirectoryAllocationTests
         }
     }
 
+    [Fact]
+    public void AllocationIndex_CountsFullIdentitiesOnceAcrossWorkersAndSlotReuse()
+    {
+        var index = new DirectoryAllocationIndex(16_000, recordCapacity: 128);
+        var ids = new UInt128[]
+        {
+            (42UL << 48) | 9,
+            (43UL << 48) | 9,
+            ((UInt128)1 << 64) | ((42UL << 48) | 9),
+            (42UL << 48) | 200
+        };
+        var results = new long[4096];
+        Parallel.For(0, results.Length, i => results[i] = index.Claim(ids[i % ids.Length], 4096));
+
+        Assert.Equal(ids.Length * 4096L, results.Sum());
+        Assert.All(ids, id => Assert.Equal(0, index.Claim(id, 4096)));
+        Assert.Equal(0, index.Claim(0, 4096));
+    }
+
     [DllImport("kernel32.dll", EntryPoint = "GetCompressedFileSizeW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint GetCompressedFileSize(string path, out uint high);
 

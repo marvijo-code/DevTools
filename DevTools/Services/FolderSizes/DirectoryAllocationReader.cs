@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
+using DevTools.Services.BiggestFiles.Ntfs;
 using Microsoft.Win32.SafeHandles;
 
 namespace DevTools.Services.FolderSizes;
@@ -105,11 +106,15 @@ internal sealed class DirectoryAllocationReader(DirectoryAllocationIndex identit
 internal sealed class DirectoryAllocationIndex
 {
     private const int ShardCount = 32;
+    private const int MaximumRecords = 16_000_000;
+    private const ulong RecordNumberMask = 0x0000FFFFFFFFFFFF;
+    private readonly int[] _recordSequences;
     private readonly HashSet<UInt128>[] _shards = new HashSet<UInt128>[ShardCount];
     private readonly int _entriesPerShard;
 
-    internal DirectoryAllocationIndex(int entryLimit)
+    internal DirectoryAllocationIndex(int entryLimit, int recordCapacity = 0)
     {
+        _recordSequences = recordCapacity == 0 ? [] : new int[recordCapacity];
         _entriesPerShard = entryLimit / ShardCount;
         for (var i = 0; i < _shards.Length; i++)
         {
@@ -117,7 +122,7 @@ internal sealed class DirectoryAllocationIndex
         }
     }
 
-    public static DirectoryAllocationIndex? Create(string root, ScanResources resources)
+    public static DirectoryAllocationIndex? Create(string root, ScanResources resources, bool fullVolume)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -141,8 +146,21 @@ internal sealed class DirectoryAllocationIndex
         }
 
         // Keep at least seven eighths of current memory headroom available to other work.
-        var entryLimit = (int)Math.Min(16_000_000, resources.MemoryHeadroom.GetValueOrDefault() / 8 / 48);
-        return entryLimit >= ShardCount ? new DirectoryAllocationIndex(entryLimit) : null;
+        var budget = resources.MemoryHeadroom.GetValueOrDefault() / 8;
+        if (budget / 48 < ShardCount)
+        {
+            return null;
+        }
+
+        var recordCapacity = fullVolume ? NativeMethods.GetDirectoryRecordCapacity(root) : 0;
+        if (recordCapacity > MaximumRecords || (long)recordCapacity * sizeof(int) > budget / 2)
+        {
+            recordCapacity = 0;
+        }
+
+        var remainingBudget = budget - (long)recordCapacity * sizeof(int);
+        var entryLimit = (int)Math.Min(MaximumRecords, remainingBudget / 48);
+        return new DirectoryAllocationIndex(entryLimit, recordCapacity);
     }
 
     public long Claim(UInt128 id, long bytes)
@@ -152,6 +170,25 @@ internal sealed class DirectoryAllocationIndex
             return 0;
         }
 
+        var low = (ulong)id;
+        var record = low & RecordNumberMask;
+        if (record < (ulong)_recordSequences.Length && id >> 64 == 0)
+        {
+            // Store the full high 16 bits of the 64-bit ID. Zero marks a slot nobody has claimed.
+            var sequence = (int)(low >> 48) + 1;
+            var previous = Interlocked.CompareExchange(ref _recordSequences[(int)record], sequence, 0);
+            if (previous == 0)
+            {
+                return bytes;
+            }
+
+            if (previous == sequence)
+            {
+                return 0;
+            }
+        }
+
+        // Reused record slots, larger IDs and records added after the geometry query still deduplicate by full ID.
         var shard = _shards[id.GetHashCode() & (ShardCount - 1)];
         lock (shard)
         {

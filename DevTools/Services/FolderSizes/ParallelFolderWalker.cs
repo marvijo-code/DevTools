@@ -34,7 +34,8 @@ public sealed class ParallelFolderWalker
         var driveRoot = FolderTree.NormalizeRoot(fullRoot);
         var stopwatch = Stopwatch.StartNew();
         var resources = ScanResources.Capture();
-        var allocationIndex = prioritize ? null : DirectoryAllocationIndex.Create(driveRoot, resources);
+        var fullVolume = string.Equals(fullRoot, driveRoot, StringComparison.OrdinalIgnoreCase);
+        var allocationIndex = prioritize ? null : DirectoryAllocationIndex.Create(driveRoot, resources, fullVolume);
         var builder = new FolderTreeBuilder(driveRoot, trackAllocation: allocationIndex is not null);
         var builderLock = new object();
         int startNode;

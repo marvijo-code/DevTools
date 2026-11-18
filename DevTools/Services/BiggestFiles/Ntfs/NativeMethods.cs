@@ -16,8 +16,11 @@ internal readonly record struct NtfsVolumeData(
 internal static class NativeMethods
 {
     private const uint GenericRead = 0x80000000;
+    private const uint ReadAttributes = 0x00000080;
     private const uint FileShareRead = 0x00000001;
     private const uint FileShareWrite = 0x00000002;
+    private const uint FileShareDelete = 0x00000004;
+    private const uint OpenDirectory = 0x02000000;
     private const uint OpenExisting = 3;
     private const uint FsctlGetNtfsVolumeData = 0x00090064;
 
@@ -61,6 +64,27 @@ internal static class NativeMethods
         }
 
         return handle;
+    }
+
+    internal static int GetDirectoryRecordCapacity(string rootPath)
+    {
+        // An ordinary directory handle can query volume geometry without raw volume access.
+        using var root = CreateFile(rootPath, ReadAttributes, FileShareRead | FileShareWrite | FileShareDelete,
+            IntPtr.Zero, OpenExisting, OpenDirectory, IntPtr.Zero);
+        if (root.IsInvalid)
+        {
+            return 0;
+        }
+
+        try
+        {
+            var geometry = GetVolumeData(root);
+            return MftTableLoader.GetRecordCount(geometry);
+        }
+        catch (Exception ex) when (ex is Win32Exception or IOException or NotSupportedException)
+        {
+            return 0;
+        }
     }
 
     internal static NtfsVolumeData GetVolumeData(SafeFileHandle volume)

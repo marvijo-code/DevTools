@@ -551,9 +551,6 @@ public sealed partial class MainViewModel : ObservableObject
             RaiseDiskUsageProperties();
             StatusMessage = "Refreshing disk usage snapshot...";
 
-            // The cleanup options are quick to check, so they fill in while the slower full scan runs.
-            var cleanupTask = RefreshCleanupOptionsAsync(cancellationToken);
-
             // Select the system drive now and populate its tree when the drive scan finishes.
             RefreshFolderBrowserDrives();
 
@@ -580,7 +577,8 @@ public sealed partial class MainViewModel : ObservableObject
             SetDiskUsageActivityText("Snapshot ready");
             RaiseDiskUsageProperties();
             RefreshFolderBrowserDrives(scanCompleted: true);
-            await cleanupTask;
+            // Reuse the drive trees for cleanup estimates instead of starting additional walks.
+            await RefreshCleanupOptionsAsync(cancellationToken);
 
             StatusMessage = "Disk usage snapshot refreshed.";
             AppLog.Info("RefreshDiskUsageAsync completed.");

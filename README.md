@@ -98,14 +98,9 @@ The Storage workspace sizes **every folder on every fixed drive** once, in the b
 - **Folder Browser (all drives)**: pick a drive, click any folder to open it, **Up** to go back. Every level comes from the in-memory tree, so it opens instantly.
 - User Profile, AppData, Repositories, Installed Software, Temp Hotspots, Docker and Drive Summary, all read from the same tree.
 
-The window opens at once and the scan never runs on the UI thread. Each drive uses the fastest engine that works, with a time limit on each step and a fall-through to the next:
+The app scans in the background using its built-in NTFS Master File Table reader when elevated. It falls back to a folder walk on volumes where the NTFS reader is unavailable. Each drive section names the engine and elapsed scan time.
 
-1. **Everything** (voidtools) with *Index folder size* turned on: one short list of folders, no disk reads. Probe: `es.exe -get-everything-version` must answer within 2 s.
-2. **NTFS Master File Table** when DevTools runs as administrator (the default). Measured 48 s for a 950 GB C: with 7.5 million files.
-3. **Everything without folder sizes**: every file from the Everything index (measured 81 s for C: with free RAM; it gives up when it slows below 50,000 results a minute, which happens when Everything is paged out on a low-memory laptop).
-4. **Folder walk**: a low-priority walk with at most 4 threads. It is the slow path: gdu, dua and diskus each needed more than 15 minutes for C: on this laptop.
-
-`es.exe` is found in the app folder, `Program Files\Everything`, `~\.local\bin`, `~\bin`, the winget links folder or `PATH`. Each drive section names the engine and time, and the log records `Drive C:\: <engine> sized N folders ... in Xs.` Start with `--minimized` to open on the taskbar without taking focus.
+Drive Summary shows Windows' total, used, free, reserved and pool-unavailable bytes. Folder sizes are shown separately as logical file lengths. Start with --minimized to open on the taskbar without taking focus.
 
 The **Biggest Files** card below it lists the largest individual files. It uses the same fast NTFS path when elevated.
 

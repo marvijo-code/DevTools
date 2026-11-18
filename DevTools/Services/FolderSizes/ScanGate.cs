@@ -7,14 +7,18 @@ namespace DevTools.Services.FolderSizes;
 public static class ScanGate
 {
     private static readonly ManualResetEventSlim Open = new(true);
+    private static readonly object Sync = new();
     private static int _pauses;
 
     /// <summary>Pauses background scans until the returned handle is disposed.</summary>
     public static IDisposable Pause()
     {
-        if (Interlocked.Increment(ref _pauses) == 1)
+        lock (Sync)
         {
-            Open.Reset();
+            if (++_pauses == 1)
+            {
+                Open.Reset();
+            }
         }
 
         return new Releaser();
@@ -32,9 +36,17 @@ public static class ScanGate
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref _released, 1) == 0 && Interlocked.Decrement(ref _pauses) == 0)
+            if (Interlocked.Exchange(ref _released, 1) != 0)
             {
-                Open.Set();
+                return;
+            }
+
+            lock (Sync)
+            {
+                if (--_pauses == 0)
+                {
+                    Open.Set();
+                }
             }
         }
     }

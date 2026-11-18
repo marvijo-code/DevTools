@@ -1128,16 +1128,16 @@ public sealed partial class MainPage : Page
         KillProcessesContentPane.Visibility = isKillVisible ? Visibility.Visible : Visibility.Collapsed;
         WorkflowContentPane.Visibility = isWorkflowVisible ? Visibility.Visible : Visibility.Collapsed;
         DiskContentPane.Visibility = isDiskVisible ? Visibility.Visible : Visibility.Collapsed;
-        ResourcesContentPane.Visibility = isResourcesVisible ? Visibility.Visible : Visibility.Collapsed;
-        OpenWorkContentPane.Visibility = isOpenWorkVisible ? Visibility.Visible : Visibility.Collapsed;
-        WorktreesContentPane.Visibility = isWorktreesVisible ? Visibility.Visible : Visibility.Collapsed;
+        SetDeferredPaneVisibility(ResourcesContentPane, nameof(ResourcesContentPane), isResourcesVisible);
+        SetDeferredPaneVisibility(OpenWorkContentPane, nameof(OpenWorkContentPane), isOpenWorkVisible);
+        SetDeferredPaneVisibility(WorktreesContentPane, nameof(WorktreesContentPane), isWorktreesVisible);
 
         RunDetailsBorder.Visibility = Visibility.Visible;
         Grid.SetColumnSpan(MainContentBorder, 1);
         DetailsScroll.Visibility = isWorkflowVisible ? Visibility.Visible : Visibility.Collapsed;
         ProcessDetailsScroll.Visibility = isKillVisible ? Visibility.Visible : Visibility.Collapsed;
         StorageOverviewScroll.Visibility = isDiskVisible ? Visibility.Visible : Visibility.Collapsed;
-        SystemOverviewScroll.Visibility = isResourcesVisible ? Visibility.Visible : Visibility.Collapsed;
+        SetDeferredPaneVisibility(SystemOverviewScroll, nameof(SystemOverviewScroll), isResourcesVisible);
         RunStatusBadge.Visibility = isWorkflowVisible && ViewModel.HasSelectedRun ? Visibility.Visible : Visibility.Collapsed;
 
         ApplyTabButtonState(ResourcesNavigationButton, isResourcesVisible);
@@ -1146,6 +1146,19 @@ public sealed partial class MainPage : Page
         ApplyTabButtonState(StorageNavigationButton, isDiskVisible);
         ApplyTabButtonState(OpenWorkNavigationButton, isOpenWorkVisible);
         ApplyTabButtonState(WorktreesNavigationButton, isWorktreesVisible);
+    }
+
+    private void SetDeferredPaneVisibility(FrameworkElement? pane, string name, bool visible)
+    {
+        if (pane is null && visible)
+        {
+            pane = (FrameworkElement)FindName(name);
+        }
+
+        if (pane is not null)
+        {
+            pane.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 
     private static void ApplyTabButtonState(Button button, bool isActive)

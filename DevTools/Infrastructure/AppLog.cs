@@ -8,10 +8,12 @@ namespace DevTools.Infrastructure;
 public static class AppLog
 {
     private const int BatchSize = 64;
-    private static readonly string SessionFileName = $"session-{DateTime.Now:yyyyMMdd-HHmmss-fff}-{Environment.ProcessId}.log";
+    private static readonly DateTime SessionStartUtc = DateTime.UtcNow;
+    private static readonly Lazy<string> SessionFileName = new(static () =>
+        $"session-{SessionStartUtc.ToLocalTime():yyyyMMdd-HHmmss-fff}-{Environment.ProcessId}.log");
     private static readonly string LocalLogDirectory = Path.Combine(AppContext.BaseDirectory, "logs");
     private static readonly TaskCompletionSource<string?> LogDirectoryReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private static readonly Channel<string> Pending = Channel.CreateBounded<string>(new BoundedChannelOptions(1024)
+    private static readonly Channel<LogEntry> Pending = Channel.CreateBounded<LogEntry>(new BoundedChannelOptions(1024)
     {
         SingleReader = true
     });
@@ -31,7 +33,7 @@ public static class AppLog
 
     public static string LogDirectory => Volatile.Read(ref _currentLogDirectory) ?? LocalLogDirectory;
 
-    public static string CurrentLogPath => Path.Combine(LogDirectory, SessionFileName);
+    public static string CurrentLogPath => Path.Combine(LogDirectory, SessionFileName.Value);
 
     internal static Task<string?> GetLogDirectoryAsync() => LogDirectoryReady.Task;
 
@@ -53,26 +55,17 @@ public static class AppLog
 
     private static void Write(string level, string message)
     {
-        var line = FormatLine(level, message);
-        if (!Pending.Writer.TryWrite(line))
+        var entry = new LogEntry(DateTime.UtcNow, level, message);
+        if (!Pending.Writer.TryWrite(entry))
         {
             Interlocked.Increment(ref _droppedEntries);
         }
 
-        Debug.Write(line);
+        Debug.Write(FormatLine(entry));
     }
 
-    private static string FormatLine(string level, string message) =>
-        new StringBuilder()
-            .Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"))
-            .Append(" [")
-            .Append(level)
-            .Append("] [pid:")
-            .Append(Environment.ProcessId)
-            .Append("] ")
-            .Append(message)
-            .AppendLine()
-            .ToString();
+    private static string FormatLine(LogEntry entry) =>
+        $"{entry.TimestampUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss.fff} [{entry.Level}] [pid:{Environment.ProcessId}] {entry.Message}{Environment.NewLine}";
 
     private static async Task WritePendingAsync()
     {
@@ -96,15 +89,15 @@ public static class AppLog
             LogDirectoryReady.TrySetResult(directory);
             while (await Pending.Reader.WaitToReadAsync().ConfigureAwait(false))
             {
-                for (var count = 0; count < BatchSize && Pending.Reader.TryRead(out var line); count++)
+                for (var count = 0; count < BatchSize && Pending.Reader.TryRead(out var entry); count++)
                 {
-                    log.Write(line);
+                    log.Write(FormatLine(entry));
                 }
 
                 var dropped = Interlocked.Exchange(ref _droppedEntries, 0);
                 if (dropped > 0)
                 {
-                    log.Write(FormatLine("WARN", $"Skipped {dropped:N0} entries because the log queue was full."));
+                    log.Write(FormatLine(new LogEntry(DateTime.UtcNow, "WARN", $"Skipped {dropped:N0} entries because the log queue was full.")));
                 }
 
                 await log.FlushAsync().ConfigureAwait(false);
@@ -126,7 +119,7 @@ public static class AppLog
         try
         {
             Directory.CreateDirectory(directory);
-            var path = Path.Combine(directory, SessionFileName);
+            var path = Path.Combine(directory, SessionFileName.Value);
             return new StreamWriter(new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read | FileShare.Delete,
                 4096, FileOptions.Asynchronous), Encoding.UTF8);
         }
@@ -136,4 +129,6 @@ public static class AppLog
             return null;
         }
     }
+
+    private readonly record struct LogEntry(DateTime TimestampUtc, string Level, string Message);
 }

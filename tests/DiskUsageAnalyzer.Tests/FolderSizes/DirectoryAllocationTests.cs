@@ -80,6 +80,47 @@ public sealed class DirectoryAllocationTests
     }
 
     [Fact]
+    public async Task Walker_AccountsForNamedFileAndDirectoryStreamsWithoutCountingHardLinksTwice()
+    {
+        var root = Directory.CreateTempSubdirectory("devtools-streams-");
+        try
+        {
+            var source = root.CreateSubdirectory("source");
+            var duplicate = root.CreateSubdirectory("duplicate");
+            var path = Path.Combine(source.FullName, "named-only.bin");
+            using (File.Create(path))
+            {
+            }
+
+            var bytes = new byte[64 * 1024];
+            new Random(89).NextBytes(bytes);
+            foreach (var suffix in new[] { ":payload", ":" + new string('a', 240), ":" + new string('b', 240) })
+            {
+                WriteNamedStream(path + suffix, bytes);
+            }
+
+            WriteNamedStream(source.FullName + ":folder-payload", bytes);
+            Assert.True(CreateHardLink(Path.Combine(duplicate.FullName, "linked.bin"), path, IntPtr.Zero));
+            var withDefaultStream = Path.Combine(source.FullName, "with-default.bin");
+            await File.WriteAllBytesAsync(withDefaultStream, bytes);
+            WriteNamedStream(withDefaultStream + ":payload", bytes);
+
+            Assert.True(GetDiskFreeSpace(root.Root.FullName, out var sectorsPerCluster, out var bytesPerSector, out _, out _));
+            var clusterBytes = (long)sectorsPerCluster * bytesPerSector;
+            var allocationPerStream = (1 + (bytes.Length - 1) / clusterBytes) * clusterBytes;
+            var tree = await new ParallelFolderWalker().ScanAsync(root.FullName, null, CancellationToken.None, workerCount: 2);
+            var node = tree.Find(root.FullName);
+            Assert.Equal(bytes.Length, tree.GetTotalBytes(node));
+            Assert.Equal(3, tree.GetFileCount(node));
+            Assert.Equal(allocationPerStream * 6, tree.GetAllocatedBytes(node));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Walker_CanReadAnNtfsFolderByVolumeGuidAndCleanupRemainsDisabled()
     {
         var fixture = Directory.CreateTempSubdirectory("devtools-volume-guid-");
@@ -122,13 +163,29 @@ public sealed class DirectoryAllocationTests
             ((UInt128)1 << 64) | ((42UL << 48) | 9),
             (42UL << 48) | 200
         };
-        var results = new long[4096];
-        Parallel.For(0, results.Length, i => results[i] = index.Claim(ids[i % ids.Length], 4096));
+        var results = new bool[4096];
+        Parallel.For(0, results.Length, i => results[i] = index.TryClaim(ids[i % ids.Length]));
 
-        Assert.Equal(ids.Length * 4096L, results.Sum());
-        Assert.All(ids, id => Assert.Equal(0, index.Claim(id, 4096)));
-        Assert.Equal(0, index.Claim(0, 4096));
+        Assert.Equal(ids.Length, results.Count(result => result));
+        Assert.All(ids, id => Assert.False(index.TryClaim(id)));
+        Assert.False(index.TryClaim(0));
     }
+
+    private static void WriteNamedStream(string path, byte[] bytes)
+    {
+        using var stream = CreateFile(path, 0x40000000, 7, IntPtr.Zero, 2, 0, IntPtr.Zero);
+        Assert.False(stream.IsInvalid, $"Could not create the fixture stream. Windows error {Marshal.GetLastWin32Error()}.");
+        RandomAccess.Write(stream, bytes, 0);
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetDiskFreeSpaceW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetDiskFreeSpace(string root, out uint sectorsPerCluster, out uint bytesPerSector,
+        out uint freeClusters, out uint totalClusters);
 
     [DllImport("kernel32.dll", EntryPoint = "GetCompressedFileSizeW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint GetCompressedFileSize(string path, out uint high);

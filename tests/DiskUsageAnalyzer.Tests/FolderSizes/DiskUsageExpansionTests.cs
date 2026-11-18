@@ -180,6 +180,131 @@ public sealed class DiskUsageExpansionTests
     }
 
     [Fact]
+    public async Task ConcurrentFolderRequests_ShareAllocationWalkAndCancelIndependently()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-shared-walk-");
+        using var priorityCancellation = new CancellationTokenSource();
+        var result = new TaskCompletionSource<FolderTree>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var walkToken = CancellationToken.None;
+        var analyzer = new DevTools.Services.DiskUsageAnalyzer((_, token, measureAllocation) =>
+        {
+            calls++;
+            Assert.True(measureAllocation);
+            walkToken = token;
+            return result.Task.WaitAsync(token);
+        });
+
+        try
+        {
+            var priority = analyzer.SizeFolderNowAsync(fixture.FullName, priorityCancellation.Token, measureAllocation: true);
+            var measurement = analyzer.MeasureDirectoryBytesAsync(fixture.FullName + Path.DirectorySeparatorChar,
+                CancellationToken.None);
+            var entry = DiskUsageEntry.CreateCompleted(fixture.FullName, true, 73, "73 B");
+            var expansion = analyzer.ExpandEntryAsync(entry, CancellationToken.None);
+            Assert.Equal(1, calls);
+
+            priorityCancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => priority.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.False(walkToken.IsCancellationRequested);
+
+            var childPath = Path.Combine(fixture.FullName, "child");
+            var builder = new FolderTreeBuilder(fixture.Root.FullName, trackAllocation: true);
+            builder.AddFilesToFolder(builder.AddFolder(childPath), 73, 1, 4096);
+            result.SetResult(builder.Build("Fixture", TimeSpan.Zero));
+
+            Assert.Equal(73, await measurement.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(childPath, Assert.Single(await expansion.WaitAsync(TimeSpan.FromSeconds(5))).Path);
+            Assert.Equal(1, calls);
+        }
+        finally
+        {
+            result.TrySetCanceled();
+            fixture.Delete();
+        }
+    }
+
+    [Fact]
+    public async Task CancelingLastRequest_CancelsTheWalkAndAllowsRetry()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-shared-walk-retry-");
+        using var cancellation = new CancellationTokenSource();
+        var pending = new TaskCompletionSource<FolderTree>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var builder = new FolderTreeBuilder(fixture.Root.FullName);
+        builder.AddFolder(fixture.FullName);
+        var completed = builder.Build("Fixture", TimeSpan.Zero);
+        var calls = 0;
+        var walkToken = CancellationToken.None;
+        var analyzer = new DevTools.Services.DiskUsageAnalyzer((_, token, _) =>
+        {
+            if (++calls == 1)
+            {
+                walkToken = token;
+                return pending.Task.WaitAsync(token);
+            }
+
+            return Task.FromResult(completed);
+        });
+
+        try
+        {
+            var first = analyzer.SizeFolderNowAsync(fixture.FullName, cancellation.Token);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(walkToken.IsCancellationRequested);
+            Assert.False(analyzer.TryFindNode(fixture.FullName, out _, out _));
+
+            Assert.True(await analyzer.SizeFolderNowAsync(fixture.FullName, CancellationToken.None));
+            Assert.Equal(2, calls);
+            Assert.True(analyzer.TryFindNode(fixture.FullName, out var tree, out _));
+            Assert.Same(completed, tree);
+        }
+        finally
+        {
+            pending.TrySetCanceled();
+            fixture.Delete();
+        }
+    }
+
+    [Fact]
+    public async Task ReplacingVolumeInventory_DiscardsInFlightResultsFromTheOldVolume()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-shared-walk-refresh-");
+        var previous = new TaskCompletionSource<FolderTree>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var current = new TaskCompletionSource<FolderTree>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var analyzer = new DevTools.Services.DiskUsageAnalyzer((_, _, _) =>
+            ++calls == 1 ? previous.Task : current.Task);
+        try
+        {
+            var first = analyzer.SizeFolderNowAsync(fixture.FullName, CancellationToken.None);
+            var drive = new DriveDescriptor(fixture.Root.FullName, "Fixture", "NTFS", null);
+            analyzer.ReplaceVolumeInventory([drive], []);
+            var next = analyzer.SizeFolderNowAsync(fixture.FullName, CancellationToken.None);
+            Assert.Equal(2, calls);
+
+            var oldTree = new FolderTreeBuilder(fixture.Root.FullName);
+            oldTree.AddFolder(fixture.FullName, knownTotalBytes: 73);
+            previous.SetResult(oldTree.Build("Fixture", TimeSpan.Zero));
+            Assert.False(await first.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.False(analyzer.TryFindNode(fixture.FullName, out _, out _));
+
+            var newTree = new FolderTreeBuilder(fixture.Root.FullName);
+            newTree.AddFolder(fixture.FullName, knownTotalBytes: 149);
+            current.SetResult(newTree.Build("Fixture", TimeSpan.Zero));
+            Assert.True(await next.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.True(analyzer.TryFindNode(fixture.FullName, out var found, out var node));
+            Assert.Equal(149, found!.GetTotalBytes(node));
+        }
+        finally
+        {
+            previous.TrySetCanceled();
+            current.TrySetCanceled();
+            fixture.Delete();
+        }
+    }
+
+    [Fact]
     public void SetChildren_MarksChildrenAsLoadedSoExpansionIsNotRepeated()
     {
         var entry = DiskUsageEntry.CreateCompleted(@"C:\Users", true, 100, "100 B");

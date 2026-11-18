@@ -138,6 +138,27 @@ public sealed class FolderTreeTests
     }
 
     [Fact]
+    public void DirectTotals_IncludeTheRemainderAfterWideContiguousChildRanges()
+    {
+        var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);
+        var container = builder.AddChildFolder(0, "container");
+        var children = Enumerable.Range(0, 1027).Select(index => $"folder-{index:D4}").ToList();
+        var first = builder.AppendEnumeratedChildren(container, children);
+        for (var index = 0; index < children.Count; index++)
+        {
+            builder.AddFilesToFolder(first + index, index + 1, 1, ((index % 16) + 1) * 4096L);
+        }
+
+        builder.AddFilesToFolder(container, 23, 2, 4096);
+        var tree = builder.Build("Fixture", TimeSpan.Zero);
+
+        Assert.Equal((23L, 2L), tree.GetDirectFileStatistics(container));
+        Assert.Equal(4096, tree.GetDirectAllocatedBytes(container));
+        Assert.Equal((1027L, 1L), tree.GetDirectFileStatistics(first + 1026));
+        Assert.Equal(12288, tree.GetDirectAllocatedBytes(first + 1026));
+    }
+
+    [Fact]
     public void Tree_IndexesChildrenWhenTheirNodeNumbersAreInterleaved()
     {
         var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);

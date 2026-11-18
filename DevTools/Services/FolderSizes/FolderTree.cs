@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Concurrent;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DevTools.Services.BiggestFiles.Ntfs;
@@ -83,24 +84,21 @@ public sealed class FolderTree
         // Counting sort by parent when the caller has not already grouped each parent's children.
         _childStart = new int[count + 1];
         var previousParent = 0;
-        var grouped = true;
-        for (var i = 1; i < count; i++)
+        var firstInterleaved = 1;
+        for (; firstInterleaved < count; firstInterleaved++)
         {
-            var p = parent[i];
-            if (p >= 0 && p < count && p != i)
+            var p = parent[firstInterleaved];
+            if (p < previousParent || p >= count || p == firstInterleaved)
             {
-                _childStart[p]++;
-                grouped &= p >= previousParent;
-                previousParent = p;
+                break;
             }
-            else
-            {
-                grouped = false;
-            }
+
+            _childStart[p]++;
+            previousParent = p;
         }
 
         var childCount = 0;
-        if (grouped)
+        if (firstInterleaved == count)
         {
             for (var i = 0; i < count; i++)
             {
@@ -111,6 +109,15 @@ public sealed class FolderTree
 
             _childStart[count] = childCount;
             return;
+        }
+
+        for (var i = firstInterleaved; i < count; i++)
+        {
+            var p = parent[i];
+            if (p >= 0 && p < count && p != i)
+            {
+                _childStart[p]++;
+            }
         }
 
         for (var i = 0; i < count; i++)
@@ -178,13 +185,22 @@ public sealed class FolderTree
 
     internal (long Bytes, long FileCount) GetDirectFileStatistics(int node)
     {
+        var start = _childStart[node];
+        var count = _childStart[node + 1] - start;
         var bytes = _totalBytes[node];
         var files = _fileCount[node];
-        for (var i = _childStart[node]; i < _childStart[node + 1]; i++)
+        if (_childIndex is null)
         {
-            var child = GetChildAt(i);
-            bytes -= _totalBytes[child];
-            files -= _fileCount[child];
+            bytes -= SumContiguousChildren(_totalBytes.AsSpan(start + 1, count));
+            files -= SumContiguousChildren(_fileCount.AsSpan(start + 1, count));
+        }
+        else
+        {
+            foreach (var child in _childIndex.AsSpan(start, count))
+            {
+                bytes -= _totalBytes[child];
+                files -= _fileCount[child];
+            }
         }
 
         return (Math.Max(0, bytes), Math.Max(0, files));
@@ -195,13 +211,46 @@ public sealed class FolderTree
 
     private long GetDirectChildRemainder(int node, long[] totals)
     {
+        var start = _childStart[node];
+        var count = _childStart[node + 1] - start;
         var total = totals[node];
-        for (var i = _childStart[node]; i < _childStart[node + 1]; i++)
+        if (_childIndex is null)
         {
-            total -= totals[GetChildAt(i)];
+            total -= SumContiguousChildren(totals.AsSpan(start + 1, count));
+        }
+        else
+        {
+            foreach (var child in _childIndex.AsSpan(start, count))
+            {
+                total -= totals[child];
+            }
         }
 
         return Math.Max(0, total);
+    }
+
+    private static long SumContiguousChildren(ReadOnlySpan<long> sizes)
+    {
+        long total = 0;
+        if (Vector.IsHardwareAccelerated && sizes.Length >= 4 * Vector<long>.Count)
+        {
+            var vectors = MemoryMarshal.Cast<long, Vector<long>>(sizes);
+            var sums = Vector<long>.Zero;
+            foreach (var vector in vectors)
+            {
+                sums += vector;
+            }
+
+            total = Vector.Sum(sums);
+            sizes = sizes[(vectors.Length * Vector<long>.Count)..];
+        }
+
+        foreach (var size in sizes)
+        {
+            total += size;
+        }
+
+        return total;
     }
 
     /// <summary>Child folders of <paramref name="node"/>, largest first.</summary>
@@ -233,35 +282,37 @@ public sealed class FolderTree
 
             var worst = heap[0];
             var cutoff = sizes[worst];
+            var end = start + count;
             if (_childIndex is { } indexes)
             {
-                foreach (var child in indexes.AsSpan(start + max, count - max))
+                for (var slot = start + max; slot < end; slot++)
                 {
-                    Consider(child);
+                    var child = indexes[slot];
+                    var size = sizes[child];
+                    if (size > cutoff || (size == cutoff && CompareChildNames(child, worst) < 0))
+                    {
+                        SiftWorstDown(heap, 0, child, sizes);
+                        worst = heap[0];
+                        cutoff = sizes[worst];
+                    }
                 }
             }
             else
             {
-                for (var child = start + max + 1; child <= start + count; child++)
+                for (var child = start + max + 1; child <= end; child++)
                 {
-                    Consider(child);
+                    var size = sizes[child];
+                    if (size > cutoff || (size == cutoff && CompareChildNames(child, worst) < 0))
+                    {
+                        SiftWorstDown(heap, 0, child, sizes);
+                        worst = heap[0];
+                        cutoff = sizes[worst];
+                    }
                 }
             }
 
             SortChildren(heap, sizes);
             return heap;
-
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            void Consider(int child)
-            {
-                var size = sizes[child];
-                if (size > cutoff || (size == cutoff && CompareChildNames(child, worst) < 0))
-                {
-                    SiftWorstDown(heap, 0, child, sizes);
-                    worst = heap[0];
-                    cutoff = sizes[worst];
-                }
-            }
         }
 
         var children = new int[count];
@@ -270,8 +321,6 @@ public sealed class FolderTree
         return count <= max ? children : children[..max];
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int GetChildAt(int slot) => _childIndex is null ? slot + 1 : _childIndex[slot];
 
     private void CopyChildRange(int start, Span<int> destination)
     {

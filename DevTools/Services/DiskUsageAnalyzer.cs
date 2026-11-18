@@ -659,12 +659,15 @@ public sealed class DiskUsageAnalyzer
             return $"{total} Partition ranges are unavailable.";
         }
 
-        var partitionRemainder = disk.MatchedPartitionBytes - disk.FileSystemBytes;
-        var unmatched = partitioned - disk.MatchedPartitionBytes;
+        var matchedRemainder = disk.MatchedExtentBytes - disk.FileSystemBytes;
+        var otherVolumeExtents = disk.VolumeExtentBytes - disk.MatchedExtentBytes;
+        var otherPartitions = partitioned - disk.VolumeExtentBytes;
         var outside = disk.TotalBytes - partitioned;
+        var otherExtentNote = otherVolumeExtents > 0 ? $"{otherVolumeExtents:N0} in other volume extents, " : string.Empty;
         return $"{total} {disk.FileSystemBytes:N0} bytes in matched filesystem capacities, " +
-            $"{partitionRemainder:N0} inside matched partitions beyond their filesystem capacities, " +
-            $"{unmatched:N0} in other partition ranges and {outside:N0} outside partition ranges.";
+            $"{matchedRemainder:N0} inside matched volume extents beyond their filesystem capacities, " +
+            otherExtentNote +
+            $"{otherPartitions:N0} in other partition ranges and {outside:N0} outside partition ranges.";
     }
 
     private static string DescribeIncompleteFolderScan(FolderTree? tree) =>

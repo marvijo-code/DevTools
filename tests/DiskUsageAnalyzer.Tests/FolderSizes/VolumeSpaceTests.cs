@@ -364,16 +364,16 @@ public sealed class VolumeSpaceTests
             new VolumeDiskExtent(1, otherPartition, 90)
         ]);
 
-        Assert.Equal(new DiskCapacity(0, 900, 600, 300, 280), capacity);
+        Assert.Equal(new DiskCapacity(0, 900, 600, 300, 300, 280), capacity);
         var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
         Assert.Contains("Disk 0 has 900 bytes.", summary.Summary);
         Assert.Contains("280 bytes in matched filesystem capacities", summary.Summary);
-        Assert.Contains("20 inside matched partitions beyond their filesystem capacities", summary.Summary);
+        Assert.Contains("20 inside matched volume extents beyond their filesystem capacities", summary.Summary);
         Assert.Contains("300 in other partition ranges and 300 outside partition ranges.", summary.Summary);
     }
 
     [Fact]
-    public void PhysicalDiskCapacity_OmitsAmbiguousVolumeMappings()
+    public void PhysicalDiskCapacity_CountsOverlappingExtentsOnceAndOmitsAmbiguousFilesystemMappings()
     {
         var partitions = new HashSet<DiskRange> { new(100, 500), new(200, 300) };
         var extents = new VolumeDiskExtent[]
@@ -382,7 +382,36 @@ public sealed class VolumeSpaceTests
             new(0, new DiskRange(200, 300), 290)
         };
 
-        Assert.Equal(new DiskCapacity(0, 900, 500, 0, 0), DiskCapacityInventory.Reconcile(0, 900, partitions, extents));
+        Assert.Equal(new DiskCapacity(0, 900, 500, 500, 0, 0), DiskCapacityInventory.Reconcile(0, 900, partitions, extents));
+    }
+
+    [Fact]
+    public void DriveSummary_AccountsForVolumeExtentsWithoutSplittingTheirFilesystemCapacity()
+    {
+        var capacity = DiskCapacityInventory.Reconcile(0, 1000, [new DiskRange(50, 800)],
+        [
+            new VolumeDiskExtent(0, new DiskRange(100, 100), 80),
+            new VolumeDiskExtent(0, new DiskRange(250, 200), null),
+            new VolumeDiskExtent(0, new DiskRange(500, 100), null),
+            new VolumeDiskExtent(1, new DiskRange(300, 400), null),
+            new VolumeDiskExtent(0, new DiskRange(900, 50), null)
+        ]);
+
+        Assert.Equal(new DiskCapacity(0, 1000, 800, 400, 100, 80), capacity);
+        var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
+        Assert.Contains("80 bytes in matched filesystem capacities", summary.Summary);
+        Assert.Contains("20 inside matched volume extents beyond their filesystem capacities", summary.Summary);
+        Assert.Contains("300 in other volume extents, 400 in other partition ranges and 200 outside partition ranges.", summary.Summary);
+    }
+
+    [Fact]
+    public void SingleBackingDisk_RequiresEveryExtentToBeOnTheSameDisk()
+    {
+        Assert.Equal(3, DiskCapacityInventory.GetSingleBackingDisk([
+            (3, new DiskRange(10, 20)), (3, new DiskRange(50, 20))]));
+        Assert.Null(DiskCapacityInventory.GetSingleBackingDisk([
+            (3, new DiskRange(10, 20)), (7, new DiskRange(50, 20))]));
+        Assert.Null(DiskCapacityInventory.GetSingleBackingDisk([]));
     }
 
     [Fact]

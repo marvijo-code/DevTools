@@ -12,10 +12,10 @@ internal readonly record struct DiskRange(long Start, long Length)
     internal bool FitsInside(long capacity) => Start >= 0 && Start <= capacity && Length > 0 && Length <= capacity - Start;
 }
 
-internal readonly record struct VolumeDiskExtent(int DiskNumber, DiskRange Range, long FileSystemBytes);
+internal readonly record struct VolumeDiskExtent(int DiskNumber, DiskRange Range, long? FileSystemBytes);
 
 internal readonly record struct DiskCapacity(
-    int DiskNumber, long TotalBytes, long? PartitionedBytes, long MatchedPartitionBytes, long FileSystemBytes);
+    int DiskNumber, long TotalBytes, long? PartitionedBytes, long VolumeExtentBytes, long MatchedExtentBytes, long FileSystemBytes);
 
 /// <summary>Reconciles disk geometry, partition ranges and filesystem capacities without opening disk data.</summary>
 internal static class DiskCapacityInventory
@@ -51,14 +51,13 @@ internal static class DiskCapacityInventory
 
             using var handle = OpenMetadata(device);
             var volumeExtents = ReadVolumeExtents(handle, ref buffer);
-            if (volumeExtents.Length == 1)
+            backingDisks[index] = GetSingleBackingDisk(volumeExtents);
+            long? fileSystemBytes = volumeExtents.Length == 1 && volume.Space is { IsVolumeWide: true, TotalBytes: > 0 } space
+                ? space.TotalBytes
+                : null;
+            foreach (var (disk, range) in volumeExtents)
             {
-                var (disk, range) = volumeExtents[0];
-                backingDisks[index] = disk;
-                if (volume.Space is { IsVolumeWide: true, TotalBytes: > 0 } space)
-                {
-                    extents.Add(new VolumeDiskExtent(disk, range, space.TotalBytes));
-                }
+                extents.Add(new VolumeDiskExtent(disk, range, fileSystemBytes));
             }
         }
 
@@ -82,11 +81,30 @@ internal static class DiskCapacityInventory
             var bytes = Query(handle, GetDriveLayout, ref buffer);
             var ranges = ReadPartitionRanges(buffer.AsSpan(0, bytes), total);
             disks.Add(ranges is null
-                ? new DiskCapacity(disk, total, null, 0, 0)
+                ? new DiskCapacity(disk, total, null, 0, 0, 0)
                 : Reconcile(disk, total, ranges, extents));
         }
 
         return disks;
+    }
+
+    internal static int? GetSingleBackingDisk(ReadOnlySpan<(int DiskNumber, DiskRange Range)> extents)
+    {
+        if (extents.IsEmpty)
+        {
+            return null;
+        }
+
+        var disk = extents[0].DiskNumber;
+        foreach (var extent in extents[1..])
+        {
+            if (extent.DiskNumber != disk)
+            {
+                return null;
+            }
+        }
+
+        return disk;
     }
 
     internal static (int DiskNumber, DiskRange Range)[] ReadVolumeExtents(SafeFileHandle volume, ref byte[] buffer)
@@ -171,40 +189,75 @@ internal static class DiskCapacityInventory
 
     internal static DiskCapacity Reconcile(int disk, long total, HashSet<DiskRange> partitions, IReadOnlyList<VolumeDiskExtent> extents)
     {
-        // MBR extended partitions can cover logical partitions. Count the union of their ranges.
-        long partitioned = 0;
-        long lastEnd = 0;
-        foreach (var range in partitions.OrderBy(range => range.Start))
-        {
-            partitioned += Math.Max(0, range.End - Math.Max(lastEnd, range.Start));
-            lastEnd = Math.Max(lastEnd, range.End);
-        }
-
-        long mappedBytes = 0;
-        long fileSystemBytes = 0;
-        lastEnd = 0;
-        var matched = extents
-            .Where(volume => volume.DiskNumber == disk &&
-                volume.FileSystemBytes > 0 && volume.FileSystemBytes <= volume.Range.Length &&
-                partitions.Contains(volume.Range))
-            .GroupBy(volume => volume.Range)
-            .OrderBy(group => group.Key.Start);
-        foreach (var group in matched)
+        var partitionRanges = MergePartitionRanges(partitions);
+        var partitioned = partitionRanges.Sum(range => range.Length);
+        var containedExtents = new List<IGrouping<DiskRange, VolumeDiskExtent>>();
+        var partitionIndex = 0;
+        var byRange = extents.Where(extent => extent.DiskNumber == disk && extent.Range.FitsInside(total))
+            .GroupBy(extent => extent.Range).OrderBy(group => group.Key.Start);
+        foreach (var group in byRange)
         {
             var range = group.Key;
-            var first = group.First();
-            if (range.Start < lastEnd || group.Any(volume => volume.FileSystemBytes != first.FileSystemBytes))
+            while (partitionIndex < partitionRanges.Count && partitionRanges[partitionIndex].End <= range.Start)
             {
-                // Conflicting mappings cannot be used to explain the physical bytes.
-                return new DiskCapacity(disk, total, partitioned, 0, 0);
+                partitionIndex++;
             }
 
-            mappedBytes += range.Length;
-            fileSystemBytes += first.FileSystemBytes;
-            lastEnd = range.End;
+            if (partitionIndex == partitionRanges.Count)
+            {
+                break;
+            }
+
+            var partition = partitionRanges[partitionIndex];
+            if (range.Start >= partition.Start && range.End <= partition.End)
+            {
+                containedExtents.Add(group);
+            }
         }
 
-        return new DiskCapacity(disk, total, partitioned, mappedBytes, fileSystemBytes);
+        long volumeExtentBytes = 0;
+        long matchedExtentBytes = 0;
+        long fileSystemBytes = 0;
+        long lastEnd = 0;
+        for (var index = 0; index < containedExtents.Count; index++)
+        {
+            var group = containedExtents[index];
+            var range = group.Key;
+            var overlapsAnother = range.Start < lastEnd ||
+                (index + 1 < containedExtents.Count && containedExtents[index + 1].Key.Start < range.End);
+            volumeExtentBytes += Math.Max(0, range.End - Math.Max(lastEnd, range.Start));
+            lastEnd = Math.Max(lastEnd, range.End);
+
+            // Physical ranges can be counted once even when a filesystem mapping is ambiguous.
+            if (!overlapsAnother && group.First().FileSystemBytes is long bytes && bytes > 0 && bytes <= range.Length &&
+                group.All(extent => extent.FileSystemBytes == bytes))
+            {
+                matchedExtentBytes += range.Length;
+                fileSystemBytes += bytes;
+            }
+        }
+
+        return new DiskCapacity(disk, total, partitioned, volumeExtentBytes, matchedExtentBytes, fileSystemBytes);
+    }
+
+    private static List<DiskRange> MergePartitionRanges(IEnumerable<DiskRange> partitions)
+    {
+        // MBR extended partitions can cover logical partitions. Adjacent ranges also have no gap.
+        var merged = new List<DiskRange>();
+        foreach (var range in partitions.OrderBy(range => range.Start))
+        {
+            if (merged.Count > 0 && range.Start <= merged[^1].End)
+            {
+                var previous = merged[^1];
+                merged[^1] = new DiskRange(previous.Start, Math.Max(previous.End, range.End) - previous.Start);
+            }
+            else
+            {
+                merged.Add(range);
+            }
+        }
+
+        return merged;
     }
 
     private static IEnumerable<int> ReadDiskNumbers()

@@ -51,6 +51,8 @@
     <Compile Include="..\..\DevTools\Services\FolderSizes\FolderSizeEngine.cs" Link="Services\FolderSizes\FolderSizeEngine.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\MftFolderSizeScanner.cs" Link="Services\FolderSizes\MftFolderSizeScanner.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\FolderTree.cs" Link="Services\FolderSizes\FolderTree.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\DirectoryAllocationReader.cs" Link="Services\FolderSizes\DirectoryAllocationReader.cs" />
+    <Compile Include="..\..\DevTools\Services\Resources\NativeResourceApi.cs" Link="Services\Resources\NativeResourceApi.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\ParallelFolderWalker.cs" Link="Services\FolderSizes\ParallelFolderWalker.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\ScanGate.cs" Link="Services\FolderSizes\ScanGate.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\DriveUsageService.cs" Link="Services\FolderSizes\DriveUsageService.cs" />    <Compile Include="..\..\DevTools\Models\ResourceSample.cs" Link="Models\ResourceSample.cs" />

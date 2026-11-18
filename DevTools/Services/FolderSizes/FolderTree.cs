@@ -11,6 +11,7 @@ public sealed class FolderTree
     private readonly string[] _names;
     private readonly long[] _totalBytes;
     private readonly long[] _fileCount;
+    private readonly long[]? _allocatedBytes;
     private readonly int[] _childStart;
     private readonly int[] _childIndex;
 
@@ -21,9 +22,11 @@ public sealed class FolderTree
         long[] totalBytes,
         long[] fileCount,
         string engineName,
-        TimeSpan elapsed)
+        TimeSpan elapsed,
+        long[]? allocatedBytes = null)
     {
-        if (parent.Length == 0 || parent.Length != names.Length || parent.Length != totalBytes.Length || parent.Length != fileCount.Length)
+        if (parent.Length == 0 || parent.Length != names.Length || parent.Length != totalBytes.Length ||
+            parent.Length != fileCount.Length || (allocatedBytes is not null && parent.Length != allocatedBytes.Length))
         {
             throw new ArgumentException("Folder tree arrays must be non-empty and the same length.");
         }
@@ -33,6 +36,7 @@ public sealed class FolderTree
         _names = names;
         _totalBytes = totalBytes;
         _fileCount = fileCount;
+        _allocatedBytes = allocatedBytes;
         EngineName = engineName;
         Elapsed = elapsed;
 
@@ -78,6 +82,7 @@ public sealed class FolderTree
     public long TotalBytes => _totalBytes[0];
 
     public long TotalFiles => _fileCount[0];
+    public long? GetAllocatedBytes(int node) => _allocatedBytes?[node];
 
     public long GetTotalBytes(int node) => _totalBytes[node];
 
@@ -207,13 +212,15 @@ public sealed class FolderTreeBuilder
     private readonly List<long> _ownBytes = [0];
     private readonly List<long> _ownFiles = [0];
     private readonly List<long> _knownTotal = [-1];
+    private readonly List<long>? _ownAllocatedBytes;
     private readonly Dictionary<(int Parent, string Name), int> _lookup = new(new NodeKeyComparer());
     private string? _lastDirectory;
     private int _lastDirectoryNode;
 
-    public FolderTreeBuilder(string rootPath)
+    public FolderTreeBuilder(string rootPath, bool trackAllocation = false)
     {
         _root = FolderTree.NormalizeRoot(rootPath);
+        _ownAllocatedBytes = trackAllocation ? [0] : null;
     }
 
     public long FilesAdded { get; private set; }
@@ -270,10 +277,15 @@ public sealed class FolderTreeBuilder
         return GetOrAddChild(parentNode, name);
     }
 
-    public void AddFilesToFolder(int node, long bytes, long files)
+    public void AddFilesToFolder(int node, long bytes, long files, long allocatedBytes = 0)
     {
         _ownBytes[node] += Math.Max(0, bytes);
         _ownFiles[node] += files;
+        if (_ownAllocatedBytes is not null)
+        {
+            _ownAllocatedBytes[node] += allocatedBytes;
+        }
+
         FilesAdded += files;
     }
 
@@ -284,6 +296,7 @@ public sealed class FolderTreeBuilder
         var totals = new long[count];
         var files = new long[count];
         var known = _knownTotal.ToArray();
+        var allocations = _ownAllocatedBytes?.ToArray();
         for (var i = 0; i < count; i++)
         {
             totals[i] = _ownBytes[i];
@@ -301,6 +314,10 @@ public sealed class FolderTreeBuilder
 
             totals[parent[i]] += known[parent[i]] >= 0 ? 0 : totals[i];
             files[parent[i]] += files[i];
+            if (allocations is not null)
+            {
+                allocations[parent[i]] += allocations[i];
+            }
         }
 
         if (known[0] >= 0)
@@ -308,7 +325,7 @@ public sealed class FolderTreeBuilder
             totals[0] = known[0];
         }
 
-        return new FolderTree(_root, parent, _names.ToArray(), totals, files, engineName, elapsed);
+        return new FolderTree(_root, parent, _names.ToArray(), totals, files, engineName, elapsed, allocations);
     }
 
     private int EnsureFolder(string fullPath)
@@ -358,6 +375,7 @@ public sealed class FolderTreeBuilder
         _ownBytes.Add(0);
         _ownFiles.Add(0);
         _knownTotal.Add(-1);
+        _ownAllocatedBytes?.Add(0);
         _lookup[(parentNode, name)] = node;
         return node;
     }

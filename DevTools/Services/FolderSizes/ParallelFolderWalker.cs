@@ -33,7 +33,8 @@ public sealed class ParallelFolderWalker
         var fullRoot = Path.GetFullPath(rootPath);
         var driveRoot = FolderTree.NormalizeRoot(fullRoot);
         var stopwatch = Stopwatch.StartNew();
-        var builder = new FolderTreeBuilder(driveRoot);
+        var allocationIndex = prioritize ? null : DirectoryAllocationIndex.Create(driveRoot);
+        var builder = new FolderTreeBuilder(driveRoot, trackAllocation: allocationIndex is not null);
         var builderLock = new object();
         int startNode;
         lock (builderLock)
@@ -65,6 +66,7 @@ public sealed class ParallelFolderWalker
             {
                 try
                 {
+                    var allocationReader = allocationIndex is null ? null : new DirectoryAllocationReader(allocationIndex);
                     foreach (var (node, path) in queue.GetConsumingEnumerable(cancellationToken))
                     {
                         if (!prioritize)
@@ -74,38 +76,47 @@ public sealed class ParallelFolderWalker
 
                         long bytes = 0;
                         long files = 0;
+                        long allocatedBytes = 0;
                         var subfolders = new List<string>();
-                        try
+                        if (allocationReader is null ||
+                            !allocationReader.TryRead(path, subfolders, cancellationToken, out bytes, out allocatedBytes, out files))
                         {
-                            // A name string is only needed for folders; files just add their length.
-                            var entries = new FileSystemEnumerable<(string? Name, bool IsDirectory, long Length, System.IO.FileAttributes Attributes)>(
-                                path,
-                                (ref FileSystemEntry entry) => (entry.IsDirectory ? entry.FileName.ToString() : null, entry.IsDirectory, entry.Length, entry.Attributes),
-                                options);
-                            foreach (var entry in entries)
+                            // Retry the logical listing if the filesystem cannot return allocation data.
+                            bytes = 0;
+                            files = 0;
+                            subfolders.Clear();
+                            try
                             {
-                                if (entry.IsDirectory)
+                                // A name string is only needed for folders; files just add their length.
+                                var entries = new FileSystemEnumerable<(string? Name, bool IsDirectory, long Length, System.IO.FileAttributes Attributes)>(
+                                    path,
+                                    (ref FileSystemEntry entry) => (entry.IsDirectory ? entry.FileName.ToString() : null, entry.IsDirectory, entry.Length, entry.Attributes),
+                                    options);
+                                foreach (var entry in entries)
                                 {
-                                    if ((entry.Attributes & System.IO.FileAttributes.ReparsePoint) == 0)
+                                    if (entry.IsDirectory)
                                     {
-                                        subfolders.Add(entry.Name!);
+                                        if ((entry.Attributes & System.IO.FileAttributes.ReparsePoint) == 0)
+                                        {
+                                            subfolders.Add(entry.Name!);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        bytes += entry.Length;
+                                        files++;
                                     }
                                 }
-                                else
-                                {
-                                    bytes += entry.Length;
-                                    files++;
-                                }
                             }
-                        }
-                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                        {
+                            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                            {
+                            }
                         }
 
                         var children = new List<(int Node, string Path)>(subfolders.Count);
                         lock (builderLock)
                         {
-                            builder.AddFilesToFolder(node, bytes, files);
+                            builder.AddFilesToFolder(node, bytes, files, allocatedBytes);
                             foreach (var name in subfolders)
                             {
                                 children.Add((builder.AddChildFolder(node, name), Path.Combine(path, name)));

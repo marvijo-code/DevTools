@@ -415,6 +415,15 @@ public sealed class DiskUsageAnalyzer
             var scanNote = result?.Tree is { } tree
                 ? $"Logical file size: {tree.TotalBytes:N0} bytes ({result.EngineName}, {tree.Elapsed.TotalSeconds:F1}s)."
                 : result?.Note ?? "Folder scan pending.";
+            if (space.IsVolumeWide && result?.Tree?.GetAllocatedBytes(0) is long allocatedBytes)
+            {
+                var remainingUsed = space.UsedBytes - allocatedBytes;
+                scanNote += $" {allocatedBytes:N0} bytes of allocation attributed to files.";
+                scanNote += remainingUsed >= 0
+                    ? $" {remainingUsed:N0} used bytes remain unattributed."
+                    : $" File allocation exceeded reported usage by {-remainingUsed:N0} bytes during the scan.";
+            }
+
             var note = $"{totals}. {scanNote}";
             entries.Add(DiskUsageEntry.CreateCompleted(drive.RootPath, true, space.UsedBytes, $"{FormatBytes(space.UsedBytes)} used", note, $"{drive.RootPath} ({label})"));
         }
@@ -464,7 +473,9 @@ public sealed class DiskUsageAnalyzer
             true,
             size,
             FormatBytes(size),
-            $"{tree.GetFileCount(node):N0} files",
+            tree.GetAllocatedBytes(node) is long allocatedBytes
+                ? $"{tree.GetFileCount(node):N0} files, {FormatBytes(allocatedBytes)} attributed allocation"
+                : $"{tree.GetFileCount(node):N0} files",
             ResolveFolderDisplayName(path));
         if (includeGrandchildren && tree.HasChildFolders(node))
         {

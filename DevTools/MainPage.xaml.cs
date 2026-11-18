@@ -17,8 +17,8 @@ public sealed partial class MainPage : Page
 {
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _refreshTimer;
     private Task? _workflowInitialization;
-    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _liveRunTimer;
-    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _resourceTimer;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _liveDisplayTimer;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _resourceTimer;
     private readonly WindowZoomController _windowZoomController;
     private CancellationTokenSource? _selectionCts;
     private bool _isConfirmationDialogOpen;
@@ -33,11 +33,6 @@ public sealed partial class MainPage : Page
         _windowZoomController = new WindowZoomController(RootLayoutGrid);
         RegisterZoomKeyboardAccelerators();
 
-        _liveRunTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
-        _liveRunTimer.Interval = TimeSpan.FromMilliseconds(500);
-        _liveRunTimer.Tick += LiveRunTimer_Tick;
-        _resourceTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
-        _resourceTimer.Tick += ResourceTimer_Tick;
         ApplyActivePaneState();
         RootLayoutGrid.KeyDown += RootLayoutGrid_KeyDown;
 
@@ -62,7 +57,7 @@ public sealed partial class MainPage : Page
                 return;
             }
 
-            _liveRunTimer.Start();
+            ApplyLiveDisplayTimerSettings();
             ApplyRefreshTimerSettings();
             ApplyResourceTimerSettings();
             _ = InitializePageAsync();
@@ -83,8 +78,8 @@ public sealed partial class MainPage : Page
         CompositionTarget.Rendering -= MainPage_FirstRendering;
         AppLog.Info("MainPage unloaded.");
         _refreshTimer?.Stop();
-        _liveRunTimer.Stop();
-        _resourceTimer.Stop();
+        _liveDisplayTimer?.Stop();
+        _resourceTimer?.Stop();
         ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
         _selectionCts?.Cancel();
         _selectionCts?.Dispose();
@@ -95,10 +90,9 @@ public sealed partial class MainPage : Page
         await ViewModel.RefreshOnTimerAsync(CancellationToken.None);
     }
 
-    private void LiveRunTimer_Tick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+    private void LiveDisplayTimer_Tick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
     {
-        ViewModel.RefreshLiveRunMetrics();
-        ViewModel.RefreshDiskUsageAnimation();
+        ViewModel.RefreshLiveDisplay();
     }
 
     private async void ResourceTimer_Tick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
@@ -1115,6 +1109,11 @@ public sealed partial class MainPage : Page
             ApplyActivePaneState();
         }
 
+        if (e.PropertyName == nameof(MainViewModel.NeedsLiveDisplayUpdates))
+        {
+            ApplyLiveDisplayTimerSettings();
+        }
+
         if (e.PropertyName is nameof(MainViewModel.SelectedRun))
         {
             UpdateRunDetailsExpanders();
@@ -1147,18 +1146,45 @@ public sealed partial class MainPage : Page
         AppLog.Info($"Refresh timer active. Interval={ViewModel.RefreshIntervalSeconds}s");
     }
 
+    private void ApplyLiveDisplayTimerSettings()
+    {
+        if (!IsLoaded || !ViewModel.NeedsLiveDisplayUpdates)
+        {
+            _liveDisplayTimer?.Stop();
+            return;
+        }
+
+        if (_liveDisplayTimer is null)
+        {
+            _liveDisplayTimer = DispatcherQueue.CreateTimer();
+            _liveDisplayTimer.Interval = TimeSpan.FromMilliseconds(500);
+            _liveDisplayTimer.Tick += LiveDisplayTimer_Tick;
+        }
+
+        if (!_liveDisplayTimer.IsRunning)
+        {
+            _liveDisplayTimer.Start();
+        }
+    }
+
     /// <summary>
     /// Sampling runs regardless of which tab is showing so the history is already populated when the user
     /// switches to Resources after noticing the machine struggling.
     /// </summary>
     private void ApplyResourceTimerSettings()
     {
-        _resourceTimer.Stop();
+        _resourceTimer?.Stop();
 
         if (!IsLoaded || !ViewModel.ResourceMonitoringEnabled)
         {
             AppLog.Info("Resource monitor paused.");
             return;
+        }
+
+        if (_resourceTimer is null)
+        {
+            _resourceTimer = DispatcherQueue.CreateTimer();
+            _resourceTimer.Tick += ResourceTimer_Tick;
         }
 
         _resourceTimer.Interval = TimeSpan.FromSeconds(ViewModel.ResourceIntervalSeconds);

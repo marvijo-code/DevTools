@@ -57,6 +57,7 @@ public sealed partial class MainViewModel : ObservableObject
     private ProcessViewState _processViewState = new();
     private Dictionary<string, bool> _killProcessSectionExpansionStates => _processViewState.ExpandedSections;
     private readonly List<WorkflowRunItem> _allRuns = [];
+    private WorkflowRunItem[] _liveWorkflowRuns = [];
     private readonly ObservableCollection<DiskUsageSection> _diskUsageSections = [];
     private readonly ObservableCollection<ProcessKillSection> _killProcessSections = [];
     private readonly BiggestFilesEngine _biggestFilesEngine = new();
@@ -192,6 +193,10 @@ public sealed partial class MainViewModel : ObservableObject
     public bool IsResourcesVisible => _activeTab == MainContentTab.Resources;
 
     public MainContentTab ActiveTab => _activeTab;
+
+    internal bool NeedsLiveDisplayUpdates =>
+        (IsWorkflowExplorerVisible && _liveWorkflowRuns.Length > 0) ||
+        (IsDiskUsageVisible && IsDiskUsageRefreshing);
 
     public ObservableCollection<BiggestFileEntry> BiggestFiles => _biggestFiles;
 
@@ -728,8 +733,10 @@ public sealed partial class MainViewModel : ObservableObject
                 existingRun.PropertyChanged -= WorkflowRunItem_PropertyChanged;
             }
 
+            var previouslyNeededLiveUpdates = NeedsLiveDisplayUpdates;
             _allRuns.Clear();
             _allRuns.AddRange(combined);
+            _liveWorkflowRuns = combined.Where(static run => run.IsActivelyRunning).ToArray();
 
             foreach (var run in _allRuns)
             {
@@ -737,6 +744,11 @@ public sealed partial class MainViewModel : ObservableObject
             }
 
             ApplyRunFilter();
+
+            if (NeedsLiveDisplayUpdates != previouslyNeededLiveUpdates)
+            {
+                RaisePropertyChanged(nameof(NeedsLiveDisplayUpdates));
+            }
 
             if (SelectedRun is not null)
             {
@@ -803,9 +815,21 @@ public sealed partial class MainViewModel : ObservableObject
         AppLog.Info($"ResolveSelectedRunAsync completed for run {run.Id}.");
     }
 
+    internal void RefreshLiveDisplay()
+    {
+        if (IsWorkflowExplorerVisible)
+        {
+            RefreshLiveRunMetrics();
+        }
+        else if (IsDiskUsageVisible && IsDiskUsageRefreshing)
+        {
+            RefreshDiskUsageAnimation();
+        }
+    }
+
     public void RefreshLiveRunMetrics()
     {
-        foreach (var run in _allRuns)
+        foreach (var run in _liveWorkflowRuns)
         {
             run.RefreshLiveTiming();
         }
@@ -1514,6 +1538,7 @@ public sealed partial class MainViewModel : ObservableObject
             RaisePropertyChanged(nameof(IsWorktreesVisible));
             RaisePropertyChanged(nameof(ContextPaneTitle));
             RaisePropertyChanged(nameof(ContextPaneSubtitle));
+            RaisePropertyChanged(nameof(NeedsLiveDisplayUpdates));
         }
     }
 
@@ -1604,14 +1629,15 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void SetDiskUsageRefreshing(bool isRefreshing)
     {
-        if (SetProperty(ref _isDiskUsageRefreshing, isRefreshing, nameof(IsDiskUsageRefreshing)))
-        {
-            RaisePropertyChanged(nameof(DiskUsageStatusText));
-        }
-
         if (isRefreshing)
         {
             _diskUsageAnimationFrame = 0;
+        }
+
+        if (SetProperty(ref _isDiskUsageRefreshing, isRefreshing, nameof(IsDiskUsageRefreshing)))
+        {
+            RaisePropertyChanged(nameof(DiskUsageStatusText));
+            RaisePropertyChanged(nameof(NeedsLiveDisplayUpdates));
         }
     }
 

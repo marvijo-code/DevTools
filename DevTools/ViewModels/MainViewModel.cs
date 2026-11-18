@@ -63,8 +63,9 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly SemaphoreSlim _biggestFilesGate = new(1, 1);
     private readonly ObservableCollection<BiggestFileEntry> _biggestFiles = [];
     private readonly List<BiggestFileEntry> _allBiggestFiles = [];
-    private readonly DiskCleanupService _diskCleanupService = new();
+    private readonly Lazy<DiskCleanupService> _diskCleanupService = new(static () => new DiskCleanupService());
     private readonly SemaphoreSlim _bulkCleanupGate = new(1, 1);
+    private Task? _bulkCleanupAvailabilityCheck;
     private CancellationTokenSource? _bulkCleanupCts;
 
     private string _ownerInput = string.Empty;
@@ -105,6 +106,7 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _runAsAdministrator = true;
     private bool _isBulkCleanupRunning;
     private string _bulkCleanupStatusText = "Not run yet.";
+    private string? _bulkCleanupUnavailableReason = "Checking cleanup requirements...";
     private string _bulkCleanupHeadline = "One button cleanup: package caches, stale build output, the intermediates of already-published video episodes, and crashed-git debris with expired agent checkpoints.";
     private string _bulkCleanupReportText = string.Empty;
     private bool _isLoadingSettings;
@@ -246,11 +248,11 @@ public sealed partial class MainViewModel : ObservableObject
     public bool HasBulkCleanupReport => !string.IsNullOrWhiteSpace(_bulkCleanupReportText);
 
     /// <summary>True when pwsh 7 and the cleanup script are both on this machine.</summary>
-    public bool IsBulkCleanupAvailable => _diskCleanupService.IsAvailable;
+    public bool IsBulkCleanupAvailable => _bulkCleanupUnavailableReason is null;
 
     public string BulkCleanupAvailabilityText =>
-        _diskCleanupService.GetUnavailableReason() ??
-        $"Runs {_diskCleanupService.ScriptPath} with the Caches, BuildArtifacts and PublishedVideos lanes.";
+        _bulkCleanupUnavailableReason ??
+        $"Runs {DiskCleanupService.DefaultScriptPath} with the Caches, BuildArtifacts and PublishedVideos lanes.";
 
     public string BulkCleanupButtonText => IsBulkCleanupRunning ? "Cleaning up..." : "Bulk Cleanup PC";
 
@@ -526,12 +528,37 @@ public sealed partial class MainViewModel : ObservableObject
 
     public async Task EnsureDiskUsageLoadedAsync(CancellationToken cancellationToken)
     {
-        if (_hasDiskUsageSnapshot || IsDiskUsageRefreshing)
+        if (_bulkCleanupAvailabilityCheck is null || _bulkCleanupAvailabilityCheck.IsCompleted)
         {
-            return;
+            _bulkCleanupAvailabilityCheck = CheckBulkCleanupAvailabilityAsync();
         }
 
-        await RefreshDiskUsageAsync(cancellationToken);
+        var availabilityCheck = _bulkCleanupAvailabilityCheck;
+        if (!_hasDiskUsageSnapshot && !IsDiskUsageRefreshing)
+        {
+            await RefreshDiskUsageAsync(cancellationToken);
+        }
+
+        await availabilityCheck;
+    }
+
+    private async Task CheckBulkCleanupAvailabilityAsync()
+    {
+        string? reason;
+        try
+        {
+            reason = await Task.Run(() => _diskCleanupService.Value.GetUnavailableReason());
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Checking bulk cleanup requirements failed.", ex);
+            reason = "Could not check cleanup requirements.";
+        }
+
+        if (SetProperty(ref _bulkCleanupUnavailableReason, reason, nameof(BulkCleanupAvailabilityText)))
+        {
+            RaisePropertyChanged(nameof(IsBulkCleanupAvailable));
+        }
     }
 
     public async Task RefreshDiskUsageAsync(CancellationToken cancellationToken)
@@ -993,7 +1020,7 @@ public sealed partial class MainViewModel : ObservableObject
                 RaisePropertyChanged(nameof(HasBulkCleanupReport));
             });
 
-            var result = await _diskCleanupService.RunAsync(execute, progress, cts.Token);
+            var result = await _diskCleanupService.Value.RunAsync(execute, progress, cts.Token);
 
             SetBulkCleanupStatus(result.Message);
             StatusMessage = result.Message;

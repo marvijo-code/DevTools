@@ -17,7 +17,7 @@ public sealed partial class MainViewModel
 
     private static readonly IReadOnlyList<int> ResourceIntervalChoices = [1, 2, 5];
 
-    private readonly ResourceMonitor _resourceMonitor = new();
+    private ResourceMonitor? _resourceMonitor;
     private readonly ResourceAdvisor _resourceAdvisor = new();
     private readonly ResourceHistory _resourceHistory = new(ResourceHistoryCapacity);
     private readonly SemaphoreSlim _resourceSampleGate = new(1, 1);
@@ -172,7 +172,7 @@ public sealed partial class MainViewModel
 
         try
         {
-            var sample = await Task.Run(_resourceMonitor.Sample);
+            var sample = await Task.Run(() => (_resourceMonitor ??= new ResourceMonitor()).Sample());
 
             if (sample.PhysicalTotalBytes <= 0)
             {
@@ -180,7 +180,7 @@ public sealed partial class MainViewModel
                 return;
             }
 
-            if (!_resourceMonitor.HasBaseline)
+            if (_resourceMonitor?.HasBaseline != true)
             {
                 SetResourceStatus("Establishing baseline...");
                 return;

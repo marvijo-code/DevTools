@@ -49,9 +49,9 @@ public static class MftRecordParser
 
     // Attribute type codes.
     private const uint AttrStandardInformation = 0x10;
-    private const uint AttrAttributeList = 0x20;
+    internal const uint AttrAttributeList = 0x20;
     private const uint AttrFileName = 0x30;
-    private const uint AttrData = 0x80;
+    internal const uint AttrData = 0x80;
     private const uint AttrEnd = 0xFFFFFFFF;
 
     // $FILE_NAME namespaces.
@@ -193,7 +193,7 @@ public static class MftRecordParser
         return true;
     }
 
-    private static bool TryGetResidentValue(ReadOnlySpan<byte> attribute, out ReadOnlySpan<byte> value, out int offset)
+    internal static bool TryGetResidentValue(ReadOnlySpan<byte> attribute, out ReadOnlySpan<byte> value, out int offset)
     {
         value = default;
         offset = 0;
@@ -340,13 +340,21 @@ public static class MftRecordParser
     public static bool TryReadUnnamedDataRuns(Span<byte> record, List<(long Lcn, long ClusterCount)> extents)
     {
         extents.Clear();
-
-        if (record.Length < 0x30)
+        if (!TryPrepareRecord(record, out var prepared))
         {
             return false;
         }
 
-        if (record[0] != (byte)'F' || record[1] != (byte)'I' || record[2] != (byte)'L' || record[3] != (byte)'E')
+        var attribute = FindUnnamedAttribute(prepared, AttrData, 0);
+        return !attribute.IsEmpty && attribute[8] == 1 &&
+            TryGetMappingPairs(attribute, out var runs) &&
+            TryDecodeRunList(runs, extents, out _, allowSparse: false);
+    }
+
+    internal static bool TryPrepareRecord(Span<byte> record, out ReadOnlySpan<byte> prepared)
+    {
+        prepared = default;
+        if (record.Length < 0x30 || !record[..4].SequenceEqual("FILE"u8))
         {
             return false;
         }
@@ -357,34 +365,58 @@ public static class MftRecordParser
             return false;
         }
 
-        record = record[..usedBytes];
-        var firstAttributeOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x14, 2));
-        var offset = (int)firstAttributeOffset;
+        prepared = record[..usedBytes];
+        return true;
+    }
 
+    internal static ReadOnlySpan<byte> FindUnnamedAttribute(ReadOnlySpan<byte> record, uint type, long lowestVcn, ushort? instance = null)
+    {
+        var offset = (int)BinaryPrimitives.ReadUInt16LittleEndian(record[0x14..]);
         while (offset >= 0x18 && offset + 0x10 <= record.Length)
         {
-            var attributeType = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(offset, 4));
+            var attributeType = BinaryPrimitives.ReadUInt32LittleEndian(record[offset..]);
             if (attributeType == AttrEnd)
             {
                 break;
             }
 
-            var attributeLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(offset + 4, 4));
-            if (attributeLength < 0x10 || attributeLength > record.Length - offset)
+            var length = BinaryPrimitives.ReadUInt32LittleEndian(record[(offset + 4)..]);
+            if (length < 0x10 || length > (uint)(record.Length - offset))
             {
                 break;
             }
 
-            if (attributeType == AttrData && record[offset + 9] == 0 && record[offset + 8] == 1)
+            var attribute = record.Slice(offset, (int)length);
+            if (attributeType == type && attribute[9] == 0 &&
+                (instance is null || BinaryPrimitives.ReadUInt16LittleEndian(attribute[0x0E..]) == instance))
             {
-                return TryGetMappingPairs(record.Slice(offset, attributeLength), out var runs) &&
-                    TryDecodeRunList(runs, extents, out _, allowSparse: false);
+                if ((attribute[8] == 0 && lowestVcn == 0) ||
+                    (attribute[8] == 1 && attribute.Length >= 0x40 &&
+                        BinaryPrimitives.ReadInt64LittleEndian(attribute[0x10..]) == lowestVcn))
+                {
+                    return attribute;
+                }
             }
 
-            offset += attributeLength;
+            offset += (int)length;
         }
 
-        return false;
+        return [];
+    }
+
+    internal static bool TryReadMftRuns(ReadOnlySpan<byte> attribute, long lowestVcn, long volumeClusters,
+        List<(long Lcn, long ClusterCount)> extents, out long clusters)
+    {
+        clusters = 0;
+        if (attribute.Length < 0x40 || attribute[8] != 1 || !TryGetMappingPairs(attribute, out var runs))
+        {
+            return false;
+        }
+
+        var highestVcn = BinaryPrimitives.ReadInt64LittleEndian(attribute[0x18..]);
+        return highestVcn >= lowestVcn && highestVcn < volumeClusters &&
+            TryDecodeRunList(runs, extents, out clusters, allowSparse: false, volumeClusters: volumeClusters) &&
+            clusters == highestVcn - lowestVcn + 1;
     }
 
     /// <summary>

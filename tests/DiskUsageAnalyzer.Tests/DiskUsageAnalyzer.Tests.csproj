@@ -47,6 +47,7 @@
     <Compile Include="..\..\DevTools\Services\BiggestFiles\ParallelFileScanner.cs" Link="Services\BiggestFiles\ParallelFileScanner.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\MftRecordParser.cs" Link="Services\BiggestFiles\Ntfs\MftRecordParser.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\MftTable.cs" Link="Services\BiggestFiles\Ntfs\MftTable.cs" />
+    <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\MftExtentMapReader.cs" Link="Services\BiggestFiles\Ntfs\MftExtentMapReader.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\NativeMethods.cs" Link="Services\BiggestFiles\Ntfs\NativeMethods.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\FolderSizeModels.cs" Link="Services\FolderSizes\FolderSizeModels.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\FolderSizeEngine.cs" Link="Services\FolderSizes\FolderSizeEngine.cs" />

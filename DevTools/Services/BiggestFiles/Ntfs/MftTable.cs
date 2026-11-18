@@ -295,12 +295,25 @@ internal static class MftTableLoader
         var volumeRoot = FolderTree.NormalizeRoot(root);
         using var volume = NativeMethods.OpenVolume(devicePath);
         var geometry = NativeMethods.GetVolumeData(volume);
+        return await LoadVolumeAsync(volume, volumeRoot, geometry, reportProgress, stopwatch, cancellationToken, keepFileNames)
+            .ConfigureAwait(false);
+    }
+
+    internal static async Task<MftRecordTable> LoadVolumeAsync(
+        Microsoft.Win32.SafeHandles.SafeFileHandle volume,
+        string volumeRoot,
+        NtfsVolumeData geometry,
+        Action<long, long, TimeSpan>? reportProgress,
+        Stopwatch stopwatch,
+        CancellationToken cancellationToken,
+        bool keepFileNames)
+    {
         var recordCount = GetRecordCount(geometry);
         var recordSize = (int)geometry.BytesPerFileRecordSegment;
         var (chunkBytes, parserCount, queueCapacity) = ScanResources.Capture().MftPlan(recordCount, keepFileNames);
 
         // Check the full MFT mapping before allocating its in-memory columns.
-        var extents = ReadMftExtents(volume, geometry);
+        var extents = MftExtentMapReader.Read(geometry, (offset, buffer) => ReadExact(volume, buffer, offset), cancellationToken);
         ValidateMftExtents(geometry, extents);
 
         // Structure-of-arrays table, indexed by MFT record number.
@@ -413,30 +426,6 @@ internal static class MftTableLoader
                     throw new IOException("The NTFS master file table extents overlap.");
                 }
             }
-        }
-    }
-
-    private static List<(long Lcn, long ClusterCount)> ReadMftExtents(Microsoft.Win32.SafeHandles.SafeFileHandle volume, NtfsVolumeData geometry)
-    {
-        var clusterBytes = (int)geometry.BytesPerCluster;
-        var recordSize = (int)geometry.BytesPerFileRecordSegment;
-        // Read enough whole clusters to cover record 0 (handles cluster sizes smaller than the record).
-        var bytesToRead = ((recordSize - 1) / clusterBytes + 1) * clusterBytes;
-        var buffer = ArrayPool<byte>.Shared.Rent(bytesToRead);
-        try
-        {
-            ReadExact(volume, buffer.AsSpan(0, bytesToRead), geometry.MftStartLcn * geometry.BytesPerCluster);
-            var extents = new List<(long Lcn, long ClusterCount)>();
-            if (!MftRecordParser.TryReadUnnamedDataRuns(buffer.AsSpan(0, recordSize), extents))
-            {
-                throw new IOException("The NTFS master file table has an invalid extent map.");
-            }
-
-            return extents;
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 

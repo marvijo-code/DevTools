@@ -506,238 +506,33 @@ internal static class MftTableLoader
         var clusterBytes = (int)geometry.BytesPerCluster;
         var clustersPerChunk = targetChunkBytes / clusterBytes;
 
-        var channel = Channel.CreateBounded<Block>(new BoundedChannelOptions(queueCapacity)
-        {
-            SingleReader = false,
-            SingleWriter = true,
-            FullMode = BoundedChannelFullMode.Wait
-        });
-
         // An extension can hold part of the allocation, the first $DATA extent or a $FILE_NAME.
         var extensions = new List<ExtensionRecord>();
-        var extensionLock = new object();
-        var parsedCounter = 0;
-
-
-        var parsers = new Task[parserCount];
-        var parserClusters = observedBitmap is not null ? new UInt128[parserCount] : null;
-        for (var i = 0; i < parserCount; i++)
+        var initializedClusters = (geometry.MftValidDataLength - 1) / clusterBytes + 1;
+        UInt128 scannedClusterReferences;
+        var (firstLcn, firstExtentClusters) = extents[0];
+        if (initializedClusters <= clustersPerChunk && initializedClusters <= firstExtentClusters)
         {
-            var parserIndex = i;
-            parsers[i] = Task.Run(async () =>
-            {
-                var localExtensions = new List<ExtensionRecord>();
-                var attributeRuns = observedBitmap is not null ? new List<(long Lcn, long ClusterCount)>() : null;
-                UInt128 referencedClusters = 0;
-                var info = new MftRecordInfo();
-                try
-                {
-                    await foreach (var block in channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
-                    {
-                        try
-                        {
-                            await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                            var span = block.Buffer.AsSpan(0, block.RecordCount * recordSize);
-                            for (var r = 0; r < block.RecordCount; r++)
-                            {
-                                var globalIndex = block.StartRecordIndex + r;
-                                var recordSpan = span.Slice(r * recordSize, recordSize);
-                                if (!MftRecordParser.TryParseRecord(recordSpan, ref info,
-                                    requireInUse: true, readLastWrite: keepFileNames, countAllocation: recordAllocation is not null,
-                                    volumeClusters: geometry.TotalClusters, observedBitmap: observedBitmap, attributeRuns: attributeRuns))
-                                {
-                                    continue;
-                                }
-
-                                byte flag = MftRecordTable.FlagInUse;
-                                if (info.IsDirectory) flag |= MftRecordTable.FlagDirectory;
-                                if (info.HasName) flag |= MftRecordTable.FlagHasName;
-
-                                if (parserClusters is not null)
-                                {
-                                    referencedClusters += (ulong)info.AllocatedClusters;
-                                }
-
-                                long allocated = 0;
-                                if (recordAllocation is not null)
-                                {
-                                    allocated = checked(info.AllocatedClusters * geometry.BytesPerCluster);
-                                    recordAllocation[globalIndex] = allocated;
-                                }
-
-                                if (info.IsExtension)
-                                {
-                                    flag |= MftRecordTable.FlagExtension;
-                                    if (info.BaseRecordNumber < (ulong)recordCount && (info.HasName || info.DataSizesValid || allocated > 0))
-                                    {
-                                        localExtensions.Add(new ExtensionRecord(
-                                            globalIndex, (int)info.BaseRecordNumber, info.BaseRecordSequence,
-                                            info.FileNameNamespace, info.DataSizesValid, info.DataRealSize, info.DataAllocatedSize));
-                                    }
-                                }
-                                else
-                                {
-                                    if (info.DataSizesValid)
-                                    {
-                                        flag |= MftRecordTable.FlagHasSize;
-                                        realSize[globalIndex] = info.DataRealSize;
-                                        if (keepFileNames)
-                                        {
-                                            allocSize[globalIndex] = info.DataAllocatedSize;
-                                        }
-                                    }
-                                }
-
-                                parent[globalIndex] = info.ParentRecordNumber < (ulong)recordCount
-                                    ? (uint)info.ParentRecordNumber
-                                    : MftRecordTable.InvalidParentRecord;
-                                referenceSequences[globalIndex] = ((uint)info.SequenceNumber << 16) | info.ParentRecordSequence;
-                                if (keepFileNames)
-                                {
-                                    lastWrite[globalIndex] = info.LastWriteFileTime;
-                                }
-                                // The folder scan skips ordinary file names. An extension with a name
-                                // may belong to a directory even if its own directory flag is clear.
-                                if (info.HasName && (keepFileNames || info.IsDirectory || info.IsExtension))
-                                {
-                                    names[globalIndex] = Encoding.Unicode.GetString(recordSpan.Slice(info.NameOffsetInRecord, info.NameLengthChars * 2));
-                                }
-
-                                flags[globalIndex] = flag;
-                            }
-
-                            Interlocked.Add(ref parsedCounter, block.RecordCount);
-                            reportThrottled(Volatile.Read(ref parsedCounter));
-                        }
-                        finally
-                        {
-                            ArrayPool<byte>.Shared.Return(block.Buffer);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    channel.Writer.TryComplete(ex);
-                    throw;
-                }
-
-                if (parserClusters is not null)
-                {
-                    parserClusters[parserIndex] = referencedClusters;
-                }
-
-                if (localExtensions.Count > 0)
-                {
-                    lock (extensionLock)
-                    {
-                        extensions.AddRange(localExtensions);
-                    }
-                }
-            }, cancellationToken);
-        }
-
-        // Reader: stream extents, emit record-aligned blocks.
-        var carry = carryBytes > 0 ? new byte[carryBytes] : [];
-        var carryLength = 0;
-        var startRecordIndex = 0;
-        var parserCompletion = Task.WhenAll(parsers);
-
-        try
-        {
-            // Ignore reserved clusters beyond the initialized records, while keeping reads cluster-aligned.
-            var mftClustersRemaining = (geometry.MftValidDataLength - 1) / clusterBytes + 1;
-            foreach (var (lcn, clusterCount) in extents)
-            {
-                var clustersRemaining = Math.Min(clusterCount, mftClustersRemaining);
-                mftClustersRemaining -= clustersRemaining;
-                var currentLcn = lcn;
-                while (clustersRemaining > 0 && startRecordIndex < recordCount)
-                {
-                    await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                    if (parserCompletion.IsCompleted)
-                    {
-                        // Parsers died (fault/cancel): stop writing or the bounded channel deadlocks.
-                        await parserCompletion.ConfigureAwait(false);
-                        throw new InvalidOperationException("MFT parser workers exited early.");
-                    }
-
-                    var chunkClusters = (int)Math.Min(clustersRemaining, clustersPerChunk);
-                    var chunkBytes = chunkClusters * clusterBytes;
-                    var blockBuffer = ArrayPool<byte>.Shared.Rent(carryLength + chunkBytes);
-                    var queued = false;
-                    try
-                    {
-                        if (carryLength > 0)
-                        {
-                            carry.AsSpan(0, carryLength).CopyTo(blockBuffer);
-                        }
-
-                        ReadExact(volume, blockBuffer.AsSpan(carryLength, chunkBytes), currentLcn * clusterBytes);
-
-                        var totalBytes = carryLength + chunkBytes;
-                        var recordsRemaining = recordCount - startRecordIndex;
-                        var fullRecords = Math.Min(totalBytes / recordSize, recordsRemaining);
-                        var consumedBytes = fullRecords * recordSize;
-                        // The last extent can include allocated space beyond the valid data length.
-                        carryLength = fullRecords == recordsRemaining ? 0 : totalBytes - consumedBytes;
-                        if (carryLength > 0)
-                        {
-                            blockBuffer.AsSpan(consumedBytes, carryLength).CopyTo(carry);
-                        }
-
-                        if (fullRecords > 0)
-                        {
-                            await channel.Writer.WriteAsync(new Block(blockBuffer, startRecordIndex, fullRecords), cancellationToken).ConfigureAwait(false);
-                            queued = true;
-                            startRecordIndex += fullRecords;
-                        }
-                    }
-                    finally
-                    {
-                        if (!queued)
-                        {
-                            ArrayPool<byte>.Shared.Return(blockBuffer);
-                        }
-                    }
-
-                    clustersRemaining -= chunkClusters;
-                    currentLcn += chunkClusters;
-                }
-
-                if (startRecordIndex >= recordCount)
-                {
-                    break;
-                }
-            }
-
-            if (startRecordIndex != recordCount)
-            {
-                throw new IOException($"MFT extents covered {startRecordIndex:N0} of {recordCount:N0} records.");
-            }
-
-            channel.Writer.TryComplete();
-            await parserCompletion.ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            channel.Writer.TryComplete(ex);
+            // One read cannot overlap with parsing. Skip creating a channel and worker.
+            await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            var bytes = (int)initializedClusters * clusterBytes;
+            var buffer = ArrayPool<byte>.Shared.Rent(bytes);
             try
             {
-                await parserCompletion.ConfigureAwait(false);
+                ReadExact(volume, buffer.AsSpan(0, bytes), firstLcn * clusterBytes);
+                await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                var attributeRuns = observedBitmap is not null ? new List<(long Lcn, long ClusterCount)>() : null;
+                scannedClusterReferences = ParseBlock(new Block(buffer, 0, recordCount), extensions, attributeRuns);
+                reportThrottled(recordCount);
             }
-            catch (Exception)
+            finally
             {
-                // Preserve the read or parse error that stopped the pipeline.
+                ArrayPool<byte>.Shared.Return(buffer);
             }
-
-            throw;
         }
-        finally
+        else
         {
-            while (channel.Reader.TryRead(out var pending))
-            {
-                ArrayPool<byte>.Shared.Return(pending.Buffer);
-            }
+            scannedClusterReferences = await ParsePipelineAsync().ConfigureAwait(false);
         }
 
         ValidateParentReferences(parent, flags, referenceSequences, cancellationToken);
@@ -808,16 +603,260 @@ internal static class MftTableLoader
             }
         }
 
-        UInt128 totalReferencedClusters = 0;
-        if (parserClusters is not null)
+        return scannedClusterReferences;
+
+        UInt128 ParseBlock(Block block, List<ExtensionRecord> localExtensions, List<(long Lcn, long ClusterCount)>? attributeRuns)
         {
-            foreach (var clusters in parserClusters)
+            UInt128 referencedClusters = 0;
+            var info = new MftRecordInfo();
+            var span = block.Buffer.AsSpan(0, block.RecordCount * recordSize);
+            for (var r = 0; r < block.RecordCount; r++)
             {
-                totalReferencedClusters += clusters;
+                var globalIndex = block.StartRecordIndex + r;
+                var recordSpan = span.Slice(r * recordSize, recordSize);
+                if (!MftRecordParser.TryParseRecord(recordSpan, ref info,
+                    requireInUse: true, readLastWrite: keepFileNames, countAllocation: recordAllocation is not null,
+                    volumeClusters: geometry.TotalClusters, observedBitmap: observedBitmap, attributeRuns: attributeRuns))
+                {
+                    continue;
+                }
+
+                byte flag = MftRecordTable.FlagInUse;
+                if (info.IsDirectory) flag |= MftRecordTable.FlagDirectory;
+                if (info.HasName) flag |= MftRecordTable.FlagHasName;
+
+                if (observedBitmap is not null)
+                {
+                    referencedClusters += (ulong)info.AllocatedClusters;
+                }
+
+                long allocated = 0;
+                if (recordAllocation is not null)
+                {
+                    allocated = checked(info.AllocatedClusters * geometry.BytesPerCluster);
+                    recordAllocation[globalIndex] = allocated;
+                }
+
+                if (info.IsExtension)
+                {
+                    flag |= MftRecordTable.FlagExtension;
+                    if (info.BaseRecordNumber < (ulong)recordCount && (info.HasName || info.DataSizesValid || allocated > 0))
+                    {
+                        localExtensions.Add(new ExtensionRecord(
+                            globalIndex, (int)info.BaseRecordNumber, info.BaseRecordSequence,
+                            info.FileNameNamespace, info.DataSizesValid, info.DataRealSize, info.DataAllocatedSize));
+                    }
+                }
+                else
+                {
+                    if (info.DataSizesValid)
+                    {
+                        flag |= MftRecordTable.FlagHasSize;
+                        realSize[globalIndex] = info.DataRealSize;
+                        if (keepFileNames)
+                        {
+                            allocSize[globalIndex] = info.DataAllocatedSize;
+                        }
+                    }
+                }
+
+                parent[globalIndex] = info.ParentRecordNumber < (ulong)recordCount
+                    ? (uint)info.ParentRecordNumber
+                    : MftRecordTable.InvalidParentRecord;
+                referenceSequences[globalIndex] = ((uint)info.SequenceNumber << 16) | info.ParentRecordSequence;
+                if (keepFileNames)
+                {
+                    lastWrite[globalIndex] = info.LastWriteFileTime;
+                }
+                // The folder scan skips ordinary file names. An extension with a name
+                // may belong to a directory even if its own directory flag is clear.
+                if (info.HasName && (keepFileNames || info.IsDirectory || info.IsExtension))
+                {
+                    names[globalIndex] = Encoding.Unicode.GetString(recordSpan.Slice(info.NameOffsetInRecord, info.NameLengthChars * 2));
+                }
+
+                flags[globalIndex] = flag;
             }
+
+            return referencedClusters;
         }
 
-        return totalReferencedClusters;
+        async Task<UInt128> ParsePipelineAsync()
+        {
+            var channel = Channel.CreateBounded<Block>(new BoundedChannelOptions(queueCapacity)
+            {
+                SingleReader = false,
+                SingleWriter = true,
+                FullMode = BoundedChannelFullMode.Wait
+            });
+
+            var extensionLock = new object();
+            var parsedCounter = 0;
+
+            var parsers = new Task[parserCount];
+            var parserClusters = observedBitmap is not null ? new UInt128[parserCount] : null;
+            for (var i = 0; i < parserCount; i++)
+            {
+                var parserIndex = i;
+                parsers[i] = Task.Run(async () =>
+                {
+                    var localExtensions = new List<ExtensionRecord>();
+                    var attributeRuns = observedBitmap is not null ? new List<(long Lcn, long ClusterCount)>() : null;
+                    UInt128 referencedClusters = 0;
+                    try
+                    {
+                        await foreach (var block in channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+                        {
+                            try
+                            {
+                                await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                                referencedClusters += ParseBlock(block, localExtensions, attributeRuns);
+
+                                Interlocked.Add(ref parsedCounter, block.RecordCount);
+                                reportThrottled(Volatile.Read(ref parsedCounter));
+                            }
+                            finally
+                            {
+                                ArrayPool<byte>.Shared.Return(block.Buffer);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        channel.Writer.TryComplete(ex);
+                        throw;
+                    }
+
+                    if (parserClusters is not null)
+                    {
+                        parserClusters[parserIndex] = referencedClusters;
+                    }
+
+                    if (localExtensions.Count > 0)
+                    {
+                        lock (extensionLock)
+                        {
+                            extensions.AddRange(localExtensions);
+                        }
+                    }
+                }, cancellationToken);
+            }
+
+            // Reader: stream extents, emit record-aligned blocks.
+            var carry = carryBytes > 0 ? new byte[carryBytes] : [];
+            var carryLength = 0;
+            var startRecordIndex = 0;
+            var parserCompletion = Task.WhenAll(parsers);
+
+            try
+            {
+                // Ignore reserved clusters beyond the initialized records, while keeping reads cluster-aligned.
+                var mftClustersRemaining = initializedClusters;
+                foreach (var (lcn, clusterCount) in extents)
+                {
+                    var clustersRemaining = Math.Min(clusterCount, mftClustersRemaining);
+                    mftClustersRemaining -= clustersRemaining;
+                    var currentLcn = lcn;
+                    while (clustersRemaining > 0 && startRecordIndex < recordCount)
+                    {
+                        await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                        if (parserCompletion.IsCompleted)
+                        {
+                            // Parsers died (fault/cancel): stop writing or the bounded channel deadlocks.
+                            await parserCompletion.ConfigureAwait(false);
+                            throw new InvalidOperationException("MFT parser workers exited early.");
+                        }
+
+                        var chunkClusters = (int)Math.Min(clustersRemaining, clustersPerChunk);
+                        var chunkBytes = chunkClusters * clusterBytes;
+                        var blockBuffer = ArrayPool<byte>.Shared.Rent(carryLength + chunkBytes);
+                        var queued = false;
+                        try
+                        {
+                            if (carryLength > 0)
+                            {
+                                carry.AsSpan(0, carryLength).CopyTo(blockBuffer);
+                            }
+
+                            ReadExact(volume, blockBuffer.AsSpan(carryLength, chunkBytes), currentLcn * clusterBytes);
+
+                            var totalBytes = carryLength + chunkBytes;
+                            var recordsRemaining = recordCount - startRecordIndex;
+                            var fullRecords = Math.Min(totalBytes / recordSize, recordsRemaining);
+                            var consumedBytes = fullRecords * recordSize;
+                            // The last extent can include allocated space beyond the valid data length.
+                            carryLength = fullRecords == recordsRemaining ? 0 : totalBytes - consumedBytes;
+                            if (carryLength > 0)
+                            {
+                                blockBuffer.AsSpan(consumedBytes, carryLength).CopyTo(carry);
+                            }
+
+                            if (fullRecords > 0)
+                            {
+                                await channel.Writer.WriteAsync(new Block(blockBuffer, startRecordIndex, fullRecords), cancellationToken).ConfigureAwait(false);
+                                queued = true;
+                                startRecordIndex += fullRecords;
+                            }
+                        }
+                        finally
+                        {
+                            if (!queued)
+                            {
+                                ArrayPool<byte>.Shared.Return(blockBuffer);
+                            }
+                        }
+
+                        clustersRemaining -= chunkClusters;
+                        currentLcn += chunkClusters;
+                    }
+
+                    if (startRecordIndex >= recordCount)
+                    {
+                        break;
+                    }
+                }
+
+                if (startRecordIndex != recordCount)
+                {
+                    throw new IOException($"MFT extents covered {startRecordIndex:N0} of {recordCount:N0} records.");
+                }
+
+                channel.Writer.TryComplete();
+                await parserCompletion.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                channel.Writer.TryComplete(ex);
+                try
+                {
+                    await parserCompletion.ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // Preserve the read or parse error that stopped the pipeline.
+                }
+
+                throw;
+            }
+            finally
+            {
+                while (channel.Reader.TryRead(out var pending))
+                {
+                    ArrayPool<byte>.Shared.Return(pending.Buffer);
+                }
+            }
+
+            UInt128 totalReferencedClusters = 0;
+            if (parserClusters is not null)
+            {
+                foreach (var clusters in parserClusters)
+                {
+                    totalReferencedClusters += clusters;
+                }
+            }
+
+            return totalReferencedClusters;
+        }
     }
 
     internal static void ValidateParentReferences(uint[] parents, byte[] flags, uint[] sequences, CancellationToken cancellationToken)

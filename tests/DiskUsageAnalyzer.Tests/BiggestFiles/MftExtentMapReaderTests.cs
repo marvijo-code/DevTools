@@ -215,8 +215,11 @@ public sealed class MftExtentMapReaderTests
         Assert.Equal(expected, readers);
     }
 
-    [Fact]
-    public async Task LoadVolumeAsync_DoesNotReadUninitializedClustersInTheLastMftExtent()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task LoadVolumeAsync_OneReadScanClipsTheLastExtentAndParsesRequestedMetadata(bool keepFileNames, bool suppliesBitmap)
     {
         const int clusterBytes = 4096;
         const int recordBytes = 1024;
@@ -241,12 +244,21 @@ public sealed class MftExtentMapReaderTests
 
             await File.WriteAllBytesAsync(path, disk);
             using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var bitmap = new byte[25];
+            NtfsVolumeBitmapTests.SetBits(bitmap, mftStart, allocatedClusters);
             var table = await MftTableLoader.LoadVolumeAsync(handle, @"C:\", geometry, null,
-                Stopwatch.StartNew(), CancellationToken.None, keepFileNames: false);
+                Stopwatch.StartNew(), CancellationToken.None, keepFileNames,
+                bitmapQuery: suppliesBitmap
+                    ? (start, output) => NtfsVolumeBitmapTests.WriteReply(start, geometry.TotalClusters, bitmap, output)
+                    : null);
 
             Assert.Equal(records, table.RecordCount);
             Assert.True(table.IsNamedFile(6));
-            Assert.Equal(allocatedClusters * clusterBytes, table.RecordAllocation![0]);
+            Assert.Equal(keepFileNames ? "$Bitmap" : null, table.Names[6]);
+            var allocatedBytes = allocatedClusters * clusterBytes;
+            Assert.Equal(keepFileNames ? null : (long?)allocatedBytes, table.RecordAllocation?[0]);
+            Assert.Equal(suppliesBitmap ? new NtfsBitmapAllocation(allocatedBytes, allocatedBytes, 0) : null,
+                table.BitmapAllocation);
         }
         finally
         {

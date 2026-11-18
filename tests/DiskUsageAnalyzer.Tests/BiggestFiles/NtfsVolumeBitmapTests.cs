@@ -68,6 +68,21 @@ public sealed class NtfsVolumeBitmapTests
         Assert.NotNull(NtfsVolumeBitmap.TryCreate(4096, 8192));
     }
 
+    [Fact]
+    public void TryCreate_ProbesBeforeTrackingAndRejectsAnInvalidReply()
+    {
+        var calls = 0;
+        Assert.Null(NtfsVolumeBitmap.TryCreate(133, 1 << 20, (start, output) =>
+        {
+            Assert.Equal(0, start);
+            calls++;
+            return WriteReply(0, 134, new byte[17], output);
+        }));
+
+        Assert.Equal(1, calls);
+        Assert.Null(NtfsVolumeBitmap.TryCreate(4096, 4096, (_, _) => throw new InvalidOperationException()));
+    }
+
     internal static void SetBits(byte[] bytes, int first, int count)
     {
         for (var bit = first; bit < first + count; bit++)

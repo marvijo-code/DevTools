@@ -511,6 +511,11 @@ public sealed class DiskUsageAnalyzer
             note += $" {bitmap.RecordedFreeBytes:N0} bytes in MFT runs were marked free in the bitmap.";
         }
 
+        if (bitmap.RepeatedReferenceBytes > 0)
+        {
+            note += $" MFT runs contain {bitmap.RepeatedReferenceBytes:N0} bytes of repeated cluster references.";
+        }
+
         return note;
     }
 

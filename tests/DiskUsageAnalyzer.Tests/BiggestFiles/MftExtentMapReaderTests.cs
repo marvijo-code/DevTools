@@ -55,14 +55,16 @@ public sealed class MftExtentMapReaderTests
         Assert.Contains("outside the mapped extents", error.Message);
     }
 
-    [Fact]
-    public async Task LoadVolumeAsync_ScansFilesAndAllocationAfterTheMapContinuations()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LoadVolumeAsync_ScansFilesAndAllocationAfterTheMapContinuations(bool suppliesBitmap)
     {
         var directory = Directory.CreateTempSubdirectory("devtools-mft-volume-");
         var path = Path.Combine(directory.FullName, "image.bin");
         try
         {
-            await File.WriteAllBytesAsync(path, BuildDisk(nonResidentList: true));
+            await File.WriteAllBytesAsync(path, BuildDisk(nonResidentList: true, includeOverlappingRun: true));
             using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             var allocated = new byte[25];
             NtfsVolumeBitmapTests.SetBits(allocated, 10, 3);
@@ -72,16 +74,22 @@ public sealed class MftExtentMapReaderTests
             NtfsVolumeBitmapTests.SetBits(allocated, 150, 1);
             NtfsVolumeBitmapTests.SetBits(allocated, 120, 15);
             NtfsVolumeBitmapTests.SetBits(allocated, 199, 1);
+            var bitmapRequests = 0;
             var source = await MftTableLoader.LoadVolumeAsync(handle, @"C:\", Geometry, null,
                 Stopwatch.StartNew(), CancellationToken.None, keepFileNames: false,
-                bitmapQuery: (start, output) => NtfsVolumeBitmapTests.WriteReply(start, Geometry.TotalClusters, allocated, output));
+                bitmapQuery: (start, output) =>
+                {
+                    bitmapRequests++;
+                    return suppliesBitmap ? NtfsVolumeBitmapTests.WriteReply(start, Geometry.TotalClusters, allocated, output) : 0;
+                });
             var tree = MftFolderSizeScanner.BuildTree(source, @"C:\", "fixture", Stopwatch.StartNew());
 
             Assert.Equal(4130, tree.TotalBytes);
             Assert.Equal(1, tree.TotalFiles);
-            Assert.Equal(8192, tree.GetAllocatedBytes(tree.Find(@"C:\Folder")));
-            var expected = new NtfsBitmapAllocation(81 * ClusterSize, 80 * ClusterSize, ClusterSize);
-            Assert.Equal(new NtfsRecordAllocation(65 * ClusterSize, 0, expected), tree.NtfsAllocation);
+            Assert.Equal(8704, tree.GetAllocatedBytes(tree.Find(@"C:\Folder")));
+            var expected = new NtfsBitmapAllocation(81 * ClusterSize, 80 * ClusterSize, ClusterSize, (uint)ClusterSize);
+            Assert.Equal(new NtfsRecordAllocation(65 * ClusterSize, 0, suppliesBitmap ? expected : null), tree.NtfsAllocation);
+            Assert.Equal(suppliesBitmap ? 2 : 1, bitmapRequests);
         }
         finally
         {
@@ -90,7 +98,8 @@ public sealed class MftExtentMapReaderTests
         }
     }
 
-    private static byte[] BuildDisk(bool nonResidentList, ushort firstSequence = 7, ushort firstRecordNumber = 1)
+    private static byte[] BuildDisk(bool nonResidentList, ushort firstSequence = 7, ushort firstRecordNumber = 1,
+        bool includeOverlappingRun = false)
     {
         var contents = new byte[32 * 3];
         WriteReference(contents.AsSpan(0), 0, BaseReference, 3);
@@ -121,9 +130,14 @@ public sealed class MftExtentMapReaderTests
             .Build().CopyTo(disk, 57 * ClusterSize);
         new MftRecordBuilder().Directory(true).Sequence(3).FileName("Folder", (1UL << 48) | 5, 1)
             .Build().CopyTo(disk, 95 * ClusterSize);
-        new MftRecordBuilder().FileName("data.bin", (3UL << 48) | 24, 1)
-            .NonResidentData(4130, 8192, runs: [0x11, 16, 120, 0], highestVcn: 15)
-            .Build().CopyTo(disk, 97 * ClusterSize);
+        var file = new MftRecordBuilder().FileName("data.bin", (3UL << 48) | 24, 1)
+            .NonResidentData(4130, 8192, runs: [0x11, 16, 120, 0], highestVcn: 15);
+        if (includeOverlappingRun)
+        {
+            file.NamedData([0x11, 1, 120, 0]);
+        }
+
+        file.Build().CopyTo(disk, 97 * ClusterSize);
         contents.CopyTo(disk, 150 * ClusterSize);
         return disk;
     }

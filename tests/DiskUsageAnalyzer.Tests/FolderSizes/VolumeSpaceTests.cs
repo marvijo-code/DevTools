@@ -81,7 +81,7 @@ public sealed class VolumeSpaceTests
         var drive = new DriveDescriptor(@"C:\", "Test", "NTFS",
             hasSpace ? new VolumeSpace(1000, 300, 700, 0, 0, IsVolumeWide: true) : null);
         var tree = new FolderTree(drive.RootPath, [-1], [""], [400], [1], "NTFS", TimeSpan.Zero,
-            [444], new NtfsRecordAllocation(0, 0, new NtfsBitmapAllocation(690, 440, 4)));
+            [444], new NtfsRecordAllocation(0, 0, new NtfsBitmapAllocation(690, 440, 4, 20UL)));
         var results = new Dictionary<string, DriveScanResult>
         {
             [drive.RootPath] = new DriveScanResult(drive, tree, "NTFS", "")
@@ -92,6 +92,7 @@ public sealed class VolumeSpaceTests
         Assert.Contains("The NTFS bitmap reported 690 allocated bytes.", note);
         Assert.Contains("440 appear in MFT runs and 250 have no matching run.", note);
         Assert.Contains("4 bytes in MFT runs were marked free", note);
+        Assert.Contains("20 bytes of repeated cluster references", note);
     }
 
     [Fact]

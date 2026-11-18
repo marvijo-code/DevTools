@@ -330,7 +330,7 @@ internal static class MftTableLoader
         var lastWrite = keepFileNames ? new long[recordCount] : [];
         var recordAllocation = keepFileNames ? null : new long[recordCount];
         var observedBitmap = bitmapQuery is not null && recordAllocation is not null
-            ? NtfsVolumeBitmap.TryCreate(geometry.TotalClusters, resources.MemoryHeadroom)
+            ? NtfsVolumeBitmap.TryCreate(geometry.TotalClusters, resources.MemoryHeadroom, bitmapQuery, cancellationToken)
             : null;
         // The record sequence and its parent reference sequence share one temporary column.
         var referenceSequences = new uint[recordCount];
@@ -356,7 +356,7 @@ internal static class MftTableLoader
             reportProgress(parsed, recordCount, stopwatch.Elapsed);
         }
 
-        await ParseAllRecordsAsync(
+        var referencedClusters = await ParseAllRecordsAsync(
             volume, geometry, extents, recordSize, recordCount, chunkBytes, parserCount, queueCapacity,
             parent, flags, realSize, allocSize, lastWrite, names, keepFileNames, recordAllocation, referenceSequences,
             observedBitmap, OnParsed,
@@ -365,6 +365,15 @@ internal static class MftTableLoader
         var bitmapAllocation = bitmapQuery is not null
             ? observedBitmap?.Reconcile(geometry.BytesPerCluster, bitmapQuery, cancellationToken)
             : null;
+        if (bitmapAllocation is { } bitmap)
+        {
+            var referencedBytes = referencedClusters * geometry.BytesPerCluster;
+            var uniqueBytes = (UInt128)bitmap.MatchedBytes + (UInt128)bitmap.RecordedFreeBytes;
+            bitmapAllocation = referencedBytes >= uniqueBytes
+                ? bitmap with { RepeatedReferenceBytes = referencedBytes - uniqueBytes }
+                : null;
+        }
+
         reportProgress?.Invoke(recordCount, recordCount, stopwatch.Elapsed);
 
         return new MftRecordTable(volumeRoot, recordCount, parent, flags, realSize, allocSize, lastWrite, names,
@@ -442,7 +451,7 @@ internal static class MftTableLoader
         }
     }
 
-    private static async Task ParseAllRecordsAsync(
+    private static async Task<UInt128> ParseAllRecordsAsync(
         Microsoft.Win32.SafeHandles.SafeFileHandle volume,
         NtfsVolumeData geometry,
         List<(long Lcn, long ClusterCount)> extents,
@@ -481,12 +490,15 @@ internal static class MftTableLoader
 
 
         var parsers = new Task[parserCount];
+        var parserClusters = observedBitmap is not null ? new UInt128[parserCount] : null;
         for (var i = 0; i < parserCount; i++)
         {
+            var parserIndex = i;
             parsers[i] = Task.Run(async () =>
             {
                 var localExtensions = new List<ExtensionAllocation>();
                 var attributeRuns = observedBitmap is not null ? new List<(long Lcn, long ClusterCount)>() : null;
+                UInt128 referencedClusters = 0;
                 var info = new MftRecordInfo();
                 try
                 {
@@ -509,6 +521,11 @@ internal static class MftTableLoader
                                 byte flag = MftRecordTable.FlagInUse;
                                 if (info.IsDirectory) flag |= MftRecordTable.FlagDirectory;
                                 if (info.HasName) flag |= MftRecordTable.FlagHasName;
+
+                                if (parserClusters is not null)
+                                {
+                                    referencedClusters += (ulong)info.AllocatedClusters;
+                                }
 
                                 var allocated = recordAllocation is null
                                     ? 0
@@ -572,6 +589,11 @@ internal static class MftTableLoader
                 {
                     channel.Writer.TryComplete(ex);
                     throw;
+                }
+
+                if (parserClusters is not null)
+                {
+                    parserClusters[parserIndex] = referencedClusters;
                 }
 
                 if (localExtensions.Count > 0)
@@ -714,6 +736,17 @@ internal static class MftTableLoader
                 flags[baseNumber] |= MftRecordTable.FlagHasSize;
             }
         }
+
+        UInt128 totalReferencedClusters = 0;
+        if (parserClusters is not null)
+        {
+            foreach (var clusters in parserClusters)
+            {
+                totalReferencedClusters += clusters;
+            }
+        }
+
+        return totalReferencedClusters;
     }
 
     internal static void ValidateParentReferences(uint[] parents, byte[] flags, uint[] sequences, CancellationToken cancellationToken)

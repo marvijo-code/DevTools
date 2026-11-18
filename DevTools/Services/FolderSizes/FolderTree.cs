@@ -6,7 +6,8 @@ using DevTools.Services.BiggestFiles.Ntfs;
 
 namespace DevTools.Services.FolderSizes;
 
-internal readonly record struct NtfsRecordAllocation(long ReservedBytes, long UnlinkedBytes, NtfsBitmapAllocation? Bitmap = null);
+internal readonly record struct NtfsRecordAllocation(long ReservedBytes, long UnlinkedBytes,
+    NtfsBitmapAllocation? Bitmap = null, int IncompleteRecordCount = 0);
 
 /// <summary>
 /// Immutable in-memory size tree for every folder on one drive. Node 0 is the drive root.

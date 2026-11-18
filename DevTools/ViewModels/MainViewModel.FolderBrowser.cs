@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using DevTools.Infrastructure;
+using DevTools.Services;
 using DevTools.Services.FolderSizes;
 
 namespace DevTools.ViewModels;
@@ -173,6 +174,11 @@ public sealed partial class MainViewModel
         {
             coverage += " Allocation could not be fully measured.";
         }
+        if (node == 0)
+        {
+            coverage += DiskUsageAnalyzer.DescribeIncompleteMftAllocation(tree);
+        }
+
         _folderBrowserSummary =
             $"{ByteFormatter.Format(tree.GetTotalBytes(node))} of logical file size in {tree.GetFileCount(node):N0} files.{allocation}{coverage} " +
             $"Sized by {tree.EngineName} in {tree.Elapsed.TotalSeconds:F1}s.";

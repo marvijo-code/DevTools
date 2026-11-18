@@ -56,15 +56,30 @@ public sealed class MftExtentMapReaderTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task LoadVolumeAsync_ScansFilesAndAllocationAfterTheMapContinuations(bool suppliesBitmap)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task LoadVolumeAsync_ScansFilesAndAllocationAfterTheMapContinuations(bool suppliesBitmap, bool incompleteRecords)
     {
         var directory = Directory.CreateTempSubdirectory("devtools-mft-volume-");
         var path = Path.Combine(directory.FullName, "image.bin");
         try
         {
-            await File.WriteAllBytesAsync(path, BuildDisk(nonResidentList: true, includeOverlappingRun: true));
+            var disk = BuildDisk(nonResidentList: true, includeOverlappingRun: true);
+            if (incompleteRecords)
+            {
+                // The mapping list starts with a valid run and then has an invalid offset width.
+                new MftRecordBuilder().NamedData([0x11, 1, 116, 0x91, 1, 0]).Build().CopyTo(disk, 99 * ClusterSize);
+                var torn = new MftRecordBuilder().NamedData([0x11, 1, 117, 0]).Build();
+                MftRecordBuilder.CorruptSectorTail(torn, 0);
+                torn.CopyTo(disk, 101 * ClusterSize);
+                var unused = new MftRecordBuilder().InUse(false).Build();
+                MftRecordBuilder.CorruptSectorTail(unused, 0);
+                unused.CopyTo(disk, 103 * ClusterSize);
+            }
+
+            await File.WriteAllBytesAsync(path, disk);
             using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             var allocated = new byte[25];
             NtfsVolumeBitmapTests.SetBits(allocated, 10, 3);
@@ -74,6 +89,11 @@ public sealed class MftExtentMapReaderTests
             NtfsVolumeBitmapTests.SetBits(allocated, 150, 1);
             NtfsVolumeBitmapTests.SetBits(allocated, 120, 15);
             NtfsVolumeBitmapTests.SetBits(allocated, 199, 1);
+            if (incompleteRecords)
+            {
+                NtfsVolumeBitmapTests.SetBits(allocated, 116, 2);
+            }
+
             var bitmapRequests = 0;
             var source = await MftTableLoader.LoadVolumeAsync(handle, @"C:\", Geometry, null,
                 Stopwatch.StartNew(), CancellationToken.None, keepFileNames: false,
@@ -87,8 +107,17 @@ public sealed class MftExtentMapReaderTests
             Assert.Equal(4130, tree.TotalBytes);
             Assert.Equal(1, tree.TotalFiles);
             Assert.Equal(8704, tree.GetAllocatedBytes(tree.Find(@"C:\Folder")));
-            var expected = new NtfsBitmapAllocation(81 * ClusterSize, 80 * ClusterSize, ClusterSize, (uint)ClusterSize);
-            Assert.Equal(new NtfsRecordAllocation(65 * ClusterSize, 0, suppliesBitmap ? expected : null), tree.NtfsAllocation);
+            var expectedInUse = incompleteRecords ? 83 : 81;
+            var expected = new NtfsBitmapAllocation(expectedInUse * ClusterSize, 80 * ClusterSize, ClusterSize, (uint)ClusterSize);
+            Assert.Equal(new NtfsRecordAllocation(65 * ClusterSize, 0, suppliesBitmap ? expected : null, incompleteRecords ? 2 : 0),
+                tree.NtfsAllocation);
+
+            var drive = new DriveDescriptor(@"C:\", "", "NTFS", new VolumeSpace(200 * ClusterSize,
+                (200 - expectedInUse) * ClusterSize, expectedInUse * ClusterSize, 0, 0, IsVolumeWide: true));
+            var results = new Dictionary<string, DriveScanResult> { [drive.RootPath] = new(drive, tree, "NTFS", "") };
+            var summary = DevTools.Services.DiskUsageAnalyzer.BuildDriveSummarySection([drive], results);
+            var note = Assert.Single(summary.Entries).Note;
+            Assert.Equal(incompleteRecords, note.Contains("Incomplete allocation in 2 NTFS records.", StringComparison.Ordinal));
             Assert.Equal(suppliesBitmap ? 2 : 1, bitmapRequests);
         }
         finally

@@ -10,6 +10,7 @@ public struct MftRecordInfo
     public bool InUse;
     public bool IsDirectory;
     public bool HasAttributeList;
+    internal bool HasIncompleteAllocation;
 
     /// <summary>Base record number (low 48 bits) when this is an extension record; 0 for a base record.</summary>
     public ulong BaseRecordNumber;
@@ -97,12 +98,14 @@ public static class MftRecordParser
         var inUse = (flags & 0x0001) != 0;
         if ((requireInUse && !inUse) || !ApplyFixups(record))
         {
+            info.HasIncompleteAllocation = countAllocation && inUse;
             return false;
         }
 
         var usedBytes = GetUsedRecordLength(record);
         if (usedBytes == 0)
         {
+            info.HasIncompleteAllocation = countAllocation && inUse;
             return false;
         }
 
@@ -118,7 +121,8 @@ public static class MftRecordParser
         var firstAttributeOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x14, 2));
         if (firstAttributeOffset < 0x18 || firstAttributeOffset >= record.Length)
         {
-            // No attributes but still a structurally valid record.
+            // The record header is readable, but there is no verified list of attributes.
+            info.HasIncompleteAllocation = countAllocation && inUse;
             return true;
         }
 
@@ -130,7 +134,7 @@ public static class MftRecordParser
             var attributeType = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(offset, 4));
             if (attributeType == AttrEnd)
             {
-                break;
+                return true;
             }
 
             var attributeLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(offset + 4, 4));
@@ -142,18 +146,24 @@ public static class MftRecordParser
             var attribute = record.Slice(offset, attributeLength);
             var form = attribute[8];
             var nonResident = form == 1;
-            if (countAllocation && nonResident &&
-                TryGetMappingPairs(attribute, out var runs) &&
-                TryDecodeRunList(runs, attributeRuns, out var allocated, volumeClusters: volumeClusters) &&
-                allocated <= volumeClusters - info.AllocatedClusters)
+            if (countAllocation && form != 0)
             {
-                info.AllocatedClusters += allocated;
-                if (observedBitmap is not null && attributeRuns is not null)
+                if (nonResident && TryGetMappingPairs(attribute, out var runs) &&
+                    TryDecodeRunList(runs, attributeRuns, out var allocated, volumeClusters: volumeClusters) &&
+                    allocated <= volumeClusters - info.AllocatedClusters)
                 {
-                    foreach (var (lcn, count) in attributeRuns)
+                    info.AllocatedClusters += allocated;
+                    if (observedBitmap is not null && attributeRuns is not null)
                     {
-                        observedBitmap.Mark(lcn, count);
+                        foreach (var (lcn, count) in attributeRuns)
+                        {
+                            observedBitmap.Mark(lcn, count);
+                        }
                     }
+                }
+                else
+                {
+                    info.HasIncompleteAllocation = inUse;
                 }
             }
 
@@ -174,6 +184,13 @@ public static class MftRecordParser
             }
 
             offset += attributeLength;
+        }
+
+        // The end marker only requires a type field, unlike a full attribute header.
+        if (countAllocation && inUse &&
+            (record.Length - offset < sizeof(uint) || BinaryPrimitives.ReadUInt32LittleEndian(record[offset..]) != AttrEnd))
+        {
+            info.HasIncompleteAllocation = true;
         }
 
         return true;

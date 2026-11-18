@@ -678,7 +678,8 @@ public sealed class DiskUsageAnalyzer
             results.TryGetValue(drive.RootPath, out var result);
             var tree = result?.Tree;
             var bitmap = tree?.NtfsAllocation?.Bitmap;
-            var incompleteNote = DescribeIncompleteFolderScan(tree) + DescribeIncompleteAllocation(tree);
+            var incompleteNote = DescribeIncompleteFolderScan(tree) + DescribeIncompleteAllocation(tree) +
+                DescribeIncompleteMftAllocation(tree);
             var totals = drive.Space is { } space
                 ? DescribeVolumeTotals(space)
                 : "Windows did not report space totals for this volume";
@@ -797,6 +798,11 @@ public sealed class DiskUsageAnalyzer
     private static string DescribeIncompleteAllocation(FolderTree? tree) =>
         tree is { IncompleteAllocationDirectoryCount: > 0 }
             ? $" Incomplete allocation in {tree.IncompleteAllocationDirectoryCount:N0} {(tree.IncompleteAllocationDirectoryCount == 1 ? "directory" : "directories")}."
+            : string.Empty;
+
+    internal static string DescribeIncompleteMftAllocation(FolderTree? tree) =>
+        tree?.NtfsAllocation is { IncompleteRecordCount: > 0 } allocation
+            ? $" Incomplete allocation in {allocation.IncompleteRecordCount:N0} NTFS {(allocation.IncompleteRecordCount == 1 ? "record" : "records")}."
             : string.Empty;
 
     private static string DescribeNtfsBitmap(NtfsBitmapAllocation? allocation, long? volumeUsedBytes = null)

@@ -164,9 +164,15 @@ public sealed class MftFolderSizeScanner
         var allocated = recordAllocation is null ? null : new long[count];
         long reservedClusters = 0;
         long unlinkedClusters = 0;
+        var incompleteRecords = 0;
         for (var r = 0; r < recordCount; r++)
         {
             WaitForTreeBatch(r, cancellationToken);
+            if ((table.Flags[r] & MftRecordTable.FlagIncompleteAllocation) != 0)
+            {
+                incompleteRecords++;
+            }
+
             var parentNode = -1;
             var isUserFile = r >= MftRecordTable.FirstUserRecordNumber && table.IsNamedFile(r);
             if (isUserFile)
@@ -223,7 +229,7 @@ public sealed class MftFolderSizeScanner
         {
             allocated[0] = recordAllocation!.ToBytes(allocated[0]);
             allocation = new NtfsRecordAllocation(recordAllocation.ToBytes(reservedClusters),
-                recordAllocation.ToBytes(unlinkedClusters), table.BitmapAllocation);
+                recordAllocation.ToBytes(unlinkedClusters), table.BitmapAllocation, incompleteRecords);
         }
 
         ScanGate.Wait(cancellationToken);

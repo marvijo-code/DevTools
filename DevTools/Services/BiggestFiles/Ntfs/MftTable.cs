@@ -21,6 +21,7 @@ internal sealed class MftRecordTable
     public const byte FlagHasName = 0x04;
     public const byte FlagExtension = 0x08;
     public const byte FlagHasSize = 0x10;
+    public const byte FlagIncompleteAllocation = 0x20;
 
     public const uint RootRecordNumber = 5;
     public const uint InvalidParentRecord = uint.MaxValue;
@@ -703,10 +704,16 @@ internal static class MftTableLoader
                     requireInUse: true, readLastWrite: keepFileNames, countAllocation: recordAllocation is not null,
                     volumeClusters: geometry.TotalClusters, observedBitmap: observedBitmap, attributeRuns: attributeRuns))
                 {
+                    if (info.HasIncompleteAllocation)
+                    {
+                        flags[globalIndex] = MftRecordTable.FlagIncompleteAllocation;
+                    }
+
                     continue;
                 }
 
                 byte flag = MftRecordTable.FlagInUse;
+                if (info.HasIncompleteAllocation) flag |= MftRecordTable.FlagIncompleteAllocation;
                 if (info.IsDirectory) flag |= MftRecordTable.FlagDirectory;
                 if (info.HasName) flag |= MftRecordTable.FlagHasName;
 

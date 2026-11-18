@@ -149,10 +149,16 @@ public sealed class DriveUsageService
         public uint BytesPerSector;
     }
 
-    public async Task<DriveScanResult> ScanDriveAsync(
+    public Task<DriveScanResult> ScanDriveAsync(
         DriveDescriptor drive,
         IProgress<FolderScanProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) => ScanDriveAsync(drive, progress, cancellationToken, concurrentWalks: 1);
+
+    internal async Task<DriveScanResult> ScanDriveAsync(
+        DriveDescriptor drive,
+        IProgress<FolderScanProgress>? progress,
+        CancellationToken cancellationToken,
+        int concurrentWalks)
     {
         var root = drive.RootPath;
         var notes = new List<string>();
@@ -183,8 +189,12 @@ public sealed class DriveUsageService
         }
 
         Report(ParallelFolderWalker.EngineName, $"Walking every folder on {root} (slow path)...");
+        // Share the normal background worker budget among independent volume walks.
+        int? workerCount = concurrentWalks > 1
+            ? Math.Max(1, ScanResources.Capture().WalkWorkerCount(ScanResources.ReadSeekPenalty(root), prioritize: false) / concurrentWalks)
+            : null;
         var walked = await TryEngineAsync(
-            () => _walker.ScanAsync(root, progress, cancellationToken),
+            () => _walker.ScanAsync(root, progress, cancellationToken, workerCount),
             ParallelFolderWalker.EngineName, root, notes, cancellationToken).ConfigureAwait(false);
         return walked is not null
             ? Done(drive, walked, notes)

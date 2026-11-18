@@ -29,8 +29,10 @@ internal static class DiskCapacityInventory
     private const uint GetVolumeExtents = 0x00560000;
     private const int MaximumBufferSize = 1024 * 1024;
 
-    internal static IReadOnlyList<DiskCapacity> Read(IReadOnlyList<DriveDescriptor> volumes, CancellationToken cancellationToken)
+    internal static IReadOnlyList<DiskCapacity> Read(
+        IReadOnlyList<DriveDescriptor> volumes, CancellationToken cancellationToken, out int?[] backingDisks)
     {
+        backingDisks = new int?[volumes.Count];
         if (!OperatingSystem.IsWindows())
         {
             return [];
@@ -38,11 +40,11 @@ internal static class DiskCapacityInventory
 
         var buffer = new byte[4096];
         var extents = new List<VolumeDiskExtent>();
-        foreach (var volume in volumes)
+        for (var index = 0; index < volumes.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (volume.Space is not { IsVolumeWide: true, TotalBytes: > 0 } space ||
-                WindowsVolumePaths.GetDevicePath(volume.RootPath) is not { } device)
+            var volume = volumes[index];
+            if (WindowsVolumePaths.GetDevicePath(volume.RootPath) is not { } device)
             {
                 continue;
             }
@@ -52,7 +54,11 @@ internal static class DiskCapacityInventory
             if (volumeExtents.Length == 1)
             {
                 var (disk, range) = volumeExtents[0];
-                extents.Add(new VolumeDiskExtent(disk, range, space.TotalBytes));
+                backingDisks[index] = disk;
+                if (volume.Space is { IsVolumeWide: true, TotalBytes: > 0 } space)
+                {
+                    extents.Add(new VolumeDiskExtent(disk, range, space.TotalBytes));
+                }
             }
         }
 

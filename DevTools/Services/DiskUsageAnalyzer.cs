@@ -1,5 +1,7 @@
+using System.Runtime.CompilerServices;
 using DevTools.Infrastructure;
 using DevTools.Models;
+using DevTools.Services.BiggestFiles;
 using DevTools.Services.BiggestFiles.Ntfs;
 using DevTools.Services.FolderSizes;
 
@@ -32,7 +34,9 @@ public sealed class DiskUsageAnalyzer
         {
             lock (_treesLock)
             {
-                return _trees.Values.ToList();
+                var systemRoot = FolderTree.NormalizeRoot(Environment.SystemDirectory);
+                return _trees.Values.OrderByDescending(tree => string.Equals(tree.RootPath, systemRoot, StringComparison.OrdinalIgnoreCase))
+                    .ThenBy(tree => tree.RootPath, StringComparer.OrdinalIgnoreCase).ToList();
             }
         }
     }
@@ -50,7 +54,11 @@ public sealed class DiskUsageAnalyzer
     {
         var capturedAt = DateTimeOffset.Now;
         var drives = DriveUsageService.GetFixedDrives(includeVolumesWithoutDriveLetters: true);
-        var diskCapacities = DiskCapacityInventory.Read(drives, cancellationToken);
+        var diskCapacities = DiskCapacityInventory.Read(drives, cancellationToken, out var backingDisks);
+        var hasSeparateDisks = backingDisks.Where(disk => disk.HasValue).Distinct().Skip(1).Any();
+        var useRawMft = hasSeparateDisks && OperatingSystem.IsWindows() && drives.Any(drive =>
+            string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)) && ElevationService.IsProcessElevated();
+        var concurrentWalks = hasSeparateDisks && !useRawMft && ScanResources.Capture().CanOverlapVolumeWalks ? 2 : 1;
         var browseRoots = drives.Select(drive => drive.RootPath).ToArray();
         lock (_treesLock)
         {
@@ -83,31 +91,33 @@ public sealed class DiskUsageAnalyzer
 
         var results = new Dictionary<string, DriveScanResult>(StringComparer.OrdinalIgnoreCase);
         var currentAnalysis = BuildAnalysis([]);
-        for (var driveIndex = 0; driveIndex < drives.Count; driveIndex++)
+        var progressLock = new object();
+
+        async Task<DriveScanResult> ScanVolumeAsync(int sectionIndex, int workerShare, CancellationToken scanToken)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var drive = drives[driveIndex];
-            var sectionIndex = driveIndex;
+            var drive = drives[sectionIndex];
             var title = LargestFoldersTitleFor(drive.RootPath);
             var lastStatus = DateTime.MinValue;
             var driveProgress = new InlineProgress<FolderScanProgress>(update =>
             {
-                // Throttle: the UI only needs a few updates a second.
-                if ((DateTime.UtcNow - lastStatus).TotalMilliseconds < 400)
+                lock (progressLock)
                 {
-                    return;
-                }
+                    var now = DateTime.UtcNow;
+                    if ((now - lastStatus).TotalMilliseconds < 400)
+                    {
+                        return;
+                    }
 
-                lastStatus = DateTime.UtcNow;
-                var elapsed = update.Elapsed > TimeSpan.Zero ? $" ({update.Elapsed.TotalSeconds:F0}s)" : string.Empty;
-                sections[sectionIndex] = CreatePendingSection(title, $"{update.EngineName}: {update.Message}{elapsed}");
-                progress?.Report(new DiskUsageProgress(headline, $"Volume {sectionIndex + 1} of {drives.Count} ({drive.RootPath}): {update.Message}", currentAnalysis, sections.ToList(), false));
+                    lastStatus = now;
+                    var elapsed = update.Elapsed > TimeSpan.Zero ? $" ({update.Elapsed.TotalSeconds:F0}s)" : string.Empty;
+                    sections[sectionIndex] = CreatePendingSection(title, $"{update.EngineName}: {update.Message}{elapsed}");
+                    progress?.Report(new DiskUsageProgress(headline, $"Volume {sectionIndex + 1} of {drives.Count} ({drive.RootPath}): {update.Message}", currentAnalysis, sections.ToList(), false));
+                }
             });
 
-            DriveScanResult result;
             try
             {
-                result = await _driveUsage.ScanDriveAsync(drive, driveProgress, cancellationToken).ConfigureAwait(false);
+                return await _driveUsage.ScanDriveAsync(drive, driveProgress, scanToken, workerShare).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -116,9 +126,15 @@ public sealed class DiskUsageAnalyzer
             catch (Exception ex)
             {
                 AppLog.Error($"Sizing {drive.RootPath} failed.", ex);
-                result = new DriveScanResult(drive, null, "None", ex.Message);
+                return new DriveScanResult(drive, null, "None", ex.Message);
             }
+        }
 
+        await foreach (var (sectionIndex, result) in ScanVolumesAsync(backingDisks, concurrentWalks, ScanVolumeAsync, cancellationToken)
+            .ConfigureAwait(false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var drive = drives[sectionIndex];
             results[drive.RootPath] = result;
             lock (_treesLock)
             {
@@ -132,27 +148,33 @@ public sealed class DiskUsageAnalyzer
                 }
             }
 
-            sections[sectionIndex] = BuildDriveSection(result);
-            if (string.Equals(drive.RootPath, systemRoot, StringComparison.OrdinalIgnoreCase))
-            {
-                var derived = BuildDerivedSections(result.Tree);
-                for (var i = 0; i < derived.Count; i++)
-                {
-                    sections[drives.Count + i] = derived[i];
-                }
-            }
-
+            var driveSection = BuildDriveSection(result);
+            var derived = string.Equals(drive.RootPath, systemRoot, StringComparison.OrdinalIgnoreCase)
+                ? BuildDerivedSections(result.Tree)
+                : null;
             var currentDrives = drives
                 .Select(item => results.TryGetValue(item.RootPath, out var completed) ? completed.Drive : item)
                 .ToArray();
-            headline = BuildHeadline(currentDrives, capturedAt);
-            sections[^1] = BuildDriveSummarySection(currentDrives, results, diskCapacities);
-            currentAnalysis = BuildAnalysis(results.Values);
-            progress?.Report(new DiskUsageProgress(headline, $"Sized {results.Count} of {drives.Count} volume(s).", currentAnalysis, sections.ToList(), false)
+            lock (progressLock)
             {
-                BrowseRoots = browseRoots,
-                CompletedRoot = drive.RootPath
-            });
+                sections[sectionIndex] = driveSection;
+                if (derived is not null)
+                {
+                    for (var i = 0; i < derived.Count; i++)
+                    {
+                        sections[drives.Count + i] = derived[i];
+                    }
+                }
+
+                headline = BuildHeadline(currentDrives, capturedAt);
+                sections[^1] = BuildDriveSummarySection(currentDrives, results, diskCapacities);
+                currentAnalysis = BuildAnalysis(results.Values);
+                progress?.Report(new DiskUsageProgress(headline, $"Sized {results.Count} of {drives.Count} volume(s).", currentAnalysis, sections.ToList(), false)
+                {
+                    BrowseRoots = browseRoots,
+                    CompletedRoot = drive.RootPath
+                });
+            }
         }
 
         if (!results.ContainsKey(systemRoot))
@@ -164,6 +186,64 @@ public sealed class DiskUsageAnalyzer
         var analysis = BuildAnalysis(results.Values);
         progress?.Report(new DiskUsageProgress(headline, $"Last disk refresh: {capturedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}", analysis, sections.ToList(), true));
         return new DiskUsageSnapshot(capturedAt, headline, analysis, sections) { BrowseRoots = browseRoots };
+    }
+
+    internal static async IAsyncEnumerable<(int Index, DriveScanResult Result)> ScanVolumesAsync(
+        IReadOnlyList<int?> backingDisks, int parallelism, Func<int, int, CancellationToken, Task<DriveScanResult>> scan,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(parallelism, 1);
+        using var activeScans = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var pending = Enumerable.Range(0, backingDisks.Count).ToList();
+        var running = new List<(int Index, Task<DriveScanResult> Scan)>(parallelism);
+
+        bool CanOverlap(int left, int right) =>
+            backingDisks[left] is int leftDisk && backingDisks[right] is int rightDisk && leftDisk != rightDisk;
+
+        bool CanStart(int index) => running.All(item => CanOverlap(index, item.Index));
+
+        try
+        {
+            while (pending.Count > 0 || running.Count > 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                while (running.Count < parallelism)
+                {
+                    var next = pending.FindIndex(CanStart);
+                    if (next < 0)
+                    {
+                        break;
+                    }
+
+                    var index = pending[next];
+                    pending.RemoveAt(next);
+                    var canRunWithAnother = running.Count > 0 ||
+                        (parallelism > 1 && pending.Exists(other => CanOverlap(index, other)));
+                    running.Add((index, scan(index, canRunWithAnother ? parallelism : 1, activeScans.Token)));
+                }
+
+                var complete = await Task.WhenAny(running.Select(item => item.Scan)).ConfigureAwait(false);
+                var slot = running.FindIndex(item => item.Scan == complete);
+                var indexCompleted = running[slot].Index;
+                running.RemoveAt(slot);
+                yield return (indexCompleted, await complete.ConfigureAwait(false));
+            }
+        }
+        finally
+        {
+            if (running.Count > 0)
+            {
+                activeScans.Cancel();
+                try
+                {
+                    await Task.WhenAll(running.Select(item => item.Scan)).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Finish draining the other scans without replacing the original error or cancellation.
+                }
+            }
+        }
     }
 
     /// <summary>

@@ -22,6 +22,114 @@ public sealed class VolumeSpaceTests
         Assert.DoesNotContain(all, drive => drive.RootPath.Equals(identity, StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public async Task VolumeScheduler_OverlapsSeparateDisksAndRunsUnknownDisksAlone()
+    {
+        int?[] disks = [0, 0, 1, 1, null];
+        var active = new HashSet<int>();
+        var observedOrder = new List<int>();
+        var diskOneAdvanced = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        async Task<DriveScanResult> ScanAsync(int index, int workerShare, CancellationToken token)
+        {
+            lock (active)
+            {
+                Assert.All(active, other =>
+                {
+                    Assert.True(disks[index].HasValue && disks[other].HasValue);
+                    Assert.NotEqual(disks[index], disks[other]);
+                });
+                active.Add(index);
+                observedOrder.Add(index);
+            }
+
+            try
+            {
+                if (index == 0)
+                {
+                    Assert.Equal(2, workerShare);
+                    // Disk 1 must be able to start its second volume while disk 0 is still busy.
+                    await diskOneAdvanced.Task.WaitAsync(token);
+                }
+                else if (index == 3)
+                {
+                    Assert.Equal(2, workerShare);
+                    diskOneAdvanced.TrySetResult();
+                }
+                else if (disks[index] is null)
+                {
+                    Assert.Equal(1, workerShare);
+                }
+
+                return VolumeResult(index);
+            }
+            finally
+            {
+                lock (active)
+                {
+                    active.Remove(index);
+                }
+            }
+        }
+
+        var results = new List<int>();
+        await foreach (var (index, result) in DiskUsage.ScanVolumesAsync(disks, 2, ScanAsync, timeout.Token))
+        {
+            Assert.Equal(VolumeResult(index), result);
+            results.Add(index);
+        }
+
+        Assert.Equal([0, 2, 3, 1, 4], observedOrder);
+        Assert.Equal([0, 1, 2, 3, 4], results.Order().ToArray());
+        Assert.Empty(active);
+    }
+
+    [Fact]
+    public async Task VolumeScheduler_CancelsAndJoinsBothRunningWalks()
+    {
+        var bothStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = 0;
+        var stopped = 0;
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        async Task<DriveScanResult> ScanAsync(int index, int workerShare, CancellationToken token)
+        {
+            if (Interlocked.Increment(ref started) == 2)
+            {
+                bothStarted.TrySetResult();
+            }
+
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                return VolumeResult(index);
+            }
+            finally
+            {
+                Interlocked.Increment(ref stopped);
+            }
+        }
+
+        async Task ConsumeAsync()
+        {
+            await foreach (var _ in DiskUsage.ScanVolumesAsync([0, 1, 1], 2, ScanAsync, cancellation.Token))
+            {
+                throw new InvalidOperationException("A cancelled scan must not publish a result.");
+            }
+        }
+
+        var consume = ConsumeAsync();
+        await bothStarted.Task.WaitAsync(cancellation.Token);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => consume);
+        Assert.Equal(2, started);
+        Assert.Equal(2, stopped);
+    }
+
+    private static DriveScanResult VolumeResult(int index) => new(
+        new DriveDescriptor($"Volume {index}", string.Empty, "NTFS", null), null, "test", string.Empty);
+
     [Theory]
     [InlineData(true, false, null, true, "Folder scan pending.")]
     [InlineData(false, false, null, true, "Folder scan pending.")]

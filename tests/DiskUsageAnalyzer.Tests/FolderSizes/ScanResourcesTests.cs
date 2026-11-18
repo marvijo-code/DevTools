@@ -20,6 +20,16 @@ public sealed class ScanResourcesTests
         Assert.Equal(workers, resources.WalkWorkerCount(seek, prioritise));
     }
 
+    [Theory]
+    [InlineData(4, 2048L, true)]
+    [InlineData(2, 4096L, false)]
+    [InlineData(8, 1024L, false)]
+    [InlineData(8, null, false)]
+    public void VolumeOverlap_RequiresCpuAndMemoryHeadroom(int processors, long? memoryMiB, bool expected)
+    {
+        Assert.Equal(expected, new ScanResources(processors, memoryMiB * MiB).CanOverlapVolumeWalks);
+    }
+
     [Fact]
     public void SeekPenaltyFallback_UsesEveryDistinctBackingDiskUntilOneReportsSeeks()
     {

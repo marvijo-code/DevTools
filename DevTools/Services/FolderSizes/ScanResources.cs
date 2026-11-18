@@ -16,6 +16,8 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
         return new ScanResources(Environment.ProcessorCount, headroom);
     }
 
+    internal bool CanOverlapVolumeWalks => LogicalProcessors >= 4 && MemoryHeadroom >= 2048L * MiB;
+
     public int WalkWorkerCount(bool? seekPenalty, bool prioritize)
     {
         var cpuLimit = Math.Max(1, prioritize ? LogicalProcessors - 1 : LogicalProcessors / 2);

@@ -68,6 +68,8 @@ public sealed class ParallelFolderWalker
                 try
                 {
                     var allocationReader = allocationIndex is null ? null : new DirectoryAllocationReader(allocationIndex);
+                    var subfolders = new List<string>();
+                    var children = new List<(int Node, string Name)>();
                     foreach (var (node, path) in queue.GetConsumingEnumerable(cancellationToken))
                     {
                         if (!prioritize)
@@ -78,7 +80,7 @@ public sealed class ParallelFolderWalker
                         long bytes = 0;
                         long files = 0;
                         long allocatedBytes = 0;
-                        var subfolders = new List<string>();
+                        subfolders.Clear();
                         if (allocationReader is null ||
                             !allocationReader.TryRead(path, subfolders, cancellationToken, out bytes, out allocatedBytes, out files))
                         {
@@ -117,20 +119,20 @@ public sealed class ParallelFolderWalker
                             }
                         }
 
-                        var children = new List<(int Node, string Path)>(subfolders.Count);
+                        children.Clear();
                         lock (builderLock)
                         {
                             builder.AddFilesToFolder(node, bytes, files, allocatedBytes);
                             foreach (var name in subfolders)
                             {
-                                children.Add((builder.AddChildFolder(node, name), Path.Combine(path, name)));
+                                children.Add((builder.AddChildFolder(node, name), name));
                             }
                         }
 
                         Interlocked.Add(ref pending, children.Count);
-                        foreach (var child in children)
+                        foreach (var (child, name) in children)
                         {
-                            queue.Add(child, cancellationToken);
+                            queue.Add((child, Path.Combine(path, name)), cancellationToken);
                         }
 
                         Interlocked.Add(ref filesSeen, files);

@@ -31,9 +31,10 @@ internal static class DiskCapacityInventory
     private const int MaximumBufferSize = 1024 * 1024;
 
     internal static IReadOnlyList<DiskCapacity> Read(
-        IReadOnlyList<DriveDescriptor> volumes, CancellationToken cancellationToken, out int?[] backingDisks)
+        IReadOnlyList<DriveDescriptor> volumes, CancellationToken cancellationToken, out int[][] backingDisks)
     {
-        backingDisks = new int?[volumes.Count];
+        backingDisks = new int[volumes.Count][];
+        Array.Fill(backingDisks, Array.Empty<int>());
         if (!OperatingSystem.IsWindows())
         {
             return [];
@@ -52,7 +53,7 @@ internal static class DiskCapacityInventory
 
             using var handle = OpenMetadata(device);
             var volumeExtents = ReadVolumeExtents(handle, ref buffer);
-            backingDisks[index] = GetSingleBackingDisk(volumeExtents);
+            backingDisks[index] = GetBackingDiskNumbers(volumeExtents);
             long? fileSystemBytes = volumeExtents.Length == 1 && volume.Space is { IsVolumeWide: true, TotalBytes: > 0 } space
                 ? space.TotalBytes
                 : null;
@@ -87,24 +88,12 @@ internal static class DiskCapacityInventory
         return disks;
     }
 
-    internal static int? GetSingleBackingDisk(ReadOnlySpan<(int DiskNumber, DiskRange Range)> extents)
+    internal static int[] GetBackingDiskNumbers((int DiskNumber, DiskRange Range)[] extents) => extents.Length switch
     {
-        if (extents.IsEmpty)
-        {
-            return null;
-        }
-
-        var disk = extents[0].DiskNumber;
-        foreach (var extent in extents[1..])
-        {
-            if (extent.DiskNumber != disk)
-            {
-                return null;
-            }
-        }
-
-        return disk;
-    }
+        0 => [],
+        1 => [extents[0].DiskNumber],
+        _ => extents.Select(extent => extent.DiskNumber).Distinct().ToArray()
+    };
 
     internal static (int DiskNumber, DiskRange Range)[] ReadVolumeExtents(SafeFileHandle volume, ref byte[] buffer)
     {

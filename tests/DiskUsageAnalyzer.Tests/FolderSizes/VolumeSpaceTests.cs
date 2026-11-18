@@ -72,7 +72,7 @@ public sealed class VolumeSpaceTests
     [Fact]
     public async Task VolumeScheduler_OverlapsSeparateDisksAndRunsUnknownDisksAlone()
     {
-        int?[] disks = [0, 0, 1, 1, null];
+        int[][] disks = [[0], [0], [1], [1], []];
         var active = new HashSet<int>();
         var observedOrder = new List<int>();
         var diskOneAdvanced = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -84,8 +84,9 @@ public sealed class VolumeSpaceTests
             {
                 Assert.All(active, other =>
                 {
-                    Assert.True(disks[index].HasValue && disks[other].HasValue);
-                    Assert.NotEqual(disks[index], disks[other]);
+                    Assert.NotEmpty(disks[index]);
+                    Assert.NotEmpty(disks[other]);
+                    Assert.Empty(disks[index].Intersect(disks[other]));
                 });
                 active.Add(index);
                 observedOrder.Add(index);
@@ -104,7 +105,7 @@ public sealed class VolumeSpaceTests
                     Assert.Equal(2, workerShare);
                     diskOneAdvanced.TrySetResult();
                 }
-                else if (disks[index] is null)
+                else if (disks[index].Length == 0)
                 {
                     Assert.Equal(1, workerShare);
                 }
@@ -133,9 +134,63 @@ public sealed class VolumeSpaceTests
     }
 
     [Fact]
+    public async Task VolumeScheduler_OverlapsSpannedVolumesOnlyWithDisjointDisks()
+    {
+        int[][] disks = [[0, 1], [1], [2, 3], []];
+        var started = new List<int>();
+        var separateVolumeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        async Task<DriveScanResult> ScanAsync(int index, int workerShare, CancellationToken token)
+        {
+            started.Add(index);
+            if (index == 0)
+            {
+                Assert.Equal(3, workerShare);
+                await separateVolumeStarted.Task.WaitAsync(token);
+            }
+            else if (index == 2)
+            {
+                Assert.Equal(3, workerShare);
+                separateVolumeStarted.SetResult();
+            }
+
+            return VolumeResult(index);
+        }
+
+        var completed = new List<int>();
+        await foreach (var (index, _) in DiskUsage.ScanVolumesAsync(disks, 4, ScanAsync, deadline.Token))
+        {
+            completed.Add(index);
+        }
+
+        Assert.Equal([0, 2, 1, 3], started);
+        Assert.Equal([0, 1, 2, 3], completed.Order().ToArray());
+    }
+
+    [Fact]
+    public async Task VolumeScheduler_UsesTheFullWorkerBudgetWhenRemainingSpansOverlap()
+    {
+        int[][] disks = [[0, 1], [1, 2]];
+        Task<DriveScanResult> ScanAsync(int index, int workerShare, CancellationToken token)
+        {
+            Assert.Equal(1, workerShare);
+            return Task.FromResult(VolumeResult(index));
+        }
+
+        var completed = new List<int>();
+        await foreach (var (index, _) in DiskUsage.ScanVolumesAsync(disks, 3, ScanAsync, CancellationToken.None))
+        {
+            completed.Add(index);
+        }
+
+        Assert.Equal([0, 1], completed);
+    }
+
+    [Fact]
     public async Task VolumeScheduler_GivesTheLastDiskItsFullWorkerBudget()
     {
-        int?[] disks = [0, 1, 2, 0, 0, null];
+        int[][] disks = [[0], [1], [2], [0], [0], []];
         var workerShares = new int[disks.Length];
         var finishFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -191,7 +246,7 @@ public sealed class VolumeSpaceTests
 
         async Task ConsumeAsync()
         {
-            await foreach (var _ in DiskUsage.ScanVolumesAsync([0, 1, 1], 2, ScanAsync, cancellation.Token))
+            await foreach (var _ in DiskUsage.ScanVolumesAsync([[0], [1], [1]], 2, ScanAsync, cancellation.Token))
             {
                 throw new InvalidOperationException("A cancelled scan must not publish a result.");
             }
@@ -441,13 +496,13 @@ public sealed class VolumeSpaceTests
     }
 
     [Fact]
-    public void SingleBackingDisk_RequiresEveryExtentToBeOnTheSameDisk()
+    public void BackingDiskNumbers_ContainsEachDiskOnce()
     {
-        Assert.Equal(3, DiskCapacityInventory.GetSingleBackingDisk([
+        Assert.Equal([3], DiskCapacityInventory.GetBackingDiskNumbers([
             (3, new DiskRange(10, 20)), (3, new DiskRange(50, 20))]));
-        Assert.Null(DiskCapacityInventory.GetSingleBackingDisk([
-            (3, new DiskRange(10, 20)), (7, new DiskRange(50, 20))]));
-        Assert.Null(DiskCapacityInventory.GetSingleBackingDisk([]));
+        Assert.Equal([3, 7], DiskCapacityInventory.GetBackingDiskNumbers([
+            (3, new DiskRange(10, 20)), (7, new DiskRange(50, 20)), (3, new DiskRange(75, 20))]));
+        Assert.Empty(DiskCapacityInventory.GetBackingDiskNumbers([]));
     }
 
     [Fact]

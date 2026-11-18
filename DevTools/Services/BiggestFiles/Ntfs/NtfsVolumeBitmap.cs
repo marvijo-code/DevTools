@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace DevTools.Services.BiggestFiles.Ntfs;
 
@@ -100,18 +101,36 @@ internal sealed class NtfsVolumeBitmap
                     return null;
                 }
 
-                var payload = buffer.AsSpan(offset, bytes - offset);
-                while (next < end)
+                var fullWords = (int)((end - next) >> 6);
+                var fullBytes = fullWords * sizeof(ulong);
+                var firstWord = (int)(next >> 6);
+                var allocatedWords = MemoryMarshal.Cast<byte, ulong>(buffer.AsSpan(offset, fullBytes));
+                var observedWords = _observed.AsSpan(firstWord, fullWords);
+                for (var i = 0; i < allocatedWords.Length; i++)
                 {
-                    var bits = (int)Math.Min(64, end - next);
-                    var allocated = ReadBits(payload, bits);
-                    var observed = (ulong)_observed[(int)(next >> 6)];
+                    var allocated = allocatedWords[i];
+                    if (!BitConverter.IsLittleEndian)
+                    {
+                        allocated = BinaryPrimitives.ReverseEndianness(allocated);
+                    }
+
+                    var observed = (ulong)observedWords[i];
                     inUse += BitOperations.PopCount(allocated);
                     matched += BitOperations.PopCount(allocated & observed);
                     recordedFree += BitOperations.PopCount(observed & ~allocated);
-                    payload = payload[((bits + 7) / 8)..];
-                    next += bits;
                 }
+
+                var tailBits = (int)(end & 63);
+                if (tailBits > 0)
+                {
+                    var allocated = ReadTailBits(buffer.AsSpan(offset + fullBytes, (tailBits + 7) / 8), tailBits);
+                    var observed = (ulong)_observed[firstWord + fullWords];
+                    inUse += BitOperations.PopCount(allocated);
+                    matched += BitOperations.PopCount(allocated & observed);
+                    recordedFree += BitOperations.PopCount(observed & ~allocated);
+                }
+
+                next = end;
             }
 
             return new NtfsBitmapAllocation(
@@ -155,13 +174,8 @@ internal sealed class NtfsVolumeBitmap
         return true;
     }
 
-    private static ulong ReadBits(ReadOnlySpan<byte> payload, int bits)
+    private static ulong ReadTailBits(ReadOnlySpan<byte> payload, int bits)
     {
-        if (bits == 64)
-        {
-            return BinaryPrimitives.ReadUInt64LittleEndian(payload);
-        }
-
         ulong value = 0;
         for (var index = 0; index < (bits + 7) / 8; index++)
         {

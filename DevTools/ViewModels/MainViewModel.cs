@@ -53,7 +53,7 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly SemaphoreSlim _killProcessesRefreshGate = new(1, 1);
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private readonly Dictionary<string, bool> _diskUsageSectionExpansionStates = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _diskUsageExpansionInProgress = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _diskUsageExpansionInProgress = new(StringComparer.Ordinal);
     private ProcessViewState _processViewState = new();
     private Dictionary<string, bool> _killProcessSectionExpansionStates => _processViewState.ExpandedSections;
     private readonly List<WorkflowRunItem> _allRuns = [];

@@ -45,10 +45,10 @@ public sealed class DiskUsageSection : ObservableObject
     private void SynchronizeEntries(IReadOnlyList<DiskUsageEntry> incomingEntries)
     {
         var desiredEntries = incomingEntries
-            .GroupBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(entry => entry.Path, StringComparer.Ordinal)
             .Select(group => group.First())
             .ToList();
-        var incomingPaths = new HashSet<string>(desiredEntries.Select(entry => entry.Path), StringComparer.OrdinalIgnoreCase);
+        var incomingPaths = new HashSet<string>(desiredEntries.Select(entry => entry.Path), StringComparer.Ordinal);
 
         for (var i = 0; i < desiredEntries.Count; i++)
         {
@@ -81,7 +81,7 @@ public sealed class DiskUsageSection : ObservableObject
     {
         for (var i = 0; i < Entries.Count; i++)
         {
-            if (string.Equals(Entries[i].Path, path, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(Entries[i].Path, path, StringComparison.Ordinal))
             {
                 return i;
             }

@@ -189,7 +189,7 @@ public sealed class DiskUsageEntry : ObservableObject
         var previouslyExpanded = _children
             .Where(child => child.IsExpanded)
             .Select(child => child.Path)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            .ToHashSet(StringComparer.Ordinal);
         _children = children
             .OrderByDescending(child => child.SizeBytes ?? -1)
             .ThenBy(child => child.Path, StringComparer.OrdinalIgnoreCase)

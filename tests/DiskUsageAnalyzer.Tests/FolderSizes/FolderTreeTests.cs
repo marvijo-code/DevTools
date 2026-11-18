@@ -1,3 +1,4 @@
+using DevTools.Models;
 using DevTools.Services.FolderSizes;
 using Xunit;
 
@@ -65,6 +66,31 @@ public sealed class FolderTreeTests
         Assert.Equal(2000, tree.GetChildFolderCount(0));
         Assert.Equal(1, tree.GetDirectFileCount(0));
         Assert.Equal(0, tree.GetDirectFileBytes(0));
+    }
+
+    [Fact]
+    public void EnumeratedSiblings_KeepDistinctNamesAndTotalsThroughRefresh()
+    {
+        var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);
+        var root = builder.AddFolder(@"C:\workspace");
+        var first = builder.AppendEnumeratedChildren(root, ["source", "Source", "Other"]);
+        builder.AddFilesToFolder(first, 12, 1, 4096);
+        builder.AddFilesToFolder(first + 1, 4097, 1, 8192);
+        var tree = builder.Build("fixture", TimeSpan.Zero);
+
+        Assert.Equal(4109, tree.TotalBytes);
+        Assert.Equal(12288, tree.GetAllocatedBytes(root));
+        Assert.Equal(12, tree.GetTotalBytes(tree.Find(@"c:\WORKSPACE\source")));
+        Assert.Equal(4097, tree.GetTotalBytes(tree.Find(@"C:/workspace/Source/")));
+        Assert.Equal(first + 2, tree.Find(@"C:\workspace\OTHER"));
+        Assert.Equal(-1, tree.Find(@"C:\workspace\SOURCE"));
+
+        var paths = tree.GetChildren(root, 2).Select(tree.GetPath);
+        var entries = paths.Select(path => DiskUsageEntry.CreateCompleted(path, false, null, "", null)).ToArray();
+        var section = new DiskUsageSection("Largest Folders", "", [entries[0]]);
+        section.UpdateFrom(new DiskUsageSection(section.Title, "", entries));
+
+        Assert.Equal([@"C:\workspace\Source", @"C:\workspace\source"], section.Entries.Select(entry => entry.Path));
     }
 
     [Fact]

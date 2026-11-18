@@ -194,36 +194,47 @@ public sealed class FolderTree
             return -1;
         }
 
-        var full = path.Trim();
+        var full = path.AsSpan().Trim();
         var relativeStart = GetRelativeStart(RootPath, full);
         if (relativeStart < 0)
         {
             return -1;
         }
 
-        var relative = full[relativeStart..].Trim(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (relative.Length == 0)
-        {
-            return 0;
-        }
-
-
-
+        var relative = full[relativeStart..];
         var current = 0;
-        foreach (var part in relative.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+        while (!relative.IsEmpty)
         {
+            var separator = relative.IndexOfAny(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var part = separator < 0 ? relative : relative[..separator];
+            relative = separator < 0 ? [] : relative[(separator + 1)..];
+            if (part.IsEmpty)
+            {
+                continue;
+            }
+
             var next = -1;
+            var ambiguous = false;
             for (var i = _childStart[current]; i < _childStart[current + 1]; i++)
             {
                 var child = _childIndex[i];
-                if (string.Equals(_names[child], part, StringComparison.OrdinalIgnoreCase))
+                if (!part.Equals(_names[child], StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (part.SequenceEqual(_names[child]))
                 {
                     next = child;
+                    ambiguous = false;
                     break;
                 }
+
+                ambiguous = next >= 0;
+                next = child;
             }
 
-            if (next < 0)
+            if (next < 0 || ambiguous)
             {
                 return -1;
             }
@@ -250,15 +261,15 @@ public sealed class FolderTree
         throw new ArgumentException($"A local volume path is required, got '{rootPath}'.", nameof(rootPath));
     }
 
-    internal static int GetRelativeStart(string root, string path)
+    internal static int GetRelativeStart(string root, ReadOnlySpan<char> path)
     {
         var rootLength = root.Length - 1;
-        if (!path.AsSpan().StartsWith(root.AsSpan(0, rootLength), StringComparison.OrdinalIgnoreCase))
+        if (!path.StartsWith(root.AsSpan(0, rootLength), StringComparison.OrdinalIgnoreCase))
         {
             return -1;
         }
 
-        if (root[1] != ':' && path.Length > rootLength && !Path.EndsInDirectorySeparator(path.AsSpan(0, rootLength + 1)))
+        if (root[1] != ':' && path.Length > rootLength && !Path.EndsInDirectorySeparator(path[..(rootLength + 1)]))
         {
             return -1;
         }
@@ -345,6 +356,18 @@ public sealed class FolderTreeBuilder
         return GetOrAddChild(parentNode, name);
     }
 
+    /// <summary>Appends the children returned by a single directory listing, preserving their names exactly.</summary>
+    internal int AppendEnumeratedChildren(int parentNode, List<string> names)
+    {
+        var first = _parent.Count;
+        foreach (var name in names)
+        {
+            AppendChild(parentNode, name);
+        }
+
+        return first;
+    }
+
     public void AddFilesToFolder(int node, long bytes, long files, long allocatedBytes = 0)
     {
         _ownBytes[node] += Math.Max(0, bytes);
@@ -361,26 +384,20 @@ public sealed class FolderTreeBuilder
     {
         var count = _parent.Count;
         var parent = _parent.ToArray();
-        var totals = new long[count];
-        var files = new long[count];
-        var known = _knownTotal.ToArray();
+        var totals = _ownBytes.ToArray();
+        var files = _ownFiles.ToArray();
         var allocations = _ownAllocatedBytes?.ToArray();
-        for (var i = 0; i < count; i++)
-        {
-            totals[i] = _ownBytes[i];
-            files[i] = _ownFiles[i];
-        }
 
         // Children always get a higher index than their parent, so one reverse pass rolls
         // every folder up into its parent.
         for (var i = count - 1; i > 0; i--)
         {
-            if (known[i] >= 0)
+            if (_knownTotal[i] >= 0)
             {
-                totals[i] = known[i];
+                totals[i] = _knownTotal[i];
             }
 
-            totals[parent[i]] += known[parent[i]] >= 0 ? 0 : totals[i];
+            totals[parent[i]] += _knownTotal[parent[i]] >= 0 ? 0 : totals[i];
             files[parent[i]] += files[i];
             if (allocations is not null)
             {
@@ -388,9 +405,9 @@ public sealed class FolderTreeBuilder
             }
         }
 
-        if (known[0] >= 0)
+        if (_knownTotal[0] >= 0)
         {
-            totals[0] = known[0];
+            totals[0] = _knownTotal[0];
         }
 
         return new FolderTree(_root, parent, _names.ToArray(), totals, files, engineName, elapsed, allocations);
@@ -437,6 +454,13 @@ public sealed class FolderTreeBuilder
             return existing;
         }
 
+        var node = AppendChild(parentNode, name);
+        _lookup[(parentNode, name)] = node;
+        return node;
+    }
+
+    private int AppendChild(int parentNode, string name)
+    {
         var node = _parent.Count;
         _parent.Add(parentNode);
         _names.Add(name);
@@ -444,7 +468,6 @@ public sealed class FolderTreeBuilder
         _ownFiles.Add(0);
         _knownTotal.Add(-1);
         _ownAllocatedBytes?.Add(0);
-        _lookup[(parentNode, name)] = node;
         return node;
     }
 

@@ -38,11 +38,7 @@ public sealed class ParallelFolderWalker
         var allocationIndex = prioritize ? null : DirectoryAllocationIndex.Create(driveRoot, resources, fullVolume);
         var builder = new FolderTreeBuilder(driveRoot, trackAllocation: allocationIndex is not null);
         var builderLock = new object();
-        int startNode;
-        lock (builderLock)
-        {
-            startNode = builder.AddFolder(Path.TrimEndingDirectorySeparator(fullRoot));
-        }
+        var startNode = builder.AddFolder(Path.TrimEndingDirectorySeparator(fullRoot));
 
         using var queue = new BlockingCollection<(int Node, string Path)>(new ConcurrentQueue<(int, string)>());
         var pending = 1;
@@ -70,7 +66,6 @@ public sealed class ParallelFolderWalker
                 {
                     var allocationReader = allocationIndex is null ? null : new DirectoryAllocationReader(allocationIndex);
                     var subfolders = new List<string>();
-                    var children = new List<(int Node, string Name)>();
                     foreach (var (node, path) in queue.GetConsumingEnumerable(cancellationToken))
                     {
                         if (!prioritize)
@@ -120,20 +115,17 @@ public sealed class ParallelFolderWalker
                             }
                         }
 
-                        children.Clear();
+                        int firstChild;
                         lock (builderLock)
                         {
                             builder.AddFilesToFolder(node, bytes, files, allocatedBytes);
-                            foreach (var name in subfolders)
-                            {
-                                children.Add((builder.AddChildFolder(node, name), name));
-                            }
+                            firstChild = builder.AppendEnumeratedChildren(node, subfolders);
                         }
 
-                        Interlocked.Add(ref pending, children.Count);
-                        foreach (var (child, name) in children)
+                        Interlocked.Add(ref pending, subfolders.Count);
+                        for (var i = 0; i < subfolders.Count; i++)
                         {
-                            queue.Add((child, Path.Combine(path, name)), cancellationToken);
+                            queue.Add((firstChild + i, Path.Combine(path, subfolders[i])), cancellationToken);
                         }
 
                         Interlocked.Add(ref filesSeen, files);
@@ -183,9 +175,6 @@ public sealed class ParallelFolderWalker
         }
 
         stopwatch.Stop();
-        lock (builderLock)
-        {
-            return builder.Build(EngineName, stopwatch.Elapsed);
-        }
+        return builder.Build(EngineName, stopwatch.Elapsed);
     }
 }

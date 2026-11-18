@@ -22,7 +22,7 @@ public sealed class DiskUsageAnalyzer
     private readonly DriveUsageService _driveUsage = new();
     private readonly object _treesLock = new();
     private readonly Dictionary<string, FolderTree> _trees = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, FolderTree> _overlayTrees = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, FolderTree> _overlayTrees = new(StringComparer.Ordinal);
 
     /// <summary>The folder trees from the last scan, system drive first.</summary>
     public IReadOnlyList<FolderTree> Trees
@@ -217,9 +217,9 @@ public sealed class DiskUsageAnalyzer
             var trimmed = Path.TrimEndingDirectorySeparator(path.Trim());
             foreach (var (folder, overlay) in _overlayTrees)
             {
-                var underOverlay = trimmed.Equals(folder, StringComparison.OrdinalIgnoreCase)
+                var underOverlay = trimmed.Equals(folder, StringComparison.Ordinal)
                     || (trimmed.Length > folder.Length
-                        && trimmed.StartsWith(folder, StringComparison.OrdinalIgnoreCase)
+                        && trimmed.StartsWith(folder, StringComparison.Ordinal)
                         && trimmed[folder.Length] == Path.DirectorySeparatorChar);
                 if (!underOverlay)
                 {

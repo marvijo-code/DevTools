@@ -79,9 +79,9 @@ public sealed partial class MainViewModel
 
     private readonly ObservableCollection<FolderBrowserRow> _folderBrowserRows = [];
     private readonly ObservableCollection<FolderBrowserDrive> _folderBrowserDrives = [];
-    private readonly HashSet<string> _folderBrowserExpanded = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, IReadOnlyList<FolderFile>> _folderBrowserFiles = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _folderBrowserFilesLoading = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _folderBrowserExpanded = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, IReadOnlyList<FolderFile>> _folderBrowserFiles = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _folderBrowserFilesLoading = new(StringComparer.Ordinal);
     private FolderTree? _folderBrowserFileTree;
     private string _folderBrowserPath = string.Empty;
     private string _folderBrowserSummary = "The folder browser fills in when the first drive scan finishes.";
@@ -111,7 +111,7 @@ public sealed partial class MainViewModel
         }
 
         var normalized = tree.GetPath(node);
-        if (!string.Equals(normalized, _folderBrowserPath, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(normalized, _folderBrowserPath, StringComparison.Ordinal))
         {
             _folderBrowserExpanded.Clear();
             ResetFolderBrowserFileCache();
@@ -424,7 +424,7 @@ public sealed partial class MainViewModel
         var loaded = await Task.Run(() => folders.ToDictionary(
             folder => folder,
             folder => FolderFileListing.ReadLargest(folder, FolderBrowserMaxFiles),
-            StringComparer.OrdinalIgnoreCase));
+            StringComparer.Ordinal));
 
         if (generation != _folderBrowserFileGeneration)
         {

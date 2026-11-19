@@ -85,6 +85,7 @@ public sealed class ParallelFolderWalker
         var queuedStreamBatches = 0;
         long filesSeen = 0;
         List<CompletedFolderSize>? completedFolders = progress is null ? null : [];
+        HashSet<FolderBranch>? changedParents = logicalSubfolders is null ? null : [];
         queue.Add(new WalkJob(startNode, fullRoot), scanToken);
 
         var workers = workerCount is int requested
@@ -218,6 +219,11 @@ public sealed class ParallelFolderWalker
             branch.Incomplete |= incomplete;
             branch.IncompleteAllocation |= incompleteAllocation;
             branch.Pending += children - 1;
+            if (logicalBytes > 0)
+            {
+                changedParents?.Add(branch);
+            }
+
             if (branch.Pending == 0)
             {
                 completedFolders!.Add(new CompletedFolderSize(branch.Path,
@@ -236,22 +242,32 @@ public sealed class ParallelFolderWalker
 
             CompletedFolderSize[] ready;
             LiveFolderSize[] subfolders;
+            FolderScanTally[] parentTallies;
             int folders;
             lock (builderLock)
             {
                 ready = completedFolders!.Count > 0 ? completedFolders.ToArray() : [];
                 completedFolders.Clear();
                 subfolders = logicalSubfolders?.Drain(builder) ?? [];
+                parentTallies = changedParents is { Count: > 0 }
+                    ? changedParents.Select(parent => new FolderScanTally(parent.Path, parent.LogicalBytes)).ToArray()
+                    : [];
+                changedParents?.Clear();
                 folders = builder.FolderCount;
             }
 
-            if (!completedOnly || ready.Length > 0 || subfolders.Length > 0)
+            if (!completedOnly || ready.Length > 0 || subfolders.Length > 0 || parentTallies.Length > 0)
             {
                 var files = Interlocked.Read(ref filesSeen);
                 var phase = measureAllocation ? "Measuring allocation" : "Measuring logical sizes";
                 progress.Report(new FolderScanProgress(
                     driveRoot, EngineName, $"{phase}: {files:N0} files in {folders:N0} folders so far.",
-                    files, stopwatch.Elapsed) { CompletedFolders = ready, LiveSubfolders = subfolders });
+                    files, stopwatch.Elapsed)
+                {
+                    CompletedFolders = ready,
+                    LiveSubfolders = subfolders,
+                    ParentTallies = parentTallies
+                });
             }
         }
 

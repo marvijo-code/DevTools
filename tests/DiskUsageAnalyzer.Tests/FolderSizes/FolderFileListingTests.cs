@@ -241,6 +241,7 @@ public sealed class FolderFileListingTests
         var logicalReady = new TaskCompletionSource<FolderTree>(TaskCreationOptions.RunContinuationsAsynchronously);
         var seen = new List<CompletedFolderSize>();
         var live = new List<LiveFolderSize>();
+        var parentTallies = new List<FolderScanTally>();
         Task<DriveScanResult>? scan = null;
         try
         {
@@ -250,6 +251,7 @@ public sealed class FolderFileListingTests
             {
                 seen.AddRange(update.CompletedFolders);
                 live.AddRange(update.LiveSubfolders);
+                parentTallies.AddRange(update.ParentTallies);
             });
             var drive = new DriveDescriptor(fixture.FullName, "Fixture", "NTFS", null);
             scan = new DriveUsageService().ScanDriveAsync(drive, progress, deadline.Token, volumeShare: 1, tryMft: false,
@@ -266,6 +268,9 @@ public sealed class FolderFileListingTests
             var early = Assert.Single(seen);
             Assert.Equal(8204, early.LogicalBytes);
             Assert.False(early.AllocationAttempted);
+            Assert.NotEmpty(parentTallies);
+            Assert.All(parentTallies, tally => Assert.Equal(child.FullName, tally.Path));
+            Assert.Equal(8204, parentTallies[^1].ScannedBytes);
             Assert.Collection(live,
                 folder => Assert.Equal(new LiveFolderSize(leaf.FullName, 11), folder),
                 folder => Assert.Equal(new LiveFolderSize(nested.FullName, 8204), folder));
@@ -276,6 +281,7 @@ public sealed class FolderFileListingTests
             var finalNode = final.Find(child.FullName);
             Assert.Equal(8204, final.GetTotalBytes(finalNode));
             Assert.Equal(2, live.Count);
+            Assert.Equal(8204, parentTallies[^1].ScannedBytes);
             Assert.True(final.GetAllocatedBytes(finalNode) > 0);
             Assert.Contains(seen, folder => folder.Path == child.FullName && folder.AllocationAttempted);
         }

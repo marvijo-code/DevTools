@@ -933,7 +933,7 @@
                               <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="140" />
-                                <ColumnDefinition Width="90" />
+                                <ColumnDefinition Width="120" />
                               </Grid.ColumnDefinitions>
                               <Grid Margin="{Binding Indent}"
                                     ColumnSpacing="4">
@@ -972,11 +972,16 @@
                                            Visibility="{Binding HasMeasuredShare, Converter={StaticResource BoolToVisibilityConverter}}"
                                            Maximum="100"
                                            VerticalAlignment="Center" />
-                              <TextBlock Grid.Column="2"
-                                         Text="{Binding SizeText}"
-                                         FontWeight="SemiBold"
-                                         HorizontalAlignment="Right"
-                                         VerticalAlignment="Center" />
+                              <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding SizeText}"
+                                           FontWeight="SemiBold"
+                                           HorizontalAlignment="Right" />
+                                <TextBlock Text="scanned"
+                                           FontSize="10"
+                                           Opacity="0.72"
+                                           HorizontalAlignment="Right"
+                                           Visibility="{Binding HasScannedSize, Converter={StaticResource BoolToVisibilityConverter}}" />
+                              </StackPanel>
                             </Grid>
                           </DataTemplate>
                         </ItemsRepeater.ItemTemplate>

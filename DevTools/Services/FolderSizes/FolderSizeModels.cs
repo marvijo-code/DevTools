@@ -38,6 +38,8 @@ internal readonly record struct CompletedFolderSize(
 
 internal readonly record struct LiveFolderSize(string Path, long Bytes);
 
+internal readonly record struct FolderScanTally(string Path, long ScannedBytes);
+
 /// <summary>Progress of an all-folders scan of one drive.</summary>
 public sealed record FolderScanProgress(
     string DriveRoot,
@@ -48,4 +50,5 @@ public sealed record FolderScanProgress(
 {
     internal IReadOnlyList<CompletedFolderSize> CompletedFolders { get; init; } = [];
     internal IReadOnlyList<LiveFolderSize> LiveSubfolders { get; init; } = [];
+    internal IReadOnlyList<FolderScanTally> ParentTallies { get; init; } = [];
 }

@@ -231,7 +231,8 @@ public sealed class DriveUsageService
         CancellationToken cancellationToken,
         int volumeShare,
         bool tryMft,
-        int[]? backingDisks = null)
+        int[]? backingDisks = null,
+        Action<FolderTree>? publishLogicalTree = null)
     {
         using var diskScope = ScanGate.ForDisks(backingDisks);
         var root = drive.RootPath;
@@ -262,12 +263,27 @@ public sealed class DriveUsageService
                 : "Not running as administrator, so the NTFS Master File Table fast path is off.");
         }
 
-        Report(ParallelFolderWalker.EngineName, $"Walking every folder on {root} (slow path)...");
+        FolderTree? logical = null;
+        if (publishLogicalTree is not null && string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase))
+        {
+            Report(ParallelFolderWalker.EngineName, $"Measuring logical folder sizes on {root}...");
+            logical = await TryEngineAsync(
+                () => _walker.ScanVolumeAsync(root, progress, cancellationToken, volumeShare, measureAllocation: false),
+                "Logical folder walk", root, notes, cancellationToken).ConfigureAwait(false);
+            if (logical is not null)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                publishLogicalTree(logical);
+            }
+        }
+
+        Report(ParallelFolderWalker.EngineName, $"Measuring attributed allocation on {root}...");
         var walked = await TryEngineAsync(
             () => _walker.ScanVolumeAsync(root, progress, cancellationToken, volumeShare),
             ParallelFolderWalker.EngineName, root, notes, cancellationToken).ConfigureAwait(false);
-        return walked is not null
-            ? Done(drive, walked, notes)
+        var result = walked ?? logical;
+        return result is not null
+            ? Done(drive, result, notes)
             : new DriveScanResult(drive, null, "None", string.Join(" ", notes));
     }
 

@@ -614,6 +614,12 @@ public sealed partial class MainViewModel : ObservableObject
                     RefreshFolderBrowserDrives(roots, update.CompletedRoot);
                 }
 
+                if (update.LogicalRoot is { } logicalRoot && !FolderBrowserUseAllocation &&
+                    string.Equals(Path.GetPathRoot(_folderBrowserPath), logicalRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    BrowseFolder(_folderBrowserPath, skipUnchanged: true);
+                }
+
                 ApplyCompletedFolderSizes(update.CompletedFolders);
             });
 

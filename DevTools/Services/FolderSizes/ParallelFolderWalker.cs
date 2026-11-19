@@ -25,15 +25,15 @@ public sealed class ParallelFolderWalker
         bool measureAllocation = false)
     {
         return Task.Run(() => Scan(rootPath, progress, cancellationToken, workerCount, prioritize, volumeShare: 1,
-                measureAllocation),
+                measureAllocation: !prioritize || measureAllocation),
             cancellationToken);
     }
 
     internal Task<FolderTree> ScanVolumeAsync(string rootPath, IProgress<FolderScanProgress>? progress,
-        CancellationToken cancellationToken, int volumeShare)
+        CancellationToken cancellationToken, int volumeShare, bool measureAllocation = true)
     {
         return Task.Run(() => Scan(rootPath, progress, cancellationToken, workerCount: null, prioritize: false, volumeShare,
-                measureAllocation: true),
+                measureAllocation),
             cancellationToken);
     }
 
@@ -60,7 +60,7 @@ public sealed class ParallelFolderWalker
         var volumeRoot = WindowsVolumePaths.GetContainingVolumeRoot(fullRoot, driveRoot);
         cancellationToken.ThrowIfCancellationRequested();
         using var pause = pauseBackgroundScans ? ScanGate.Pause(DiskCapacityInventory.ReadBackingDiskNumbers(volumeRoot)) : null;
-        var fileSystem = (!prioritize || measureAllocation) && volumeRoot is not null && OperatingSystem.IsWindows()
+        var fileSystem = measureAllocation && volumeRoot is not null && OperatingSystem.IsWindows()
             ? WindowsVolumePaths.ReadVolumeInformation(volumeRoot).FileSystem
             : string.Empty;
         var allocationIndex = volumeRoot is not null && string.Equals(fileSystem, "NTFS", StringComparison.OrdinalIgnoreCase)
@@ -213,10 +213,12 @@ public sealed class ParallelFolderWalker
             branch.Incomplete |= incomplete;
             branch.IncompleteAllocation |= incompleteAllocation;
             branch.Pending += children - 1;
-            if (branch.Pending == 0 && !branch.Incomplete)
+            if (branch.Pending == 0)
             {
-                completedFolders!.Add(new CompletedFolderSize(branch.Path, branch.LogicalBytes,
-                    trackAllocation && !branch.IncompleteAllocation ? branch.AllocatedBytes : null, branch.Files));
+                completedFolders!.Add(new CompletedFolderSize(branch.Path,
+                    branch.Incomplete ? null : branch.LogicalBytes,
+                    trackAllocation && !branch.Incomplete && !branch.IncompleteAllocation ? branch.AllocatedBytes : null,
+                    branch.Files, measureAllocation));
             }
         }
 
@@ -239,8 +241,9 @@ public sealed class ParallelFolderWalker
             if (!completedOnly || ready.Length > 0)
             {
                 var files = Interlocked.Read(ref filesSeen);
+                var phase = measureAllocation ? "Measuring allocation" : "Measuring logical sizes";
                 progress.Report(new FolderScanProgress(
-                    driveRoot, EngineName, $"Walking folders: {files:N0} files in {folders:N0} folders so far.",
+                    driveRoot, EngineName, $"{phase}: {files:N0} files in {folders:N0} folders so far.",
                     files, stopwatch.Elapsed) { CompletedFolders = ready });
             }
         }

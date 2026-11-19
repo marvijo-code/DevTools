@@ -228,6 +228,59 @@ public sealed class FolderFileListingTests
     }
 
     [Fact]
+    public async Task NtfsFallback_PublishesLogicalTreeBeforeMeasuringAllocation()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-logical-first-");
+        var child = fixture.CreateSubdirectory("child");
+        var file = Path.Combine(child.FullName, "payload.bin");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var continueWithAllocation = new ManualResetEventSlim();
+        var logicalReady = new TaskCompletionSource<FolderTree>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var seen = new List<CompletedFolderSize>();
+        Task<DriveScanResult>? scan = null;
+        try
+        {
+            File.WriteAllBytes(file, new byte[8193]);
+            var progress = new InlineProgress<FolderScanProgress>(update => seen.AddRange(update.CompletedFolders));
+            var drive = new DriveDescriptor(fixture.FullName, "Fixture", "NTFS", null);
+            scan = new DriveUsageService().ScanDriveAsync(drive, progress, deadline.Token, volumeShare: 1, tryMft: false,
+                publishLogicalTree: tree =>
+                {
+                    logicalReady.TrySetResult(tree);
+                    continueWithAllocation.Wait(deadline.Token);
+                });
+            var logical = await logicalReady.Task.WaitAsync(deadline.Token);
+            var node = logical.Find(child.FullName);
+            Assert.Equal(8193, logical.GetTotalBytes(node));
+            Assert.Null(logical.GetAllocatedBytes(node));
+            Assert.False(scan.IsCompleted);
+            var early = Assert.Single(seen);
+            Assert.Equal(8193, early.LogicalBytes);
+            Assert.False(early.AllocationAttempted);
+
+            continueWithAllocation.Set();
+            var final = Assert.IsType<FolderTree>((await scan.WaitAsync(deadline.Token)).Tree);
+            var finalNode = final.Find(child.FullName);
+            Assert.Equal(8193, final.GetTotalBytes(finalNode));
+            Assert.True(final.GetAllocatedBytes(finalNode) > 0);
+            Assert.Contains(seen, folder => folder.Path == child.FullName && folder.AllocationAttempted);
+        }
+        finally
+        {
+            continueWithAllocation.Set();
+            if (scan is not null)
+            {
+                try { await scan; }
+                catch (OperationCanceledException) when (deadline.IsCancellationRequested) { }
+            }
+
+            File.Delete(file);
+            child.Delete();
+            fixture.Delete();
+        }
+    }
+
+    [Fact]
     public async Task Walker_ReportsExactSubtreeTotalsBeforeReturningTheDriveTree()
     {
         var fixture = Directory.CreateTempSubdirectory("devtools-exact-progress-");

@@ -468,7 +468,7 @@ public sealed partial class MainViewModel
             }
 
             var row = rows[value.Index];
-            _folderBrowserRows[value.Index] = new FolderBrowserRow(row.Name, row.Path, value.Bytes, "Folder scan complete",
+            _folderBrowserRows[value.Index] = new FolderBrowserRow(row.Name, row.Path, value.Bytes, "Quick scan complete",
                 0, row.Depth, row.CanOpen, row.CanExpand, row.IsExpanded, row.IsFile);
             if (firstNonzeroSize && value.Bytes > 0)
             {
@@ -494,13 +494,11 @@ public sealed partial class MainViewModel
 
     private FolderBrowserRow CreatePreviewFolderRow(string name, string path)
     {
-        long? bytes = null;
-        if (_folderBrowserCompletedSizes.TryGetValue(path, out var completed))
-        {
-            bytes = FolderBrowserUseAllocation ? completed.AllocatedBytes : completed.LogicalBytes;
-        }
-
-        return new FolderBrowserRow(name, path, bytes, bytes.HasValue ? "Folder scan complete" : "Waiting for exact size",
+        var hasResult = _folderBrowserCompletedSizes.TryGetValue(path, out var completed) &&
+            (!FolderBrowserUseAllocation || completed.AllocationAttempted);
+        var bytes = hasResult ? FolderBrowserUseAllocation ? completed.AllocatedBytes : completed.LogicalBytes : null;
+        var detail = hasResult ? bytes.HasValue ? "Verified by drive scan" : "Exact size unavailable" : "Waiting for exact size";
+        return new FolderBrowserRow(name, path, bytes, detail,
             0, 0, canOpen: true, canExpand: false, isExpanded: false, isFile: false);
     }
 
@@ -522,25 +520,34 @@ public sealed partial class MainViewModel
         }
 
         var updated = 0;
+        var unavailable = 0;
         for (var index = 0; index < _folderBrowserRows.Count; index++)
         {
             var row = _folderBrowserRows[index];
-            if (row.IsFile || !row.CanOpen)
+            if (row.IsFile || !row.CanOpen || !_folderBrowserCompletedSizes.TryGetValue(row.Path, out var result) ||
+                (FolderBrowserUseAllocation && !result.AllocationAttempted))
             {
                 continue;
             }
 
             var replacement = CreatePreviewFolderRow(row.Name, row.Path);
-            if (replacement.SizeBytes.HasValue && !row.HasSamePresentation(replacement))
+            if (!row.HasSamePresentation(replacement))
             {
                 _folderBrowserRows[index] = replacement;
-                updated++;
+                if (replacement.SizeBytes.HasValue)
+                {
+                    updated++;
+                }
+                else
+                {
+                    unavailable++;
+                }
             }
         }
 
-        if (updated > 0)
+        if (updated > 0 || unavailable > 0)
         {
-            AppLog.Info($"Folder Browser updated {updated:N0} exact folder sizes during the drive scan.");
+            AppLog.Info($"Folder Browser drive scan update: {updated:N0} exact sizes, {unavailable:N0} unavailable.");
         }
     }
 

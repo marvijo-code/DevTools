@@ -157,10 +157,25 @@ public sealed class DiskUsageAnalyzer
                 }
             });
 
+            void PublishLogicalTree(FolderTree tree)
+            {
+                PublishVolumeTree(inventoryVersion, drive.RootPath, tree);
+                AppLog.Info($"Drive {drive.RootPath}: published logical sizes for {tree.FolderCount:N0} folders " +
+                    $"in {tree.Elapsed.TotalSeconds:F1}s ahead of allocation.");
+                lock (progressLock)
+                {
+                    currentStatus = $"Logical sizes ready for {drive.DisplayRoot}. Measuring allocation...";
+                    progress?.Report(new DiskUsageProgress(headline, currentStatus, currentAnalysis, sections.ToList(), false)
+                    {
+                        LogicalRoot = drive.RootPath
+                    });
+                }
+            }
+
             try
             {
                 return await _driveUsage.ScanDriveAsync(drive, driveProgress, scanToken, workerShare, rawMftVolumes[sectionIndex],
-                        backingDisks[sectionIndex])
+                        backingDisks[sectionIndex], progress is not null ? PublishLogicalTree : null)
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -1337,5 +1352,6 @@ public sealed record DiskUsageProgress(string Headline, string StatusText, strin
 {
     public IReadOnlyList<string>? BrowseRoots { get; init; }
     public string? CompletedRoot { get; init; }
+    internal string? LogicalRoot { get; init; }
     internal IReadOnlyList<CompletedFolderSize> CompletedFolders { get; init; } = [];
 }

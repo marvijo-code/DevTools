@@ -15,6 +15,8 @@ internal readonly record struct DiskRange(long Start, long Length)
 
 internal readonly record struct VolumeDiskExtent(int DiskNumber, DiskRange Range, long? FileSystemBytes);
 
+internal readonly record struct VolumeExtentSize(int DiskNumber, long Bytes);
+
 internal readonly record struct DiskPartitionLayout(HashSet<DiskRange> Ranges, DiskRange? GptUsableRange, DiskRange? MbrSector);
 
 internal readonly record struct DiskCapacity(
@@ -41,10 +43,12 @@ internal static class DiskCapacityInventory
     private const int MaximumBufferSize = 1024 * 1024;
 
     internal static IReadOnlyList<VolumeDiskExtent> ReadVolumeTopology(
-        IReadOnlyList<DriveDescriptor> volumes, CancellationToken cancellationToken, out int[][] backingDisks)
+        IReadOnlyList<DriveDescriptor> volumes, CancellationToken cancellationToken, out int[][] backingDisks,
+        out Dictionary<string, VolumeExtentSize[]> volumeExtentsByRoot)
     {
         backingDisks = new int[volumes.Count][];
         Array.Fill(backingDisks, Array.Empty<int>());
+        volumeExtentsByRoot = new Dictionary<string, VolumeExtentSize[]>(volumes.Count, StringComparer.OrdinalIgnoreCase);
         if (!OperatingSystem.IsWindows())
         {
             return [];
@@ -65,6 +69,11 @@ internal static class DiskCapacityInventory
             using var handle = OpenMetadata(device);
             var volumeExtents = ReadVolumeExtents(handle, ref buffer);
             backingDisks[index] = GetBackingDiskNumbers(volumeExtents);
+            if (volumeExtents.Length > 0)
+            {
+                volumeExtentsByRoot[volume.RootPath] = SummarizeVolumeExtents(volumeExtents);
+            }
+
             long? fileSystemBytes = volumeExtents.Length == 1 && volume.Space is { IsVolumeWide: true, TotalBytes: > 0 } space
                 ? space.TotalBytes
                 : null;
@@ -143,6 +152,19 @@ internal static class DiskCapacityInventory
         1 => [extents[0].DiskNumber],
         _ => extents.Select(extent => extent.DiskNumber).Distinct().ToArray()
     };
+
+    internal static VolumeExtentSize[] SummarizeVolumeExtents((int DiskNumber, DiskRange Range)[] extents)
+    {
+        if (extents.Length == 1)
+        {
+            return [new VolumeExtentSize(extents[0].DiskNumber, extents[0].Range.Length)];
+        }
+
+        return extents.GroupBy(extent => extent.DiskNumber).OrderBy(disk => disk.Key)
+            .Select(disk => new VolumeExtentSize(disk.Key,
+                MergeOrderedRanges(disk.Select(extent => extent.Range).OrderBy(range => range.Start)).Sum(range => range.Length)))
+            .ToArray();
+    }
 
     internal static (int DiskNumber, DiskRange Range)[] ReadVolumeExtents(SafeFileHandle volume, ref byte[] buffer)
     {

@@ -568,6 +568,42 @@ public sealed class VolumeSpaceTests
         Assert.Contains("Access denied. 700 used bytes have no folder attribution.", Assert.Single(summary.Entries).Note);
     }
 
+    [Theory]
+    [InlineData(450, true, "The reported extents exceed the filesystem capacity by 50 bytes.")]
+    [InlineData(550, true, "The filesystem capacity exceeds the reported extents by 50 bytes.")]
+    [InlineData(500, true, null)]
+    [InlineData(400, false, null)]
+    public void DriveSummary_ReconcilesPerVolumeExtentsAcrossDisks(long total, bool volumeWide, string? difference)
+    {
+        var extents = DiskCapacityInventory.SummarizeVolumeExtents([
+            (2, new DiskRange(100, 250)),
+            (0, new DiskRange(100, 200)),
+            (0, new DiskRange(250, 100)),
+            (2, new DiskRange(100, 250))
+        ]);
+        Assert.Equal([new VolumeExtentSize(0, 250), new VolumeExtentSize(2, 250)], extents);
+
+        var drive = new DriveDescriptor(@"V:\", "Spanned", "NTFS",
+            new VolumeSpace(total, total - 100, 100, 0, 0, volumeWide));
+        var missing = new DriveDescriptor(@"W:\", "No extent data", "FAT32", null);
+        var summary = DiskUsage.BuildDriveSummarySection([drive, missing], new Dictionary<string, DriveScanResult>(),
+            volumeExtentsByRoot: new Dictionary<string, VolumeExtentSize[]>(StringComparer.OrdinalIgnoreCase) { [@"v:\"] = extents });
+
+        var row = summary.Entries[0];
+        Assert.Equal(100, row.SizeBytes);
+        Assert.Contains("Windows reports 500 bytes in volume extents (250 on Disk 0, 250 on Disk 2).", row.Note);
+        if (difference is null)
+        {
+            Assert.DoesNotContain("exceed", row.Note);
+        }
+        else
+        {
+            Assert.Contains(difference, row.Note);
+        }
+
+        Assert.Contains("Windows did not report disk extents for this volume.", summary.Entries[1].Note);
+    }
+
     [Fact]
     public void DriveSummary_ReconcilesPartitionRangesAndMatchedVolumeCapacity()
     {

@@ -102,7 +102,8 @@ public sealed class DiskUsageAnalyzer
         });
 
         cancellationToken.ThrowIfCancellationRequested();
-        var extents = DiskCapacityInventory.ReadVolumeTopology(drives, cancellationToken, out var backingDisks);
+        var extents = DiskCapacityInventory.ReadVolumeTopology(drives, cancellationToken, out var backingDisks,
+            out var volumeExtentsByRoot);
         var diskCount = backingDisks.SelectMany(disks => disks).Distinct().Count();
         var possibleParallelism = Math.Min(diskCount, drives.Count);
         var elevated = OperatingSystem.IsWindows() && ElevationService.IsProcessElevated();
@@ -122,9 +123,9 @@ public sealed class DiskUsageAnalyzer
             {
                 inventoryToken.ThrowIfCancellationRequested();
                 diskCapacities = capacities;
-                if (capacities.Count > 0)
+                if (capacities.Count > 0 || currentDrives.Count > 0)
                 {
-                    sections[^1] = BuildDriveSummarySection(currentDrives, results, capacities);
+                    sections[^1] = BuildDriveSummarySection(currentDrives, results, capacities, volumeExtentsByRoot);
                     progress?.Report(new DiskUsageProgress(headline, currentStatus, currentAnalysis, sections.ToList(), false));
                 }
             }
@@ -199,7 +200,7 @@ public sealed class DiskUsageAnalyzer
                     }
 
                     headline = BuildHeadline(currentDrives, capturedAt);
-                    sections[^1] = BuildDriveSummarySection(currentDrives, results, diskCapacities);
+                    sections[^1] = BuildDriveSummarySection(currentDrives, results, diskCapacities, volumeExtentsByRoot);
                     currentAnalysis = BuildAnalysis(results.Values);
                     currentStatus = $"Sized {results.Count} of {drives.Count} volume(s).";
                     progress?.Report(new DiskUsageProgress(headline, currentStatus, currentAnalysis, sections.ToList(), false)
@@ -891,7 +892,8 @@ public sealed class DiskUsageAnalyzer
     internal static DiskUsageSection BuildDriveSummarySection(
         IReadOnlyList<DriveDescriptor> drives,
         IReadOnlyDictionary<string, DriveScanResult> results,
-        IReadOnlyList<DiskCapacity>? diskCapacities = null)
+        IReadOnlyList<DiskCapacity>? diskCapacities = null,
+        IReadOnlyDictionary<string, VolumeExtentSize[]>? volumeExtentsByRoot = null)
     {
         var entries = new List<DiskUsageEntry>();
         foreach (var drive in drives)
@@ -950,8 +952,13 @@ public sealed class DiskUsageAnalyzer
                     : " Folder allocation is unavailable.";
             }
 
+            var extentNote = volumeExtentsByRoot is null
+                ? string.Empty
+                : volumeExtentsByRoot.TryGetValue(drive.RootPath, out var extents)
+                    ? DescribeVolumeExtents(extents, drive.Space)
+                    : " Windows did not report disk extents for this volume.";
             var bitmapNote = DescribeNtfsBitmap(bitmap, volumeUsed);
-            var note = $"{totals}. {scanNote}{incompleteNote}{bitmapNote}";
+            var note = $"{totals}.{extentNote} {scanNote}{incompleteNote}{bitmapNote}";
             var usedBytes = volumeUsed ?? bitmap?.InUseBytes ?? drive.Space?.UsedBytes;
             var sizeText = usedBytes switch
             {
@@ -971,6 +978,34 @@ public sealed class DiskUsageAnalyzer
         }
 
         return new DiskUsageSection(DriveSummarySectionTitle, summary, entries);
+    }
+
+    private static string DescribeVolumeExtents(VolumeExtentSize[] extents, VolumeSpace? space)
+    {
+        Int128 bytes = 0;
+        foreach (var extent in extents)
+        {
+            bytes += extent.Bytes;
+        }
+
+        var note = extents.Length == 1
+            ? $" Windows reports {bytes:N0} bytes in volume extents on Disk {extents[0].DiskNumber}."
+            : $" Windows reports {bytes:N0} bytes in volume extents (" +
+                string.Join(", ", extents.Select(extent => $"{extent.Bytes:N0} on Disk {extent.DiskNumber}")) + ").";
+        if (space is not { IsVolumeWide: true } volume)
+        {
+            return note;
+        }
+
+        var difference = bytes - volume.TotalBytes;
+        if (difference > 0)
+        {
+            return note + $" The reported extents exceed the filesystem capacity by {difference:N0} bytes.";
+        }
+
+        return difference < 0
+            ? note + $" The filesystem capacity exceeds the reported extents by {-difference:N0} bytes."
+            : note;
     }
 
     private static string DescribeVolumeTotals(VolumeSpace space)

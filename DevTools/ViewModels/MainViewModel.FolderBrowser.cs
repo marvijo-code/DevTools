@@ -836,7 +836,7 @@ public sealed partial class MainViewModel
                 complete ? $"{tree.GetFileCount(child):N0} files{ShareText(share)}" : "Exact size unavailable",
                 complete ? share : 0,
                 depth,
-                canOpen: hasContent,
+                canOpen: true,
                 canExpand: hasContent,
                 isExpanded: expanded && hasContent,
                 isFile: false,

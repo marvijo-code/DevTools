@@ -730,11 +730,33 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void BrowseFolder_Click(object sender, RoutedEventArgs e)
+    private void OpenFolderInExplorer_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement { Tag: string path })
+        if (sender is not FrameworkElement { Tag: string path })
         {
-            _ = ViewModel.BrowseFolderAsync(path);
+            return;
+        }
+
+        if (!Directory.Exists(path))
+        {
+            ViewModel.StatusMessage = $"Folder could not be resolved: {path}";
+            return;
+        }
+
+        OpenExistingPath(path);
+    }
+
+    private void StorageRowPrepared(ItemsRepeater sender, ItemsRepeaterElementPreparedEventArgs args) =>
+        ApplyStorageRowShade(args.Element, args.Index);
+
+    private void StorageRowIndexChanged(ItemsRepeater sender, ItemsRepeaterElementIndexChangedEventArgs args) =>
+        ApplyStorageRowShade(args.Element, args.NewIndex);
+
+    private static void ApplyStorageRowShade(UIElement element, int index)
+    {
+        if (element is FrameworkElement row && row.FindName("AlternateRowShade") is Border shade)
+        {
+            shade.Visibility = index % 2 == 0 ? Visibility.Collapsed : Visibility.Visible;
         }
     }
 
@@ -1334,13 +1356,21 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        Process.Start(new ProcessStartInfo
-        {
-            FileName = targetPath,
-            UseShellExecute = true
-        });
+        OpenExistingPath(targetPath);
+    }
 
-        AppLog.Info($"Opened path: {targetPath}");
+    private void OpenExistingPath(string path)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+            AppLog.Info($"Opened path: {path}");
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            ViewModel.StatusMessage = $"Could not open {path}: {ex.Message}";
+            AppLog.Error($"Could not open {path}.", ex);
+        }
     }
 
     private async void ClearFolder_Click(object sender, RoutedEventArgs e)
@@ -1350,14 +1380,14 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        var targetPath = FindExistingPath(rawPath);
-        if (string.IsNullOrWhiteSpace(targetPath) || !Directory.Exists(targetPath))
+        var targetPath = rawPath.Trim().Trim('"');
+        if (!Path.IsPathFullyQualified(targetPath) || !Directory.Exists(targetPath))
         {
             ViewModel.StatusMessage = $"Folder could not be resolved: {rawPath}";
             return;
         }
 
-        if (!DiskUsageEntry.IsClearableDirectory(rawPath) || !DiskUsageEntry.IsClearableDirectory(targetPath))
+        if (!DiskUsageEntry.IsClearableDirectory(targetPath))
         {
             ViewModel.StatusMessage = $"Cleanup is disabled for {targetPath}.";
             return;

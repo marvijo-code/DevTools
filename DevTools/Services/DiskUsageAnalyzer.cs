@@ -156,7 +156,8 @@ public sealed class DiskUsageAnalyzer
 
             try
             {
-                return await _driveUsage.ScanDriveAsync(drive, driveProgress, scanToken, workerShare, rawMftVolumes[sectionIndex])
+                return await _driveUsage.ScanDriveAsync(drive, driveProgress, scanToken, workerShare, rawMftVolumes[sectionIndex],
+                        backingDisks[sectionIndex])
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -602,7 +603,7 @@ public sealed class DiskUsageAnalyzer
 
     /// <summary>
     /// Sizes a folder the user just clicked, ahead of the all-drive scan, unless it is already known.
-    /// The background scans pause while this runs. Returns false when the folder does not exist.
+    /// Background scans on shared disks pause while this runs. Returns false when the folder does not exist.
     /// </summary>
     public Task<bool> SizeFolderNowAsync(string path, CancellationToken cancellationToken) =>
         SizeFolderNowAsync(path, cancellationToken, measureAllocation: false);

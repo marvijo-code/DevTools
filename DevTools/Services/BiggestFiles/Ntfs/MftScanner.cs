@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using DevTools.Services.BiggestFiles;
+using DevTools.Services.FolderSizes;
 
 namespace DevTools.Services.BiggestFiles.Ntfs;
 
@@ -18,6 +19,8 @@ public sealed class MftScanner
     {
         var root = Path.GetFullPath(request.ScanRoot);
         var stopwatch = Stopwatch.StartNew();
+        cancellationToken.ThrowIfCancellationRequested();
+        using var diskScope = ScanGate.ForDisks(DiskCapacityInventory.ReadBackingDiskNumbers(Path.GetPathRoot(root)));
         using var scan = await MftTableLoader.EnterScanAsync(cancellationToken).ConfigureAwait(false);
 
         var result = await MftTableLoader.UseVolumeAsync(

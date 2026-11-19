@@ -37,12 +37,19 @@ public sealed class ParallelFolderWalker
             cancellationToken);
     }
 
+    internal Task<FolderTree> ScanPriorityFolderAsync(string rootPath, CancellationToken cancellationToken, bool measureAllocation)
+    {
+        return Task.Run(() => Scan(rootPath, progress: null, cancellationToken, workerCount: null, prioritize: true,
+                volumeShare: 1, measureAllocation, pauseBackgroundScans: true),
+            cancellationToken);
+    }
+
     /// <param name="prioritize">
-    /// True for a folder the user just clicked: normal thread priority, many threads, and it never waits
-    /// on <see cref="ScanGate"/>. Background scans wait while one of these runs.
+    /// Uses normal thread priority and never waits on <see cref="ScanGate"/>.
     /// </param>
     private static FolderTree Scan(string rootPath, IProgress<FolderScanProgress>? progress,
-        CancellationToken cancellationToken, int? workerCount, bool prioritize, int volumeShare, bool measureAllocation)
+        CancellationToken cancellationToken, int? workerCount, bool prioritize, int volumeShare, bool measureAllocation,
+        bool pauseBackgroundScans = false)
     {
         using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
         var fullRoot = Path.GetFullPath(rootPath);
@@ -51,6 +58,8 @@ public sealed class ParallelFolderWalker
         var resources = ScanResources.Capture();
         var fullVolume = string.Equals(fullRoot, driveRoot, StringComparison.OrdinalIgnoreCase);
         var volumeRoot = WindowsVolumePaths.GetContainingVolumeRoot(fullRoot, driveRoot);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var pause = pauseBackgroundScans ? ScanGate.Pause(DiskCapacityInventory.ReadBackingDiskNumbers(volumeRoot)) : null;
         var fileSystem = (!prioritize || measureAllocation) && volumeRoot is not null && OperatingSystem.IsWindows()
             ? WindowsVolumePaths.ReadVolumeInformation(volumeRoot).FileSystem
             : string.Empty;

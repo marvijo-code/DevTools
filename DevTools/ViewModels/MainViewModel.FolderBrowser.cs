@@ -234,7 +234,7 @@ public sealed partial class MainViewModel
         }
 
         var cts = _folderBrowserClickCts = new CancellationTokenSource();
-        var status = $"Sizing {path} first. The all-drive scan pauses until this finishes.";
+        var status = $"Sizing {path} first.";
         ShowFolderBrowserPreview(path, status, showVolumeSummary: false);
 
         try

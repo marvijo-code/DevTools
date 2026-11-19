@@ -160,6 +160,24 @@ internal static class DiskCapacityInventory
         return total > 0 ? (total, BinaryPrimitives.ReadUInt32LittleEndian(geometry[20..])) : null;
     }
 
+    internal static int[] ReadBackingDiskNumbers(string? volumeRoot)
+    {
+        if (!OperatingSystem.IsWindows() || WindowsVolumePaths.GetDevicePath(volumeRoot) is not { } device)
+        {
+            return [];
+        }
+
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
+        using var volume = OpenMetadata(device);
+        if (volume.IsInvalid)
+        {
+            return [];
+        }
+
+        var buffer = new byte[4096];
+        return GetBackingDiskNumbers(ReadVolumeExtents(volume, ref buffer));
+    }
+
     internal static int[] GetBackingDiskNumbers((int DiskNumber, DiskRange Range)[] extents) => extents.Length switch
     {
         0 => [],

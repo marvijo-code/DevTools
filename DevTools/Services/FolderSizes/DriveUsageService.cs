@@ -226,8 +226,10 @@ public sealed class DriveUsageService
         IProgress<FolderScanProgress>? progress,
         CancellationToken cancellationToken,
         int volumeShare,
-        bool tryMft)
+        bool tryMft,
+        int[]? backingDisks = null)
     {
+        using var diskScope = ScanGate.ForDisks(backingDisks);
         var root = drive.RootPath;
         var notes = new List<string>();
 
@@ -266,17 +268,10 @@ public sealed class DriveUsageService
     }
 
     /// <summary>
-    /// Measures one folder subtree the user asked for (a click). It runs at full speed while the
-    /// background all-drive scans pause, so the clicked folder is sized first.
+    /// Measures a folder subtree first by pausing background scans on its backing disks.
     /// </summary>
-    public async Task<FolderTree> WalkFolderAsync(string path, CancellationToken cancellationToken, bool measureAllocation = false)
-    {
-        using (ScanGate.Pause())
-        {
-            return await _walker.ScanAsync(path, null, cancellationToken, prioritize: true, measureAllocation: measureAllocation)
-                .ConfigureAwait(false);
-        }
-    }
+    public Task<FolderTree> WalkFolderAsync(string path, CancellationToken cancellationToken, bool measureAllocation = false) =>
+        _walker.ScanPriorityFolderAsync(path, cancellationToken, measureAllocation);
 
     private static DriveScanResult Done(DriveDescriptor drive, FolderTree tree, List<string> notes)
     {

@@ -35,6 +35,23 @@ public sealed class FolderTreeTests
         Assert.Equal([@"C:\Users", @"C:\dev"], tree.GetChildren(0).Select(tree.GetPath).ToArray());
     }
 
+    [Theory]
+    [InlineData(@"C:\")]
+    [InlineData(@"\\?\Volume{79a4539d-d920-44db-8e41-f44ed94c9f36}\")]
+    public void GetPath_PreservesExactNamesAndVolumeRoot(string root)
+    {
+        var builder = new FolderTreeBuilder(root);
+        var first = builder.AddChildFolder(0, "Documents");
+        var second = builder.AddChildFolder(first, "Mixed Case");
+        var third = builder.AddChildFolder(second, "\u00e9t\u00e9");
+        var tree = builder.Build("fixture", TimeSpan.Zero);
+
+        Assert.Equal(root, tree.GetPath(0));
+        Assert.Equal(root + "Documents", tree.GetPath(first));
+        Assert.Equal(root + @"Documents\Mixed Case", tree.GetPath(second));
+        Assert.Equal(root + "Documents\\Mixed Case\\\u00e9t\u00e9", tree.GetPath(third));
+    }
+
     [Fact]
     public void Builder_FromFolderTotals_UsesKnownSizesWithoutDoubleCounting()
     {

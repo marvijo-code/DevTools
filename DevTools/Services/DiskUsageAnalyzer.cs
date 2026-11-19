@@ -1228,10 +1228,24 @@ public sealed class DiskUsageAnalyzer
 
     private static List<DiskUsageEntry> BuildChildEntries(FolderTree tree, int node, int top, bool includeGrandchildren)
     {
-        return tree.GetChildren(node, top)
-            .Where(child => tree.GetTotalBytes(child) > 0)
-            .Select(child => CreateFolderEntry(tree, child, includeGrandchildren))
-            .ToList();
+        var ranked = tree.GetChildren(node, top);
+        if (ranked.Count == 0 || tree.GetTotalBytes(ranked[0]) <= 0)
+        {
+            return [];
+        }
+
+        var entries = new List<DiskUsageEntry>(ranked.Count);
+        foreach (var child in ranked)
+        {
+            if (tree.GetTotalBytes(child) <= 0)
+            {
+                break;
+            }
+
+            entries.Add(CreateFolderEntry(tree, child, includeGrandchildren));
+        }
+
+        return entries;
     }
 
     private static DiskUsageEntry CreateFolderEntry(FolderTree tree, int node, bool includeGrandchildren)
@@ -1254,7 +1268,8 @@ public sealed class DiskUsageAnalyzer
         var entry = DiskUsageEntry.CreateCompleted(path, true, size, FormatBytes(size), note, ResolveFolderDisplayName(path));
         if (includeGrandchildren && tree.HasChildFolders(node))
         {
-            entry.SetChildren(BuildChildEntries(tree, node, LargestFolderChildren, includeGrandchildren: false));
+            // Siblings in the tree are already sorted by size and then by name.
+            entry.SetRankedChildren(BuildChildEntries(tree, node, LargestFolderChildren, includeGrandchildren: false));
         }
 
         entry.SetExpandable(tree.HasChildFolders(node));

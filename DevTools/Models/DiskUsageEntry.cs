@@ -183,21 +183,29 @@ public sealed class DiskUsageEntry : ObservableObject
         RaisePropertyChanged(nameof(CanClear));
     }
 
-    public void SetChildren(IEnumerable<DiskUsageEntry> children)
-    {
-        // Keep nested folders open across a refresh that rebuilds the same children.
-        var previouslyExpanded = _children
-            .Where(child => child.IsExpanded)
-            .Select(child => child.Path)
-            .ToHashSet(StringComparer.Ordinal);
-        _children = children
+    public void SetChildren(IEnumerable<DiskUsageEntry> children) =>
+        SetRankedChildren(children
             .OrderByDescending(child => child.SizeBytes ?? -1)
             .ThenBy(child => child.Path, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+            .ToList());
+
+    internal void SetRankedChildren(IReadOnlyList<DiskUsageEntry> children)
+    {
+        // Keep nested folders open across a refresh that rebuilds the same children.
+        HashSet<string>? previouslyExpanded = null;
+        foreach (var child in _children)
+        {
+            if (child.IsExpanded)
+            {
+                (previouslyExpanded ??= new HashSet<string>(StringComparer.Ordinal)).Add(child.Path);
+            }
+        }
+
+        _children = children;
         foreach (var child in _children)
         {
             child.Parent = this;
-            if (previouslyExpanded.Contains(child.Path) && child.CanExpand)
+            if (previouslyExpanded?.Contains(child.Path) == true && child.CanExpand)
             {
                 child._isExpanded = true;
             }

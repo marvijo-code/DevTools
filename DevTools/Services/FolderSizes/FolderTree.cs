@@ -390,21 +390,41 @@ public sealed class FolderTree
 
     public string GetPath(int node)
     {
-        if (node == 0)
+        if (node <= 0)
         {
             return RootPath;
         }
 
-        var parts = new Stack<string>();
-        var current = node;
-        var guard = 0;
-        while (current > 0 && guard++ < 4096)
+        if (_parent[node] <= 0)
         {
-            parts.Push(_names[current]);
-            current = _parent[current];
+            return string.Concat(RootPath, _names[node]);
         }
 
-        return RootPath + string.Join(Path.DirectorySeparatorChar, parts);
+        var length = RootPath.Length - 1;
+        var count = 0;
+        for (var current = node; current > 0 && count < 4096; current = _parent[current])
+        {
+            length = checked(length + _names[current].AsSpan().Length + 1);
+            count++;
+        }
+
+        // Write leaf-to-root into the final string without building a stack or a relative path.
+        return string.Create(length, (Tree: this, Node: node, Count: count), static (destination, state) =>
+        {
+            var offset = destination.Length;
+            var current = state.Node;
+            for (var i = 0; i < state.Count; i++)
+            {
+                var name = state.Tree._names[current].AsSpan();
+                offset -= name.Length;
+                name.CopyTo(destination[offset..]);
+                destination[--offset] = Path.DirectorySeparatorChar;
+                current = state.Tree._parent[current];
+            }
+
+            // The root already ends in a separator, so let it replace the first one.
+            state.Tree.RootPath.AsSpan().CopyTo(destination);
+        });
     }
 
     /// <summary>Finds the node for an absolute folder path on this drive, or -1.</summary>

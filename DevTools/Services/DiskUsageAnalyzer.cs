@@ -1045,8 +1045,11 @@ public sealed class DiskUsageAnalyzer
         }
 
         var extentsOutsidePartitions = disk.VolumeExtentBytes - disk.VolumeExtentBytesInPartitions;
-        var otherPartitions = partitioned - disk.VolumeExtentBytesInPartitions;
+        var otherPartitions = partitioned - disk.VolumeExtentBytesInPartitions - disk.UnassignedMbrExtendedBytes;
         var outside = capacity - partitioned - extentsOutsidePartitions;
+        var extendedNote = disk.UnassignedMbrExtendedBytes > 0
+            ? $"{disk.UnassignedMbrExtendedBytes:N0} inside MBR extended partitions outside other reported partitions and volume extents, "
+            : string.Empty;
         var outsideNote = (disk.UnassignedGptUsableBytes, disk.UnassignedMbrSectorBytes) switch
         {
             (long usable, _) => $"{usable:N0} unallocated in the GPT usable range and {outside - usable:N0} remaining outside the GPT usable range.",
@@ -1059,7 +1062,7 @@ public sealed class DiskUsageAnalyzer
             outsideNote += $" Of the reported volume extents, {extentsOutsidePartitions:N0} bytes are outside partition ranges.";
         }
 
-        return $"{total} {volumeNotes}{otherPartitions:N0} in other partition ranges and {outsideNote}";
+        return $"{total} {volumeNotes}{extendedNote}{otherPartitions:N0} in other partition ranges and {outsideNote}";
     }
 
     private static string DescribePartialDiskCapacity(DiskCapacity disk)
@@ -1078,6 +1081,11 @@ public sealed class DiskUsageAnalyzer
             var otherPartitions = partitioned - disk.VolumeExtentBytesInPartitions;
             note += $" Windows reports {partitioned:N0} bytes in partition ranges, " +
                 $"including {otherPartitions:N0} outside reported volume extents.";
+        }
+
+        if (disk.UnassignedMbrExtendedBytes > 0)
+        {
+            note += $" Of those bytes, {disk.UnassignedMbrExtendedBytes:N0} are inside MBR extended partitions outside other reported partitions and volume extents.";
         }
 
         if (disk.UnassignedGptUsableBytes is long usable)

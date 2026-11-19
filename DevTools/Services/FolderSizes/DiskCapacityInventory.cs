@@ -17,12 +17,13 @@ internal readonly record struct VolumeDiskLayout((int DiskNumber, DiskRange Rang
 
 internal readonly record struct VolumeExtentSize(int DiskNumber, long Bytes);
 
-internal readonly record struct DiskPartitionLayout(HashSet<DiskRange> Ranges, DiskRange? GptUsableRange, DiskRange? MbrSector);
+internal readonly record struct DiskPartitionLayout(
+    HashSet<DiskRange> Ranges, DiskRange? GptUsableRange, DiskRange? MbrSector, HashSet<DiskRange>? MbrExtendedRanges);
 
 internal readonly record struct DiskCapacity(
     int DiskNumber, long? TotalBytes, long? PartitionedBytes, long VolumeExtentBytes,
     long MatchedExtentBytes, long FileSystemBytes, long VolumeExtentBytesInPartitions,
-    long? UnassignedGptUsableBytes = null, long? UnassignedMbrSectorBytes = null);
+    long? UnassignedGptUsableBytes = null, long? UnassignedMbrSectorBytes = null, long UnassignedMbrExtendedBytes = 0);
 
 /// <summary>Reconciles disk geometry, partition ranges and filesystem capacities without opening disk data.</summary>
 internal static class DiskCapacityInventory
@@ -107,7 +108,7 @@ internal static class DiskCapacityInventory
             var layoutBytes = Query(handle, GetDriveLayout, ref buffer);
             var layout = ReadPartitionLayout(buffer.AsSpan(0, layoutBytes), total, geometry?.SectorBytes ?? 0);
 
-            disks.Add(Reconcile(disk, total, layout?.Ranges, volumes, layout?.GptUsableRange, layout?.MbrSector));
+            disks.Add(Reconcile(disk, total, layout?.Ranges, volumes, layout?.GptUsableRange, layout?.MbrSector, layout?.MbrExtendedRanges));
         }
 
         return disks;
@@ -225,10 +226,12 @@ internal static class DiskCapacityInventory
 
         var maximumOffset = total ?? long.MaxValue;
         var ranges = new HashSet<DiskRange>();
+        HashSet<DiskRange>? mbrExtendedRanges = null;
         for (var i = 0; i < count; i++)
         {
             var entry = layout[(headerBytes + i * entryBytes)..];
-            if (style == MbrPartitionStyle && entry[mbrPartitionTypeOffset] == 0)
+            var mbrType = entry[mbrPartitionTypeOffset];
+            if (style == MbrPartitionStyle && mbrType == 0)
             {
                 continue;
             }
@@ -246,7 +249,15 @@ internal static class DiskCapacityInventory
                 return null;
             }
 
-            ranges.Add(range);
+            // DOS, extended INT 13 and Linux MBR containers can enclose logical partitions.
+            if (style == MbrPartitionStyle && mbrType is 0x05 or 0x0F or 0x85)
+            {
+                (mbrExtendedRanges ??= []).Add(range);
+            }
+            else
+            {
+                ranges.Add(range);
+            }
         }
 
         DiskRange? gptUsableRange = null;
@@ -265,13 +276,20 @@ internal static class DiskCapacityInventory
         DiskRange? mbrSector = style == MbrPartitionStyle && sectorBytes >= 512 && sectorBytes <= maximumOffset && BitOperations.IsPow2(sectorBytes)
             ? new DiskRange(0, sectorBytes)
             : null;
-        return new DiskPartitionLayout(ranges, gptUsableRange, mbrSector);
+        return new DiskPartitionLayout(ranges, gptUsableRange, mbrSector, mbrExtendedRanges);
     }
 
     internal static DiskCapacity Reconcile(int disk, long? total, HashSet<DiskRange>? partitions,
-        IReadOnlyList<VolumeDiskLayout> volumes, DiskRange? gptUsableRange = null, DiskRange? mbrSector = null)
+        IReadOnlyList<VolumeDiskLayout> volumes, DiskRange? gptUsableRange = null, DiskRange? mbrSector = null,
+        HashSet<DiskRange>? mbrExtendedPartitions = null)
     {
-        var partitionRanges = partitions is null ? null : MergeOrderedRanges(partitions.OrderBy(range => range.Start));
+        var dataPartitionRanges = partitions is null ? null : MergeOrderedRanges(partitions.OrderBy(range => range.Start));
+        var extendedRanges = mbrExtendedPartitions is { Count: > 0 }
+            ? MergeOrderedRanges(mbrExtendedPartitions.OrderBy(range => range.Start))
+            : null;
+        var partitionRanges = dataPartitionRanges is not null && extendedRanges is not null
+            ? MergeOrderedRanges(dataPartitionRanges.Concat(extendedRanges).OrderBy(range => range.Start))
+            : dataPartitionRanges;
         var extentLimit = total ?? long.MaxValue;
         var volumeExtents = volumes.SelectMany((volume, volumeIndex) => volume.Extents
                 .Where(extent => extent.DiskNumber == disk && extent.Range.FitsInside(extentLimit))
@@ -329,10 +347,17 @@ internal static class DiskCapacityInventory
             }
         }
 
+        long unassignedMbrExtendedBytes = 0;
+        if (extendedRanges is not null && dataPartitionRanges is not null)
+        {
+            var covered = MergeOrderedRanges(dataPartitionRanges.Concat(volumeRanges).OrderBy(range => range.Start));
+            unassignedMbrExtendedBytes = extendedRanges.Sum(range => range.Length) - MeasureIntersection(extendedRanges, covered);
+        }
+
         return new DiskCapacity(disk, total, partitionRanges?.Sum(range => range.Length),
             volumeRanges.Sum(range => range.Length), matchedExtentBytes, fileSystemBytes,
             partitionRanges is null ? 0 : MeasureIntersection(partitionRanges, volumeRanges),
-            unassignedGptUsableBytes, unassignedMbrSectorBytes);
+            unassignedGptUsableBytes, unassignedMbrSectorBytes, unassignedMbrExtendedBytes);
     }
 
     private static List<DiskRange> MergeOrderedRanges(IEnumerable<DiskRange> ranges)

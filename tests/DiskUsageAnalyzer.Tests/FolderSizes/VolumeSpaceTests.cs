@@ -826,6 +826,55 @@ public sealed class VolumeSpaceTests
         Assert.Null(DiskCapacityInventory.ReadPartitionLayout(layout, null, 0));
     }
 
+    [Theory]
+    [InlineData(0x05)]
+    [InlineData(0x0F)]
+    [InlineData(0x85)]
+    public void DriveSummary_SeparatesMbrExtendedContainerGapsFromOtherPartitionRanges(byte extendedType)
+    {
+        var entries = new (long Start, long Length, byte Type)[]
+        {
+            (512, 1024, 0x07),
+            (2048, 10240, extendedType),
+            (3072, 2048, 0x07),
+            (6144, 2048, extendedType),
+            (6144, 1024, 0x83)
+        };
+        var layout = new byte[48 + entries.Length * 144];
+        BinaryPrimitives.WriteInt32LittleEndian(layout.AsSpan(4), entries.Length);
+        for (var i = 0; i < entries.Length; i++)
+        {
+            var entry = layout.AsSpan(48 + i * 144);
+            BinaryPrimitives.WriteInt64LittleEndian(entry[8..], entries[i].Start);
+            BinaryPrimitives.WriteInt64LittleEndian(entry[16..], entries[i].Length);
+            entry[32] = entries[i].Type;
+        }
+
+        var parsed = Assert.IsType<DiskPartitionLayout>(DiskCapacityInventory.ReadPartitionLayout(layout, 16384, 512));
+        Assert.Equal(3, parsed.Ranges.Count);
+        Assert.Equal(2, parsed.MbrExtendedRanges!.Count);
+        var volumes = new[]
+        {
+            VolumeWithExtent(0, new DiskRange(3584, 1024), 900),
+            VolumeWithExtent(0, new DiskRange(8192, 512), null),
+            VolumeWithExtent(0, new DiskRange(13312, 1024), null)
+        };
+        var capacity = DiskCapacityInventory.Reconcile(0, 16384, parsed.Ranges, volumes,
+            mbrSector: parsed.MbrSector, mbrExtendedPartitions: parsed.MbrExtendedRanges);
+
+        Assert.Equal(new DiskCapacity(0, 16384, 11264, 2560, 1024, 900, 1536,
+            UnassignedMbrSectorBytes: 512, UnassignedMbrExtendedBytes: 6656), capacity);
+        var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
+        Assert.Contains("6,656 inside MBR extended partitions outside other reported partitions and volume extents", summary.Summary);
+        Assert.Contains("3,072 in other partition ranges and 512 in the master boot record sector and 3,584 elsewhere", summary.Summary);
+
+        var partial = DiskCapacityInventory.Reconcile(0, null, parsed.Ranges, volumes,
+            mbrExtendedPartitions: parsed.MbrExtendedRanges);
+        var partialSummary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [partial]);
+        Assert.Contains("including 9,728 outside reported volume extents.", partialSummary.Summary);
+        Assert.Contains("Of those bytes, 6,656 are inside MBR extended partitions", partialSummary.Summary);
+    }
+
     [Fact]
     public void DriveSummary_SplitsGptGapsWithoutCountingOverlappingExtentsTwice()
     {

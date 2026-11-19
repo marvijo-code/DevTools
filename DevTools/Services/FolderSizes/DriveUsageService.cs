@@ -67,6 +67,7 @@ public sealed class DriveUsageService
         var drives = new List<DriveDescriptor>();
         var volumeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var systemRoot = FolderTree.NormalizeRoot(Environment.SystemDirectory);
+        var windows = OperatingSystem.IsWindows();
         var driveLetters = DriveInfo.GetDrives()
             .OrderByDescending(drive => string.Equals(drive.Name, systemRoot, StringComparison.OrdinalIgnoreCase))
             .ThenBy(drive => drive.Name, StringComparer.OrdinalIgnoreCase);
@@ -75,20 +76,23 @@ public sealed class DriveUsageService
             try
             {
                 var type = drive.DriveType;
-                if (!WindowsVolumePaths.IsDiskVolumeType(type, includeRemovable) || !drive.IsReady)
+                if (!WindowsVolumePaths.IsDiskVolumeType(type, includeRemovable) ||
+                    ((type == DriveType.Removable || !windows) && !drive.IsReady))
                 {
                     continue;
                 }
 
-                var rootPath = FolderTree.NormalizeRoot(drive.RootDirectory.FullName);
+                var rootPath = FolderTree.NormalizeRoot(drive.Name);
                 var volumeName = WindowsVolumePaths.GetVolumeName(rootPath);
                 var stableRoot = type == DriveType.Removable && WindowsVolumePaths.GetVolumeGuid(volumeName).HasValue
                     ? volumeName! : rootPath;
-                var (label, fileSystem) = type == DriveType.Fixed
-                    ? (drive.VolumeLabel, drive.DriveFormat)
-                    : WindowsVolumePaths.ReadVolumeInformation(stableRoot);
+                var (label, fileSystem) = windows
+                    ? WindowsVolumePaths.ReadVolumeInformation(stableRoot)
+                    : (drive.VolumeLabel, drive.DriveFormat);
                 var space = ReadVolumeSpace(stableRoot);
-                if (type == DriveType.Removable && fileSystem.Length == 0 && space is null)
+                // A fixed volume with a known identity still contributes disk extents when its filesystem is unreadable.
+                if (fileSystem.Length == 0 && space is null &&
+                    (type == DriveType.Removable || (volumeName is null && label.Length == 0)))
                 {
                     continue;
                 }

@@ -19,6 +19,9 @@ public sealed class VolumeSpaceTests
 
         var systemDrive = Assert.Single(all, drive => drive.RootPath.Equals(path, StringComparison.OrdinalIgnoreCase));
         Assert.True(systemDrive.HasDriveLetter);
+        var expected = new DriveInfo(path);
+        Assert.Equal(expected.VolumeLabel, systemDrive.Label);
+        Assert.Equal(expected.DriveFormat, systemDrive.FileSystem);
         Assert.Equal(identity, systemDrive.VolumeName);
         Assert.Contains(WindowsVolumePaths.GetAccessPaths(identity!), accessPath => accessPath.Equals(path, StringComparison.OrdinalIgnoreCase));
         var aliases = WindowsVolumePaths.GetMountAliases(all, CancellationToken.None);

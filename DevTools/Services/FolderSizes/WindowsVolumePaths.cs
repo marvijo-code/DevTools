@@ -247,12 +247,23 @@ internal static class WindowsVolumePaths
 
     internal static (string Label, string FileSystem) ReadVolumeInformation(string rootPath)
     {
-        const int capacity = 256;
-        var label = new StringBuilder(capacity);
-        var fileSystem = new StringBuilder(capacity);
-        return GetVolumeInformation(rootPath, label, capacity, out _, out _, out _, fileSystem, capacity)
-            ? (label.ToString(), fileSystem.ToString())
+        const int capacity = 261; // MAX_PATH plus the terminating null.
+        // Use blittable UTF-16 code units so the native call writes directly into the supplied buffers.
+        Span<ushort> label = stackalloc ushort[capacity];
+        Span<ushort> fileSystem = stackalloc ushort[capacity];
+        label.Clear();
+        fileSystem.Clear();
+        return GetVolumeInformation(rootPath, ref label[0], label.Length, out _, out _, out _,
+                ref fileSystem[0], fileSystem.Length)
+            ? (ReadVolumeString(label), ReadVolumeString(fileSystem))
             : (string.Empty, string.Empty);
+    }
+
+    private static string ReadVolumeString(ReadOnlySpan<ushort> buffer)
+    {
+        var text = MemoryMarshal.Cast<ushort, char>(buffer);
+        var end = text.IndexOf('\0');
+        return end < 0 ? string.Empty : new string(text[..end]);
     }
 
     // A card reader can lose its media between any two metadata calls. Keep the
@@ -324,6 +335,6 @@ internal static class WindowsVolumePaths
     [DllImport("kernel32.dll", EntryPoint = "GetVolumeInformationW", ExactSpelling = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetVolumeInformation(
-        string rootPath, StringBuilder label, int labelCapacity, out uint serial,
-        out uint maxComponentLength, out uint flags, StringBuilder fileSystem, int fileSystemCapacity);
+        string rootPath, ref ushort label, int labelCapacity, out uint serial,
+        out uint maxComponentLength, out uint flags, ref ushort fileSystem, int fileSystemCapacity);
 }

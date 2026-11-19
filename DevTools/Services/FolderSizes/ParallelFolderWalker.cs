@@ -76,12 +76,15 @@ public sealed class ParallelFolderWalker
 
         using var workerCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var scanToken = workerCancellation.Token;
-        using var queue = new BlockingCollection<WalkJob>();
+        var logicalSubfolders = !measureAllocation && progress is not null ? new LogicalSubfolderProgress(startNode) : null;
+        // Work down each branch in the logical pass so more subtrees finish while the drive is still being read.
+        using var queue = logicalSubfolders is null
+            ? new BlockingCollection<WalkJob>()
+            : new BlockingCollection<WalkJob>(new ConcurrentStack<WalkJob>());
         var pending = 1;
         var queuedStreamBatches = 0;
         long filesSeen = 0;
         List<CompletedFolderSize>? completedFolders = progress is null ? null : [];
-        var logicalSubfolders = !measureAllocation && progress is not null ? new LogicalSubfolderProgress(startNode) : null;
         queue.Add(new WalkJob(startNode, fullRoot), scanToken);
 
         var workers = workerCount is int requested

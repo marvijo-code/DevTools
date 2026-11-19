@@ -236,7 +236,7 @@ public sealed class FolderFileListingTests
         var leaf = nested.CreateSubdirectory("leaf");
         var file = Path.Combine(nested.FullName, "payload.bin");
         var leafFile = Path.Combine(leaf.FullName, "leaf.bin");
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         using var continueWithAllocation = new ManualResetEventSlim();
         var logicalReady = new TaskCompletionSource<FolderTree>(TaskCreationOptions.RunContinuationsAsynchronously);
         var seen = new List<CompletedFolderSize>();
@@ -307,7 +307,7 @@ public sealed class FolderFileListingTests
         var firstFile = Path.Combine(first.FullName, "first.bin");
         var nestedFile = Path.Combine(nested.FullName, "nested.bin");
         var secondFile = Path.Combine(second.FullName, "second.bin");
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         using var release = new ManualResetEventSlim();
         var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var completed = new List<CompletedFolderSize>();

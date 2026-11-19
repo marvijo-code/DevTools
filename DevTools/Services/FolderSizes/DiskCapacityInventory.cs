@@ -51,6 +51,9 @@ internal static class DiskCapacityInventory
     private const uint RawPartitionStyle = 2;
     private const int ErrorInsufficientBuffer = 122;
     private const int ErrorMoreData = 234;
+    private const int BasicGeometryBytes = 24;
+    private const int DriveLayoutHeaderBytes = 48;
+    private const uint GetBasicDriveGeometry = 0x00070000;
     private const uint GetDriveGeometry = 0x000700A0;
     private const uint GetDriveLayout = 0x00070050;
     private const uint GetDiskLength = 0x0007405C;
@@ -121,11 +124,20 @@ internal static class DiskCapacityInventory
             var path = PhysicalDiskPath(disk);
             using var handle = OpenMetadata(path);
             var geometryBytes = Query(handle, GetDriveGeometry, ref buffer);
-            var geometry = ReadDiskGeometry(buffer.AsSpan(0, geometryBytes));
-            var total = geometry?.TotalBytes ?? QueryDiskLength(path, ref buffer);
+            var (reportedLength, sectorBytes) = ReadDiskGeometry(buffer.AsSpan(0, geometryBytes));
+            var total = reportedLength ?? QueryDiskLength(path, ref buffer);
 
             var layoutBytes = Query(handle, GetDriveLayout, ref buffer);
-            var layout = ReadPartitionLayout(buffer.AsSpan(0, layoutBytes), total, geometry?.SectorBytes ?? 0);
+            if (sectorBytes == 0 && layoutBytes >= DriveLayoutHeaderBytes &&
+                BinaryPrimitives.ReadUInt32LittleEndian(buffer) == MbrPartitionStyle)
+            {
+                // Older drivers can expose sector geometry independently of the exact disk length.
+                var geometryBuffer = new byte[BasicGeometryBytes];
+                var basicBytes = Query(handle, GetBasicDriveGeometry, ref geometryBuffer);
+                sectorBytes = ReadDiskGeometry(geometryBuffer.AsSpan(0, basicBytes)).SectorBytes;
+            }
+
+            var layout = ReadPartitionLayout(buffer.AsSpan(0, layoutBytes), total, sectorBytes);
 
             disks.Add(Reconcile(disk, total, layout?.Ranges, volumes, layout?.GptUsableRange, layout?.MbrSector,
                 layout?.MbrExtendedRanges, layout?.PartitionRegions));
@@ -148,17 +160,19 @@ internal static class DiskCapacityInventory
         return bytes > 0 ? bytes : null;
     }
 
-    internal static (long TotalBytes, uint SectorBytes)? ReadDiskGeometry(ReadOnlySpan<byte> geometry)
+    internal static (long? TotalBytes, uint SectorBytes) ReadDiskGeometry(ReadOnlySpan<byte> geometry)
     {
-        if (geometry.Length < 32 ||
+        if (geometry.Length < BasicGeometryBytes ||
             BinaryPrimitives.ReadInt32LittleEndian(geometry[8..]) is not (FixedMedia or RemovableMedia))
         {
-            return null;
+            return default;
         }
 
-        var total = BinaryPrimitives.ReadInt64LittleEndian(geometry[24..]);
-        return total > 0 ? (total, BinaryPrimitives.ReadUInt32LittleEndian(geometry[20..])) : null;
+        var sectorBytes = BinaryPrimitives.ReadUInt32LittleEndian(geometry[20..]);
+        return (ReadDiskLength(geometry[BasicGeometryBytes..]), IsLogicalSectorSize(sectorBytes) ? sectorBytes : 0);
     }
+
+    private static bool IsLogicalSectorSize(uint bytes) => bytes >= 512 && BitOperations.IsPow2(bytes);
 
     internal static int[] ReadBackingDiskNumbers(string? volumeRoot)
     {
@@ -242,10 +256,9 @@ internal static class DiskCapacityInventory
     internal static DiskPartitionLayout? ReadPartitionLayout(ReadOnlySpan<byte> layout, long? total, uint sectorBytes)
     {
         // DRIVE_LAYOUT_INFORMATION_EX has a 48-byte header and 144-byte PARTITION_INFORMATION_EX entries.
-        const int headerBytes = 48;
         const int entryBytes = 144;
         const int partitionTypeOffset = 32;
-        if (layout.Length < headerBytes)
+        if (layout.Length < DriveLayoutHeaderBytes)
         {
             return null;
         }
@@ -257,7 +270,7 @@ internal static class DiskCapacityInventory
         }
 
         var count = BinaryPrimitives.ReadInt32LittleEndian(layout[4..]);
-        if (count < 0 || count > (layout.Length - headerBytes) / entryBytes)
+        if (count < 0 || count > (layout.Length - DriveLayoutHeaderBytes) / entryBytes)
         {
             return null;
         }
@@ -268,7 +281,7 @@ internal static class DiskCapacityInventory
         HashSet<DiskRange>? mbrExtendedRanges = null;
         for (var i = 0; i < count; i++)
         {
-            var entry = layout[(headerBytes + i * entryBytes)..];
+            var entry = layout[(DriveLayoutHeaderBytes + i * entryBytes)..];
             var mbrType = entry[partitionTypeOffset];
             if (style == MbrPartitionStyle && mbrType == 0)
             {
@@ -316,7 +329,7 @@ internal static class DiskCapacityInventory
             }
         }
 
-        DiskRange? mbrSector = style == MbrPartitionStyle && sectorBytes >= 512 && sectorBytes <= maximumOffset && BitOperations.IsPow2(sectorBytes)
+        DiskRange? mbrSector = style == MbrPartitionStyle && IsLogicalSectorSize(sectorBytes) && sectorBytes <= maximumOffset
             ? new DiskRange(0, sectorBytes)
             : null;
         return new DiskPartitionLayout(ranges, gptUsableRange, mbrSector, mbrExtendedRanges, regions);

@@ -66,25 +66,25 @@ public sealed class VolumeSpaceTests
     }
 
     [Theory]
-    [InlineData(11, 65536, true)]
-    [InlineData(12, 65536, true)]
-    [InlineData(0, 65536, false)]
-    [InlineData(11, 0, false)]
-    public void ReadDiskGeometry_AccountsForReadyRemovableAndFixedMedia(int media, long bytes, bool expected)
+    [InlineData(11, 65536L, 4096U, 65536L, 4096U)]
+    [InlineData(12, 65536L, 512U, 65536L, 512U)]
+    [InlineData(0, 65536L, 4096U, null, 0U)]
+    [InlineData(11, 0L, 4096U, null, 4096U)]
+    [InlineData(12, -1L, 4096U, null, 4096U)]
+    [InlineData(12, 65536L, 0U, 65536L, 0U)]
+    [InlineData(12, 65536L, 1000U, 65536L, 0U)]
+    public void ReadDiskGeometry_ReportsSectorSizeIndependentlyOfExactLength(
+        int media, long bytes, uint sectorSize, long? expectedLength, uint expectedSectorSize)
     {
         var reply = new byte[32];
         BinaryPrimitives.WriteInt32LittleEndian(reply.AsSpan(8), media);
-        BinaryPrimitives.WriteUInt32LittleEndian(reply.AsSpan(20), 4096);
+        BinaryPrimitives.WriteUInt32LittleEndian(reply.AsSpan(20), sectorSize);
         BinaryPrimitives.WriteInt64LittleEndian(reply.AsSpan(24), bytes);
 
-        var geometry = DiskCapacityInventory.ReadDiskGeometry(reply);
-        Assert.Equal(expected, geometry.HasValue);
-        if (geometry is { } parsed)
-        {
-            Assert.Equal((bytes, 4096U), parsed);
-        }
-
-        Assert.Null(DiskCapacityInventory.ReadDiskGeometry(reply.AsSpan(0, 31)));
+        Assert.Equal((expectedLength, expectedSectorSize), DiskCapacityInventory.ReadDiskGeometry(reply));
+        Assert.Equal(((long?)null, expectedSectorSize), DiskCapacityInventory.ReadDiskGeometry(reply.AsSpan(0, 24)));
+        Assert.Equal(((long?)null, expectedSectorSize), DiskCapacityInventory.ReadDiskGeometry(reply.AsSpan(0, 31)));
+        Assert.Equal(((long?)null, 0U), DiskCapacityInventory.ReadDiskGeometry(reply.AsSpan(0, 23)));
     }
 
     [Theory]
@@ -931,6 +931,36 @@ public sealed class VolumeSpaceTests
         Assert.Contains("30 bytes in dynamic disk metadata partition ranges", partial.Summary);
     }
 
+    [Fact]
+    public void DriveSummary_CountsAnMbrSectorAndOverlappingRangesWithoutDiskLength()
+    {
+        var geometry = new byte[24];
+        BinaryPrimitives.WriteInt32LittleEndian(geometry.AsSpan(8), 12);
+        BinaryPrimitives.WriteUInt32LittleEndian(geometry.AsSpan(20), 4096);
+        var (total, sector) = DiskCapacityInventory.ReadDiskGeometry(geometry);
+
+        var layout = new byte[48 + 2 * 144];
+        BinaryPrimitives.WriteInt32LittleEndian(layout.AsSpan(4), 2);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(56), 4096);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(64), 4096);
+        layout[80] = 0x07;
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(56 + 144), 16384);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(64 + 144), 4096);
+        layout[80 + 144] = 0x07;
+
+        var parsed = Assert.IsType<DiskPartitionLayout>(DiskCapacityInventory.ReadPartitionLayout(layout, total, sector));
+        var capacity = DiskCapacityInventory.Reconcile(0, total, parsed.Ranges,
+            [VolumeWithExtent(0, new DiskRange(6144, 4096), null)], mbrSector: parsed.MbrSector);
+
+        Assert.Null(capacity.TotalBytes);
+        Assert.Equal(4096, capacity.UnassignedMbrSectorBytes);
+        Assert.Equal(2048, capacity.VolumeExtentBytesInPartitions);
+        var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
+        Assert.Contains("Disk 0 capacity is unavailable.", summary.Summary);
+        Assert.Contains("4,096 bytes are in the master boot record sector", summary.Summary);
+        Assert.Contains("The reported ranges account for 14,336 distinct bytes.", summary.Summary);
+    }
+
     [Theory]
     [InlineData(0xEF, (int)DiskPartitionType.EfiSystem)]
     [InlineData(0x27, (int)DiskPartitionType.WindowsRecovery)]
@@ -984,6 +1014,7 @@ public sealed class VolumeSpaceTests
         Assert.Contains("Disk 0 capacity is unavailable.", partialSummary.Summary);
         Assert.Contains("300 bytes in partition ranges, including 280 outside reported volume extents.", partialSummary.Summary);
         Assert.Contains("395 bytes are unallocated in the reported GPT usable range.", partialSummary.Summary);
+        Assert.Contains("The reported ranges account for 970 distinct bytes.", partialSummary.Summary);
         Assert.DoesNotContain("remaining outside the GPT usable range", partialSummary.Summary);
 
         BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(24), 150);

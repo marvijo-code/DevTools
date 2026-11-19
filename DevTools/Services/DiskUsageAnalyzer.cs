@@ -1126,11 +1126,12 @@ public sealed class DiskUsageAnalyzer
                 $"{disk.MatchedExtentBytes - disk.FileSystemBytes:N0} are beyond those capacities in the same extents.";
         }
 
+        long partitionBytesOutsideExtents = 0;
         if (disk.PartitionedBytes is long partitioned)
         {
-            var otherPartitions = partitioned - disk.VolumeExtentBytesInPartitions;
+            partitionBytesOutsideExtents = partitioned - disk.VolumeExtentBytesInPartitions;
             note += $" Windows reports {partitioned:N0} bytes in partition ranges, " +
-                $"including {otherPartitions:N0} outside reported volume extents.";
+                $"including {partitionBytesOutsideExtents:N0} outside reported volume extents.";
         }
 
         if (disk.UnassignedMbrExtendedBytes > 0)
@@ -1151,6 +1152,13 @@ public sealed class DiskUsageAnalyzer
         else if (disk.UnassignedMbrSectorBytes is long bootSector)
         {
             note += $" {bootSector:N0} bytes are in the master boot record sector outside reported partition and volume ranges.";
+        }
+
+        var gapBytes = disk.UnassignedGptUsableBytes ?? disk.UnassignedMbrSectorBytes ?? 0;
+        if (partitionBytesOutsideExtents > 0 || gapBytes > 0)
+        {
+            var knownBytes = disk.VolumeExtentBytes + partitionBytesOutsideExtents + gapBytes;
+            note += $" The reported ranges account for {knownBytes:N0} distinct bytes.";
         }
 
         return note;

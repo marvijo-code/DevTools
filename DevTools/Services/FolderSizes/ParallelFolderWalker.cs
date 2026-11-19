@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Enumeration;
+using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
 namespace DevTools.Services.FolderSizes;
@@ -80,6 +81,7 @@ public sealed class ParallelFolderWalker
         var queuedStreamBatches = 0;
         long filesSeen = 0;
         List<CompletedFolderSize>? completedFolders = progress is null ? null : [];
+        var logicalSubfolders = !measureAllocation && progress is not null ? new LogicalSubfolderProgress(startNode) : null;
         queue.Add(new WalkJob(startNode, fullRoot), scanToken);
 
         var workers = workerCount is int requested
@@ -230,21 +232,23 @@ public sealed class ParallelFolderWalker
             }
 
             CompletedFolderSize[] ready;
+            LiveFolderSize[] subfolders;
             int folders;
             lock (builderLock)
             {
                 ready = completedFolders!.Count > 0 ? completedFolders.ToArray() : [];
                 completedFolders.Clear();
+                subfolders = logicalSubfolders?.Drain(builder) ?? [];
                 folders = builder.FolderCount;
             }
 
-            if (!completedOnly || ready.Length > 0)
+            if (!completedOnly || ready.Length > 0 || subfolders.Length > 0)
             {
                 var files = Interlocked.Read(ref filesSeen);
                 var phase = measureAllocation ? "Measuring allocation" : "Measuring logical sizes";
                 progress.Report(new FolderScanProgress(
                     driveRoot, EngineName, $"{phase}: {files:N0} files in {folders:N0} folders so far.",
-                    files, stopwatch.Elapsed) { CompletedFolders = ready });
+                    files, stopwatch.Elapsed) { CompletedFolders = ready, LiveSubfolders = subfolders });
             }
         }
 
@@ -347,6 +351,7 @@ public sealed class ParallelFolderWalker
                         }
 
                         firstChild = builder.AppendEnumeratedChildren(node, subfolders);
+                        logicalSubfolders?.FinishListing(node, firstChild, subfolders.Count, bytes, incomplete);
                         FinishBranchWork(currentBranch, subfolders.Count, bytes, allocatedBytes, files, incomplete, incompleteAllocation);
                     }
 
@@ -509,6 +514,81 @@ public sealed class ParallelFolderWalker
         public long Files;
         public bool Incomplete;
         public bool IncompleteAllocation;
+    }
+
+    // Accessed under builderLock. Child state is registered before each child is queued.
+    private sealed class LogicalSubfolderProgress
+    {
+        private const int BatchSize = 4;
+        private readonly int _root;
+        private readonly List<FolderState> _folders = [];
+        private readonly Queue<(int Node, long Bytes)> _ready = new(BatchSize);
+
+        public LogicalSubfolderProgress(int root)
+        {
+            _root = root;
+            CollectionsMarshal.SetCount(_folders, root + 1);
+        }
+
+        public void FinishListing(int node, int firstChild, int childCount, long bytes, bool incomplete)
+        {
+            if (childCount > 0)
+            {
+                CollectionsMarshal.SetCount(_folders, firstChild + childCount);
+                CollectionsMarshal.AsSpan(_folders).Slice(firstChild, childCount).Fill(new FolderState { Parent = node });
+            }
+
+            var folders = CollectionsMarshal.AsSpan(_folders);
+            folders[node].RemainingChildren = childCount;
+            folders[node].Bytes = bytes;
+            folders[node].Incomplete = incomplete;
+
+            // A completed child contributes once. The last child can finish its parent and other ancestors.
+            while (node != _root && folders[node].RemainingChildren == 0)
+            {
+                ref var folder = ref folders[node];
+                var parent = folder.Parent;
+                if (parent != _root && !folder.Incomplete && folder.Bytes > 0)
+                {
+                    if (_ready.Count == BatchSize)
+                    {
+                        _ready.Dequeue();
+                    }
+
+                    _ready.Enqueue((node, folder.Bytes));
+                }
+
+                folders[parent].Bytes += folder.Bytes;
+                folders[parent].Incomplete |= folder.Incomplete;
+                folders[parent].RemainingChildren--;
+                node = parent;
+            }
+        }
+
+        public LiveFolderSize[] Drain(FolderTreeBuilder builder)
+        {
+            if (_ready.Count == 0)
+            {
+                return [];
+            }
+
+            var results = new LiveFolderSize[_ready.Count];
+            for (var index = 0; index < results.Length; index++)
+            {
+                var (node, bytes) = _ready.Dequeue();
+                results[index] = new LiveFolderSize(builder.GetPath(node), bytes);
+            }
+
+            return results;
+        }
+
+        private struct FolderState
+        {
+            public int Parent;
+            public int RemainingChildren;
+            public long Bytes;
+            public bool Incomplete;
+        }
     }
 
     private sealed record StreamBatch(SafeFileHandle Hint, ulong[] FileIds);

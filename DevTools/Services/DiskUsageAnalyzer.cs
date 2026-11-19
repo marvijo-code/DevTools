@@ -141,7 +141,8 @@ public sealed class DiskUsageAnalyzer
                 lock (progressLock)
                 {
                     var now = DateTime.UtcNow;
-                    if ((now - lastStatus).TotalMilliseconds < 400 && update.CompletedFolders.Count == 0)
+                    if ((now - lastStatus).TotalMilliseconds < 400 &&
+                        update.CompletedFolders.Count == 0 && update.LiveSubfolders.Count == 0)
                     {
                         return;
                     }
@@ -152,7 +153,8 @@ public sealed class DiskUsageAnalyzer
                     currentStatus = $"Volume {sectionIndex + 1} of {drives.Count} ({drive.DisplayRoot}): {update.Message}";
                     progress?.Report(new DiskUsageProgress(headline, currentStatus, currentAnalysis, sections.ToList(), false)
                     {
-                        CompletedFolders = update.CompletedFolders
+                        CompletedFolders = update.CompletedFolders,
+                        LiveSubfolders = update.LiveSubfolders
                     });
                 }
             });
@@ -1354,4 +1356,5 @@ public sealed record DiskUsageProgress(string Headline, string StatusText, strin
     public string? CompletedRoot { get; init; }
     internal string? LogicalRoot { get; init; }
     internal IReadOnlyList<CompletedFolderSize> CompletedFolders { get; init; } = [];
+    internal IReadOnlyList<LiveFolderSize> LiveSubfolders { get; init; } = [];
 }

@@ -637,6 +637,17 @@ public sealed class FolderTreeBuilder
 
     public int FolderCount => _parent.Count;
 
+    internal string GetPath(int node)
+    {
+        var names = new Stack<string>();
+        for (var current = node; current > 0; current = _parent[current])
+        {
+            names.Push(_names[current]);
+        }
+
+        return string.Concat(_root, string.Join(Path.DirectorySeparatorChar, names));
+    }
+
     /// <summary>Adds a file. Paths outside the root are ignored.</summary>
     public void AddFile(string fullPath, long sizeBytes)
     {

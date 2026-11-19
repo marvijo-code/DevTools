@@ -232,16 +232,25 @@ public sealed class FolderFileListingTests
     {
         var fixture = Directory.CreateTempSubdirectory("devtools-logical-first-");
         var child = fixture.CreateSubdirectory("child");
-        var file = Path.Combine(child.FullName, "payload.bin");
+        var nested = child.CreateSubdirectory("nested");
+        var leaf = nested.CreateSubdirectory("leaf");
+        var file = Path.Combine(nested.FullName, "payload.bin");
+        var leafFile = Path.Combine(leaf.FullName, "leaf.bin");
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         using var continueWithAllocation = new ManualResetEventSlim();
         var logicalReady = new TaskCompletionSource<FolderTree>(TaskCreationOptions.RunContinuationsAsynchronously);
         var seen = new List<CompletedFolderSize>();
+        var live = new List<LiveFolderSize>();
         Task<DriveScanResult>? scan = null;
         try
         {
             File.WriteAllBytes(file, new byte[8193]);
-            var progress = new InlineProgress<FolderScanProgress>(update => seen.AddRange(update.CompletedFolders));
+            File.WriteAllBytes(leafFile, new byte[11]);
+            var progress = new InlineProgress<FolderScanProgress>(update =>
+            {
+                seen.AddRange(update.CompletedFolders);
+                live.AddRange(update.LiveSubfolders);
+            });
             var drive = new DriveDescriptor(fixture.FullName, "Fixture", "NTFS", null);
             scan = new DriveUsageService().ScanDriveAsync(drive, progress, deadline.Token, volumeShare: 1, tryMft: false,
                 publishLogicalTree: tree =>
@@ -251,17 +260,22 @@ public sealed class FolderFileListingTests
                 });
             var logical = await logicalReady.Task.WaitAsync(deadline.Token);
             var node = logical.Find(child.FullName);
-            Assert.Equal(8193, logical.GetTotalBytes(node));
+            Assert.Equal(8204, logical.GetTotalBytes(node));
             Assert.Null(logical.GetAllocatedBytes(node));
             Assert.False(scan.IsCompleted);
             var early = Assert.Single(seen);
-            Assert.Equal(8193, early.LogicalBytes);
+            Assert.Equal(8204, early.LogicalBytes);
             Assert.False(early.AllocationAttempted);
+            Assert.Collection(live,
+                folder => Assert.Equal(new LiveFolderSize(leaf.FullName, 11), folder),
+                folder => Assert.Equal(new LiveFolderSize(nested.FullName, 8204), folder));
+            Assert.All(live, folder => Assert.Equal(logical.GetTotalBytes(logical.Find(folder.Path)), folder.Bytes));
 
             continueWithAllocation.Set();
             var final = Assert.IsType<FolderTree>((await scan.WaitAsync(deadline.Token)).Tree);
             var finalNode = final.Find(child.FullName);
-            Assert.Equal(8193, final.GetTotalBytes(finalNode));
+            Assert.Equal(8204, final.GetTotalBytes(finalNode));
+            Assert.Equal(2, live.Count);
             Assert.True(final.GetAllocatedBytes(finalNode) > 0);
             Assert.Contains(seen, folder => folder.Path == child.FullName && folder.AllocationAttempted);
         }
@@ -274,7 +288,10 @@ public sealed class FolderFileListingTests
                 catch (OperationCanceledException) when (deadline.IsCancellationRequested) { }
             }
 
+            File.Delete(leafFile);
             File.Delete(file);
+            leaf.Delete();
+            nested.Delete();
             child.Delete();
             fixture.Delete();
         }

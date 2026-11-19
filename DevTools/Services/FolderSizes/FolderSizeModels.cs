@@ -36,6 +36,8 @@ public sealed record FolderSizeEngineSelection(bool UseMft, string EngineName, s
 internal readonly record struct CompletedFolderSize(
     string Path, long? LogicalBytes, long? AllocatedBytes, long FileCount, bool AllocationAttempted);
 
+internal readonly record struct LiveFolderSize(string Path, long Bytes);
+
 /// <summary>Progress of an all-folders scan of one drive.</summary>
 public sealed record FolderScanProgress(
     string DriveRoot,
@@ -45,4 +47,5 @@ public sealed record FolderScanProgress(
     TimeSpan Elapsed)
 {
     internal IReadOnlyList<CompletedFolderSize> CompletedFolders { get; init; } = [];
+    internal IReadOnlyList<LiveFolderSize> LiveSubfolders { get; init; } = [];
 }

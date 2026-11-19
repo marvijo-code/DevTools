@@ -590,6 +590,7 @@ public sealed partial class MainViewModel : ObservableObject
 
             SetDiskUsageSections([]);
             _folderBrowserCompletedSizes.Clear();
+            ClearLiveFolderSizes();
             SetProperty(ref _diskUsageAnalysis, "Scanning disk usage and streaming results as sections complete.",
                 nameof(DiskUsageAnalysis));
             SetDiskUsageStatus("Starting disk usage refresh...");
@@ -621,6 +622,7 @@ public sealed partial class MainViewModel : ObservableObject
                 }
 
                 ApplyCompletedFolderSizes(update.CompletedFolders);
+                ApplyLiveFolderSizes(update.LiveSubfolders);
             });
 
             var snapshot = await _diskUsageAnalyzer.CaptureAsync(progress, cancellationToken);

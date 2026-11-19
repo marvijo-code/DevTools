@@ -8,6 +8,8 @@ namespace DevTools.ViewModels;
 
 public sealed record FolderBrowserDrive(string Path, string Label);
 
+public sealed record FolderBrowserLiveSize(string Name, string Path, string SizeText);
+
 /// <summary>One row of the folder browser: a folder, a file, or the tail of smaller files in a folder.</summary>
 public sealed class FolderBrowserRow
 {
@@ -85,6 +87,7 @@ public sealed class FolderBrowserRow
 public sealed partial class MainViewModel
 {
     private const int FolderBrowserMaxRows = 200;
+    private const int FolderBrowserLiveSizeLimit = 4;
     private const int FolderBrowserMaxFiles = 100;
     private const int FolderBrowserPreviewSizeLimit = 48;
     private const int FolderBrowserPreviewDirectoryLimit = 8;
@@ -101,6 +104,7 @@ public sealed partial class MainViewModel
     private readonly OrderedDictionary<int, FolderFileSnapshot> _recentFolderBrowserFiles = new();
     private OrderedDictionary<(int Node, bool Allocation), FolderBrowserLayout>? _folderBrowserLayouts;
     private FolderTree? _folderBrowserFileTree;
+    private IReadOnlyList<FolderBrowserLiveSize> _folderBrowserLiveSizes = [];
     private string _folderBrowserPath = string.Empty;
     private string _folderBrowserSummary = "Discovering local drives.";
     private bool _showFolderBrowserVolumeSummary;
@@ -116,6 +120,10 @@ public sealed partial class MainViewModel
 
     /// <summary>Drive roots available in the folder browser.</summary>
     public ObservableCollection<FolderBrowserDrive> FolderBrowserDrives => _folderBrowserDrives;
+
+    public IReadOnlyList<FolderBrowserLiveSize> FolderBrowserLiveSizes => _folderBrowserLiveSizes;
+
+    public bool HasLiveFolderSizes => _folderBrowserLiveSizes.Count > 0;
 
     public string FolderBrowserPath => _folderBrowserPath;
 
@@ -178,6 +186,7 @@ public sealed partial class MainViewModel
             return;
         }
 
+        ClearLiveFolderSizes();
         _folderBrowserPath = normalized;
         _canFolderBrowserGoUp = node != 0;
         _showFolderBrowserVolumeSummary = node == 0;
@@ -389,6 +398,7 @@ public sealed partial class MainViewModel
             _folderBrowserPreviewUsesAllocation == useAllocation && string.Equals(path, _folderBrowserPath, StringComparison.Ordinal);
         if (!keepPreview)
         {
+            ClearLiveFolderSizes();
             _folderBrowserExpanded.Clear();
             ResetFolderBrowserCaches(null);
             if (_folderBrowserRows.Count > 0)
@@ -500,6 +510,65 @@ public sealed partial class MainViewModel
         var detail = hasResult ? bytes.HasValue ? "Verified by drive scan" : "Exact size unavailable" : "Waiting for exact size";
         return new FolderBrowserRow(name, path, bytes, detail,
             0, 0, canOpen: true, canExpand: false, isExpanded: false, isFile: false);
+    }
+
+    private void ApplyLiveFolderSizes(IReadOnlyList<LiveFolderSize> subfolders)
+    {
+        if (subfolders.Count == 0 || FolderBrowserUseAllocation || _folderBrowserFileTree is not null ||
+            _folderBrowserPath.Length == 0)
+        {
+            return;
+        }
+
+        var prefix = Path.EndsInDirectorySeparator(_folderBrowserPath)
+            ? _folderBrowserPath : _folderBrowserPath + Path.DirectorySeparatorChar;
+        var rows = new List<FolderBrowserLiveSize>(FolderBrowserLiveSizeLimit);
+        long latestBytes = 0;
+        for (var index = subfolders.Count - 1; index >= 0 && rows.Count < FolderBrowserLiveSizeLimit; index--)
+        {
+            var folder = subfolders[index];
+            if (!folder.Path.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (rows.Count == 0)
+            {
+                latestBytes = folder.Bytes;
+            }
+
+            rows.Add(new FolderBrowserLiveSize(folder.Path[prefix.Length..], folder.Path, $"{folder.Bytes:N0} B"));
+        }
+
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
+        var published = rows.Count;
+        rows.AddRange(_folderBrowserLiveSizes.Take(FolderBrowserLiveSizeLimit - published));
+        SetLiveFolderSizes(rows);
+        AppLog.Info($"Folder Browser published {published:N0} live exact subfolder sizes under {_folderBrowserPath} " +
+            $"({latestBytes:N0} bytes in the latest folder).");
+    }
+
+    private void ClearLiveFolderSizes()
+    {
+        if (HasLiveFolderSizes)
+        {
+            SetLiveFolderSizes([]);
+        }
+    }
+
+    private void SetLiveFolderSizes(IReadOnlyList<FolderBrowserLiveSize> sizes)
+    {
+        var wasVisible = HasLiveFolderSizes;
+        _folderBrowserLiveSizes = sizes;
+        RaisePropertyChanged(nameof(FolderBrowserLiveSizes));
+        if (wasVisible != HasLiveFolderSizes)
+        {
+            RaisePropertyChanged(nameof(HasLiveFolderSizes));
+        }
     }
 
     private void ApplyCompletedFolderSizes(IReadOnlyList<CompletedFolderSize> completed)

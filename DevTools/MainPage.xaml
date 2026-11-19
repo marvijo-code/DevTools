@@ -894,6 +894,34 @@
                                TextWrapping="WrapWholeWords"
                                FontSize="12"
                                Opacity="0.72" />
+                    <StackPanel Spacing="2"
+                                Visibility="{Binding HasLiveFolderSizes, Converter={StaticResource BoolToVisibilityConverter}}">
+                      <TextBlock Text="Recently sized folders" FontSize="12" FontWeight="SemiBold" />
+                      <ItemsRepeater ItemsSource="{Binding FolderBrowserLiveSizes}">
+                        <ItemsRepeater.ItemTemplate>
+                          <DataTemplate x:DataType="vm:FolderBrowserLiveSize">
+                            <Grid ColumnSpacing="10">
+                              <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                              </Grid.ColumnDefinitions>
+                              <HyperlinkButton Tag="{Binding Path}"
+                                               Click="BrowseFolder_Click"
+                                               ToolTipService.ToolTip="{Binding Path}"
+                                               Padding="0"
+                                               HorizontalAlignment="Stretch"
+                                               HorizontalContentAlignment="Stretch">
+                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" FontSize="12" />
+                              </HyperlinkButton>
+                              <TextBlock Grid.Column="1"
+                                         Text="{Binding SizeText}"
+                                         VerticalAlignment="Center"
+                                         FontSize="12" />
+                            </Grid>
+                          </DataTemplate>
+                        </ItemsRepeater.ItemTemplate>
+                      </ItemsRepeater>
+                    </StackPanel>
                     <ScrollViewer MaxHeight="420"
                                   VerticalScrollBarVisibility="Auto"
                                   HorizontalScrollBarVisibility="Disabled">

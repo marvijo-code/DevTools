@@ -17,13 +17,28 @@ internal readonly record struct VolumeDiskLayout((int DiskNumber, DiskRange Rang
 
 internal readonly record struct VolumeExtentSize(int DiskNumber, long Bytes);
 
+internal enum DiskPartitionType
+{
+    Other,
+    EfiSystem,
+    MicrosoftReserved,
+    WindowsRecovery,
+    LdmMetadata
+}
+
+internal readonly record struct DiskPartitionRegion(DiskRange Range, DiskPartitionType Type);
+
+internal readonly record struct DiskPartitionTypeSize(DiskPartitionType Type, long Bytes);
+
 internal readonly record struct DiskPartitionLayout(
-    HashSet<DiskRange> Ranges, DiskRange? GptUsableRange, DiskRange? MbrSector, HashSet<DiskRange>? MbrExtendedRanges);
+    HashSet<DiskRange> Ranges, DiskRange? GptUsableRange, DiskRange? MbrSector, HashSet<DiskRange>? MbrExtendedRanges,
+    IReadOnlyList<DiskPartitionRegion> PartitionRegions);
 
 internal readonly record struct DiskCapacity(
     int DiskNumber, long? TotalBytes, long? PartitionedBytes, long VolumeExtentBytes,
     long MatchedExtentBytes, long FileSystemBytes, long VolumeExtentBytesInPartitions,
-    long? UnassignedGptUsableBytes = null, long? UnassignedMbrSectorBytes = null, long UnassignedMbrExtendedBytes = 0);
+    long? UnassignedGptUsableBytes = null, long? UnassignedMbrSectorBytes = null, long UnassignedMbrExtendedBytes = 0,
+    DiskPartitionTypeSize[]? PartitionBytesByType = null);
 
 /// <summary>Reconciles disk geometry, partition ranges and filesystem capacities without opening disk data.</summary>
 internal static class DiskCapacityInventory
@@ -42,6 +57,10 @@ internal static class DiskCapacityInventory
     private const uint ReadDataAccess = 0x00000001;
     private const uint GetVolumeExtents = 0x00560000;
     private const int MaximumBufferSize = 1024 * 1024;
+    private static readonly Guid EfiSystemPartition = new("c12a7328-f81f-11d2-ba4b-00a0c93ec93b");
+    private static readonly Guid MicrosoftReservedPartition = new("e3c9e316-0b5c-4db8-817d-f92df00215ae");
+    private static readonly Guid WindowsRecoveryPartition = new("de94bba4-06d1-4d40-a16a-bfd50179d6ac");
+    private static readonly Guid LdmMetadataPartition = new("5808c8aa-7e8f-42e0-85d2-e1e90434cfb3");
 
     internal static IReadOnlyList<VolumeDiskLayout> ReadVolumeTopology(
         IReadOnlyList<DriveDescriptor> volumes, CancellationToken cancellationToken, out int[][] backingDisks,
@@ -108,7 +127,8 @@ internal static class DiskCapacityInventory
             var layoutBytes = Query(handle, GetDriveLayout, ref buffer);
             var layout = ReadPartitionLayout(buffer.AsSpan(0, layoutBytes), total, geometry?.SectorBytes ?? 0);
 
-            disks.Add(Reconcile(disk, total, layout?.Ranges, volumes, layout?.GptUsableRange, layout?.MbrSector, layout?.MbrExtendedRanges));
+            disks.Add(Reconcile(disk, total, layout?.Ranges, volumes, layout?.GptUsableRange, layout?.MbrSector,
+                layout?.MbrExtendedRanges, layout?.PartitionRegions));
         }
 
         return disks;
@@ -206,7 +226,7 @@ internal static class DiskCapacityInventory
         // DRIVE_LAYOUT_INFORMATION_EX has a 48-byte header and 144-byte PARTITION_INFORMATION_EX entries.
         const int headerBytes = 48;
         const int entryBytes = 144;
-        const int mbrPartitionTypeOffset = 32;
+        const int partitionTypeOffset = 32;
         if (layout.Length < headerBytes)
         {
             return null;
@@ -226,11 +246,12 @@ internal static class DiskCapacityInventory
 
         var maximumOffset = total ?? long.MaxValue;
         var ranges = new HashSet<DiskRange>();
+        var regions = new List<DiskPartitionRegion>(count);
         HashSet<DiskRange>? mbrExtendedRanges = null;
         for (var i = 0; i < count; i++)
         {
             var entry = layout[(headerBytes + i * entryBytes)..];
-            var mbrType = entry[mbrPartitionTypeOffset];
+            var mbrType = entry[partitionTypeOffset];
             if (style == MbrPartitionStyle && mbrType == 0)
             {
                 continue;
@@ -257,6 +278,10 @@ internal static class DiskCapacityInventory
             else
             {
                 ranges.Add(range);
+                var type = BinaryPrimitives.ReadUInt32LittleEndian(entry) == style
+                    ? ReadPartitionType(style, entry[partitionTypeOffset..])
+                    : DiskPartitionType.Other;
+                regions.Add(new DiskPartitionRegion(range, type));
             }
         }
 
@@ -276,12 +301,36 @@ internal static class DiskCapacityInventory
         DiskRange? mbrSector = style == MbrPartitionStyle && sectorBytes >= 512 && sectorBytes <= maximumOffset && BitOperations.IsPow2(sectorBytes)
             ? new DiskRange(0, sectorBytes)
             : null;
-        return new DiskPartitionLayout(ranges, gptUsableRange, mbrSector, mbrExtendedRanges);
+        return new DiskPartitionLayout(ranges, gptUsableRange, mbrSector, mbrExtendedRanges, regions);
+    }
+
+    private static DiskPartitionType ReadPartitionType(uint style, ReadOnlySpan<byte> type)
+    {
+        if (style == MbrPartitionStyle)
+        {
+            return type[0] switch
+            {
+                0xEF => DiskPartitionType.EfiSystem,
+                0x27 => DiskPartitionType.WindowsRecovery,
+                _ => DiskPartitionType.Other
+            };
+        }
+
+        if (style == GptPartitionStyle)
+        {
+            var id = new Guid(type[..16]);
+            if (id == EfiSystemPartition) return DiskPartitionType.EfiSystem;
+            if (id == MicrosoftReservedPartition) return DiskPartitionType.MicrosoftReserved;
+            if (id == WindowsRecoveryPartition) return DiskPartitionType.WindowsRecovery;
+            if (id == LdmMetadataPartition) return DiskPartitionType.LdmMetadata;
+        }
+
+        return DiskPartitionType.Other;
     }
 
     internal static DiskCapacity Reconcile(int disk, long? total, HashSet<DiskRange>? partitions,
         IReadOnlyList<VolumeDiskLayout> volumes, DiskRange? gptUsableRange = null, DiskRange? mbrSector = null,
-        HashSet<DiskRange>? mbrExtendedPartitions = null)
+        HashSet<DiskRange>? mbrExtendedPartitions = null, IReadOnlyList<DiskPartitionRegion>? partitionRegions = null)
     {
         var dataPartitionRanges = partitions is null ? null : MergeOrderedRanges(partitions.OrderBy(range => range.Start));
         var extendedRanges = mbrExtendedPartitions is { Count: > 0 }
@@ -354,10 +403,33 @@ internal static class DiskCapacityInventory
             unassignedMbrExtendedBytes = extendedRanges.Sum(range => range.Length) - MeasureIntersection(extendedRanges, covered);
         }
 
+        var partitionBytesByType = partitionRegions is null ? null : MeasureUncoveredPartitionTypes(partitionRegions, volumeRanges);
         return new DiskCapacity(disk, total, partitionRanges?.Sum(range => range.Length),
             volumeRanges.Sum(range => range.Length), matchedExtentBytes, fileSystemBytes,
             partitionRanges is null ? 0 : MeasureIntersection(partitionRanges, volumeRanges),
-            unassignedGptUsableBytes, unassignedMbrSectorBytes, unassignedMbrExtendedBytes);
+            unassignedGptUsableBytes, unassignedMbrSectorBytes, unassignedMbrExtendedBytes, partitionBytesByType);
+    }
+
+    private static DiskPartitionTypeSize[]? MeasureUncoveredPartitionTypes(
+        IReadOnlyList<DiskPartitionRegion> regions, List<DiskRange> volumeRanges)
+    {
+        List<DiskPartitionTypeSize>? sizes = null;
+        foreach (var group in regions.Where(region => region.Type != DiskPartitionType.Other)
+                     .GroupBy(region => region.Type).OrderBy(group => group.Key))
+        {
+            var ranges = MergeOrderedRanges(group.Select(region => region.Range).OrderBy(range => range.Start));
+            // Space shared with a volume or a differently typed partition already has another claim.
+            var covered = MergeOrderedRanges(volumeRanges
+                .Concat(regions.Where(region => region.Type != group.Key).Select(region => region.Range))
+                .OrderBy(range => range.Start));
+            var bytes = ranges.Sum(range => range.Length) - MeasureIntersection(ranges, covered);
+            if (bytes > 0)
+            {
+                (sizes ??= []).Add(new DiskPartitionTypeSize(group.Key, bytes));
+            }
+        }
+
+        return sizes?.ToArray();
     }
 
     private static List<DiskRange> MergeOrderedRanges(IEnumerable<DiskRange> ranges)

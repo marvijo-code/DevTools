@@ -1045,7 +1045,10 @@ public sealed class DiskUsageAnalyzer
         }
 
         var extentsOutsidePartitions = disk.VolumeExtentBytes - disk.VolumeExtentBytesInPartitions;
-        var otherPartitions = partitioned - disk.VolumeExtentBytesInPartitions - disk.UnassignedMbrExtendedBytes;
+        var typedPartitions = disk.PartitionBytesByType;
+        var otherPartitions = partitioned - disk.VolumeExtentBytesInPartitions - disk.UnassignedMbrExtendedBytes -
+            (typedPartitions?.Sum(partition => partition.Bytes) ?? 0);
+        var typedNote = typedPartitions is null ? string.Empty : string.Join(", ", typedPartitions.Select(DescribePartitionType)) + ", ";
         var outside = capacity - partitioned - extentsOutsidePartitions;
         var extendedNote = disk.UnassignedMbrExtendedBytes > 0
             ? $"{disk.UnassignedMbrExtendedBytes:N0} inside MBR extended partitions outside other reported partitions and volume extents, "
@@ -1062,7 +1065,20 @@ public sealed class DiskUsageAnalyzer
             outsideNote += $" Of the reported volume extents, {extentsOutsidePartitions:N0} bytes are outside partition ranges.";
         }
 
-        return $"{total} {volumeNotes}{extendedNote}{otherPartitions:N0} in other partition ranges and {outsideNote}";
+        return $"{total} {volumeNotes}{extendedNote}{typedNote}{otherPartitions:N0} in other partition ranges and {outsideNote}";
+    }
+
+    private static string DescribePartitionType(DiskPartitionTypeSize partition)
+    {
+        var name = partition.Type switch
+        {
+            DiskPartitionType.EfiSystem => "EFI system",
+            DiskPartitionType.MicrosoftReserved => "Microsoft Reserved",
+            DiskPartitionType.WindowsRecovery => "Windows recovery and utility",
+            DiskPartitionType.LdmMetadata => "dynamic disk metadata",
+            _ => "other"
+        };
+        return $"{partition.Bytes:N0} bytes in {name} partition ranges";
     }
 
     private static string DescribePartialDiskCapacity(DiskCapacity disk)
@@ -1086,6 +1102,12 @@ public sealed class DiskUsageAnalyzer
         if (disk.UnassignedMbrExtendedBytes > 0)
         {
             note += $" Of those bytes, {disk.UnassignedMbrExtendedBytes:N0} are inside MBR extended partitions outside other reported partitions and volume extents.";
+        }
+
+        if (disk.PartitionBytesByType is { } typedPartitions)
+        {
+            note += " Reported partition ranges outside volume extents include " +
+                string.Join(", ", typedPartitions.Select(DescribePartitionType)) + ".";
         }
 
         if (disk.UnassignedGptUsableBytes is long usable)

@@ -876,6 +876,74 @@ public sealed class VolumeSpaceTests
     }
 
     [Fact]
+    public void DriveSummary_AttributesOnlyUncoveredAndUnambiguousPartitionTypes()
+    {
+        var efi = new Guid("c12a7328-f81f-11d2-ba4b-00a0c93ec93b");
+        var recovery = new Guid("de94bba4-06d1-4d40-a16a-bfd50179d6ac");
+        var reserved = new Guid("e3c9e316-0b5c-4db8-817d-f92df00215ae");
+        var ldm = new Guid("5808c8aa-7e8f-42e0-85d2-e1e90434cfb3");
+        var basicData = new Guid("ebd0a0a2-b9e5-4433-87c0-68b6b72699c7");
+        var entries = new (long Start, long Length, Guid Type)[]
+        {
+            (100, 200, efi), (250, 100, efi), (275, 125, recovery),
+            (450, 50, reserved), (470, 20, basicData), (520, 50, ldm)
+        };
+        var layout = new byte[48 + entries.Length * 144];
+        BinaryPrimitives.WriteInt32LittleEndian(layout, 1);
+        BinaryPrimitives.WriteInt32LittleEndian(layout.AsSpan(4), entries.Length);
+        for (var index = 0; index < entries.Length; index++)
+        {
+            var (start, length, type) = entries[index];
+            var entry = layout.AsSpan(48 + index * 144);
+            BinaryPrimitives.WriteInt32LittleEndian(entry, 1);
+            BinaryPrimitives.WriteInt64LittleEndian(entry[8..], start);
+            BinaryPrimitives.WriteInt64LittleEndian(entry[16..], length);
+            Assert.True(type.TryWriteBytes(entry[32..]));
+        }
+
+        var parsed = Assert.IsType<DiskPartitionLayout>(DiskCapacityInventory.ReadPartitionLayout(layout, 1000, 512));
+        var capacity = DiskCapacityInventory.Reconcile(0, 1000, parsed.Ranges,
+        [
+            VolumeWithExtent(0, new DiskRange(120, 100), null),
+            VolumeWithExtent(0, new DiskRange(365, 15), null),
+            VolumeWithExtent(0, new DiskRange(530, 20), null)
+        ], partitionRegions: parsed.PartitionRegions);
+
+        Assert.Equal(400, capacity.PartitionedBytes);
+        Assert.Equal(135, capacity.VolumeExtentBytesInPartitions);
+        Assert.Equal([
+            new DiskPartitionTypeSize(DiskPartitionType.EfiSystem, 75),
+            new DiskPartitionTypeSize(DiskPartitionType.MicrosoftReserved, 30),
+            new DiskPartitionTypeSize(DiskPartitionType.WindowsRecovery, 35),
+            new DiskPartitionTypeSize(DiskPartitionType.LdmMetadata, 30)
+        ], Assert.IsType<DiskPartitionTypeSize[]>(capacity.PartitionBytesByType));
+        var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
+        Assert.Contains("75 bytes in EFI system partition ranges", summary.Summary);
+        Assert.Contains("35 bytes in Windows recovery and utility partition ranges", summary.Summary);
+        Assert.Contains("95 in other partition ranges and 600 outside partition ranges.", summary.Summary);
+        var partial = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(),
+            [capacity with { TotalBytes = null }]);
+        Assert.Contains("including 265 outside reported volume extents.", partial.Summary);
+        Assert.Contains("30 bytes in Microsoft Reserved partition ranges", partial.Summary);
+        Assert.Contains("30 bytes in dynamic disk metadata partition ranges", partial.Summary);
+    }
+
+    [Theory]
+    [InlineData(0xEF, (int)DiskPartitionType.EfiSystem)]
+    [InlineData(0x27, (int)DiskPartitionType.WindowsRecovery)]
+    public void ReadPartitionLayout_RecognisesMbrTypes(byte type, int expected)
+    {
+        var layout = new byte[48 + 144];
+        BinaryPrimitives.WriteInt32LittleEndian(layout.AsSpan(4), 1);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(56), 512);
+        BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(64), 512);
+        layout[80] = type;
+
+        var parsed = Assert.IsType<DiskPartitionLayout>(DiskCapacityInventory.ReadPartitionLayout(layout, 4096, 512));
+        Assert.Equal(new DiskPartitionRegion(new DiskRange(512, 512), (DiskPartitionType)expected), Assert.Single(parsed.PartitionRegions));
+    }
+
+    [Fact]
     public void DriveSummary_SplitsGptGapsWithoutCountingOverlappingExtentsTwice()
     {
         var layout = new byte[48 + 2 * 144];

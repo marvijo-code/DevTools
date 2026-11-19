@@ -13,7 +13,7 @@ internal readonly record struct DiskRange(long Start, long Length)
     internal bool FitsInside(long capacity) => Start >= 0 && Start <= capacity && Length > 0 && Length <= capacity - Start;
 }
 
-internal readonly record struct VolumeDiskExtent(int DiskNumber, DiskRange Range, long? FileSystemBytes);
+internal readonly record struct VolumeDiskLayout((int DiskNumber, DiskRange Range)[] Extents, long? FileSystemBytes);
 
 internal readonly record struct VolumeExtentSize(int DiskNumber, long Bytes);
 
@@ -42,7 +42,7 @@ internal static class DiskCapacityInventory
     private const uint GetVolumeExtents = 0x00560000;
     private const int MaximumBufferSize = 1024 * 1024;
 
-    internal static IReadOnlyList<VolumeDiskExtent> ReadVolumeTopology(
+    internal static IReadOnlyList<VolumeDiskLayout> ReadVolumeTopology(
         IReadOnlyList<DriveDescriptor> volumes, CancellationToken cancellationToken, out int[][] backingDisks,
         out Dictionary<string, VolumeExtentSize[]> volumeExtentsByRoot)
     {
@@ -56,7 +56,7 @@ internal static class DiskCapacityInventory
 
         using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
         var buffer = new byte[4096];
-        var extents = new List<VolumeDiskExtent>();
+        var layouts = new List<VolumeDiskLayout>(volumes.Count);
         for (var index = 0; index < volumes.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -69,25 +69,21 @@ internal static class DiskCapacityInventory
             using var handle = OpenMetadata(device);
             var volumeExtents = ReadVolumeExtents(handle, ref buffer);
             backingDisks[index] = GetBackingDiskNumbers(volumeExtents);
-            if (volumeExtents.Length > 0)
+            if (volumeExtents.Length == 0)
             {
-                volumeExtentsByRoot[volume.RootPath] = SummarizeVolumeExtents(volumeExtents);
+                continue;
             }
 
-            long? fileSystemBytes = volumeExtents.Length == 1 && volume.Space is { IsVolumeWide: true, TotalBytes: > 0 } space
-                ? space.TotalBytes
-                : null;
-            foreach (var (disk, range) in volumeExtents)
-            {
-                extents.Add(new VolumeDiskExtent(disk, range, fileSystemBytes));
-            }
+            volumeExtentsByRoot[volume.RootPath] = SummarizeVolumeExtents(volumeExtents);
+            long? fileSystemBytes = volume.Space is { IsVolumeWide: true, TotalBytes: > 0 } space ? space.TotalBytes : null;
+            layouts.Add(new VolumeDiskLayout(volumeExtents, fileSystemBytes));
         }
 
-        return extents;
+        return layouts;
     }
 
     internal static IReadOnlyList<DiskCapacity> ReadPhysicalDisks(
-        IReadOnlyList<VolumeDiskExtent> extents, CancellationToken cancellationToken)
+        IReadOnlyList<VolumeDiskLayout> volumes, CancellationToken cancellationToken)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -97,7 +93,8 @@ internal static class DiskCapacityInventory
         using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
         var buffer = new byte[4096];
         var disks = new List<DiskCapacity>();
-        var diskNumbers = ReadDiskNumbers().Union(extents.Select(extent => extent.DiskNumber)).Order();
+        var backingDiskNumbers = volumes.SelectMany(volume => volume.Extents).Select(extent => extent.DiskNumber);
+        var diskNumbers = ReadDiskNumbers().Union(backingDiskNumbers).Order();
         foreach (var disk in diskNumbers)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -114,7 +111,7 @@ internal static class DiskCapacityInventory
                 layout = ReadPartitionLayout(buffer.AsSpan(0, bytes), capacity, geometry?.SectorBytes ?? 0);
             }
 
-            disks.Add(Reconcile(disk, total, layout?.Ranges, extents, layout?.GptUsableRange, layout?.MbrSector));
+            disks.Add(Reconcile(disk, total, layout?.Ranges, volumes, layout?.GptUsableRange, layout?.MbrSector));
         }
 
         return disks;
@@ -275,31 +272,47 @@ internal static class DiskCapacityInventory
     }
 
     internal static DiskCapacity Reconcile(int disk, long? total, HashSet<DiskRange>? partitions,
-        IReadOnlyList<VolumeDiskExtent> extents, DiskRange? gptUsableRange = null, DiskRange? mbrSector = null)
+        IReadOnlyList<VolumeDiskLayout> volumes, DiskRange? gptUsableRange = null, DiskRange? mbrSector = null)
     {
         var partitionRanges = partitions is null ? null : MergeOrderedRanges(partitions.OrderBy(range => range.Start));
         var extentLimit = total ?? long.MaxValue;
-        var volumeExtents = extents.Where(extent => extent.DiskNumber == disk && extent.Range.FitsInside(extentLimit))
-            .GroupBy(extent => extent.Range).OrderBy(group => group.Key.Start).ToArray();
-        var volumeRanges = MergeOrderedRanges(volumeExtents.Select(group => group.Key));
+        var volumeExtents = volumes.SelectMany((volume, volumeIndex) => volume.Extents
+                .Where(extent => extent.DiskNumber == disk && extent.Range.FitsInside(extentLimit))
+                .Select(extent => (VolumeIndex: volumeIndex, extent.Range)))
+            .Distinct().OrderBy(extent => extent.Range.Start).ToArray();
+        var volumeRanges = MergeOrderedRanges(volumeExtents.Select(extent => extent.Range));
 
-        long matchedExtentBytes = 0;
-        long fileSystemBytes = 0;
+        // Deduplicate identical reports within a volume. Any remaining overlap makes the
+        // whole volume ambiguous, even if its other extents have no overlap.
+        var exclusiveExtentBytes = new long[volumes.Count];
         long lastEnd = 0;
         for (var index = 0; index < volumeExtents.Length; index++)
         {
-            var group = volumeExtents[index];
-            var range = group.Key;
+            var (volumeIndex, range) = volumeExtents[index];
             var overlapsAnother = range.Start < lastEnd ||
-                (index + 1 < volumeExtents.Length && volumeExtents[index + 1].Key.Start < range.End);
+                (index + 1 < volumeExtents.Length && volumeExtents[index + 1].Range.Start < range.End);
             lastEnd = Math.Max(lastEnd, range.End);
-
-            // Physical ranges can be counted once even when a filesystem mapping is ambiguous.
-            if (!overlapsAnother && group.First().FileSystemBytes is long bytes && bytes > 0 && bytes <= range.Length &&
-                group.All(extent => extent.FileSystemBytes == bytes))
+            if (overlapsAnother)
             {
-                matchedExtentBytes += range.Length;
-                fileSystemBytes += bytes;
+                exclusiveExtentBytes[volumeIndex] = -1;
+            }
+            else if (exclusiveExtentBytes[volumeIndex] >= 0)
+            {
+                exclusiveExtentBytes[volumeIndex] += range.Length;
+            }
+        }
+
+        long matchedExtentBytes = 0;
+        long fileSystemBytes = 0;
+        for (var index = 0; index < volumes.Count; index++)
+        {
+            var volume = volumes[index];
+            var bytes = exclusiveExtentBytes[index];
+            if (volume.FileSystemBytes is long capacity && capacity > 0 && capacity <= bytes &&
+                volume.Extents.All(extent => extent.DiskNumber == disk && extent.Range.FitsInside(extentLimit)))
+            {
+                matchedExtentBytes += bytes;
+                fileSystemBytes += capacity;
             }
         }
 

@@ -102,7 +102,7 @@ public sealed class DiskUsageAnalyzer
         });
 
         cancellationToken.ThrowIfCancellationRequested();
-        var extents = DiskCapacityInventory.ReadVolumeTopology(drives, cancellationToken, out var backingDisks,
+        var volumeLayouts = DiskCapacityInventory.ReadVolumeTopology(drives, cancellationToken, out var backingDisks,
             out var volumeExtentsByRoot);
         var diskCount = backingDisks.SelectMany(disks => disks).Distinct().Count();
         var possibleParallelism = Math.Min(diskCount, drives.Count);
@@ -118,7 +118,7 @@ public sealed class DiskUsageAnalyzer
         var inventoryToken = inventoryCancellation.Token;
         var inventory = Task.Run(() =>
         {
-            var capacities = DiskCapacityInventory.ReadPhysicalDisks(extents, inventoryToken);
+            var capacities = DiskCapacityInventory.ReadPhysicalDisks(volumeLayouts, inventoryToken);
             lock (progressLock)
             {
                 inventoryToken.ThrowIfCancellationRequested();

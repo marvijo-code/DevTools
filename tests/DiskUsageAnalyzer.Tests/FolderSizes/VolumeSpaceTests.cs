@@ -611,9 +611,8 @@ public sealed class VolumeSpaceTests
         var otherPartition = new DiskRange(600, 100);
         var capacity = DiskCapacityInventory.Reconcile(0, 900, [new DiskRange(100, 500), logicalPartition, otherPartition],
         [
-            new VolumeDiskExtent(0, logicalPartition, 280),
-            new VolumeDiskExtent(0, logicalPartition, 280),
-            new VolumeDiskExtent(1, otherPartition, 90)
+            new VolumeDiskLayout([(0, logicalPartition), (0, logicalPartition)], 280),
+            VolumeWithExtent(1, otherPartition, 90)
         ]);
 
         Assert.Equal(new DiskCapacity(0, 900, 600, 300, 300, 280, 300), capacity);
@@ -628,26 +627,76 @@ public sealed class VolumeSpaceTests
     public void PhysicalDiskCapacity_CountsOverlappingExtentsOnceAndOmitsAmbiguousFilesystemMappings()
     {
         var partitions = new HashSet<DiskRange> { new(100, 500), new(200, 300) };
-        var extents = new VolumeDiskExtent[]
+        var extents = new VolumeDiskLayout[]
         {
-            new(0, new DiskRange(100, 500), 450),
-            new(0, new DiskRange(200, 300), 290)
+            VolumeWithExtent(0, new DiskRange(100, 500), 450),
+            VolumeWithExtent(0, new DiskRange(200, 300), 290)
         };
 
         Assert.Equal(new DiskCapacity(0, 900, 500, 500, 0, 0, 500), DiskCapacityInventory.Reconcile(0, 900, partitions, extents));
     }
 
     [Fact]
+    public void PhysicalDiskCapacity_MatchesMultipleExclusiveExtentsFromTheSameVolume()
+    {
+        var volume = new VolumeDiskLayout([
+            (0, new DiskRange(600, 100)),
+            (0, new DiskRange(100, 250)),
+            (0, new DiskRange(100, 250))
+        ], 300);
+        var capacity = DiskCapacityInventory.Reconcile(0, 1000, [new DiskRange(50, 800)],
+            [volume, VolumeWithExtent(0, new DiskRange(350, 50), 40)]);
+
+        Assert.Equal(new DiskCapacity(0, 1000, 800, 400, 400, 340, 400), capacity);
+        var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
+        Assert.Contains("340 bytes in matched filesystem capacities, 60 inside matched volume extents", summary.Summary);
+    }
+
+    [Theory]
+    [InlineData(0, 900, 200)]
+    [InlineData(0, 250, 100)]
+    [InlineData(1, 600, 100)]
+    public void PhysicalDiskCapacity_RejectsAttributionWhenAnyExtentIsOutOfBoundsOverlappingOrOnAnotherDisk(
+        int secondDisk, long secondOffset, long secondLength)
+    {
+        var volume = new VolumeDiskLayout([
+            (0, new DiskRange(100, 200)),
+            (secondDisk, new DiskRange(secondOffset, secondLength))
+        ], 180);
+        var otherVolume = VolumeWithExtent(0, new DiskRange(400, 100), 80);
+        var capacity = DiskCapacityInventory.Reconcile(0, 1000, null, [volume, otherVolume]);
+
+        Assert.Equal(100, capacity.MatchedExtentBytes);
+        Assert.Equal(80, capacity.FileSystemBytes);
+    }
+
+    [Fact]
+    public void PhysicalDiskCapacity_SingleOverlapMakesBothVolumesAmbiguousEvenWhenTheirSizesMatch()
+    {
+        var shared = new DiskRange(100, 200);
+        var volume = new VolumeDiskLayout([(0, shared), (0, new DiskRange(800, 100))], 180);
+        var otherVolume = VolumeWithExtent(0, shared, 180);
+        var capacity = DiskCapacityInventory.Reconcile(0, 1000, null, [volume, otherVolume]);
+
+        Assert.Equal(300, capacity.VolumeExtentBytes);
+        Assert.Equal(0, capacity.MatchedExtentBytes);
+        Assert.Equal(0, capacity.FileSystemBytes);
+    }
+
+    private static VolumeDiskLayout VolumeWithExtent(int disk, DiskRange range, long? fileSystemBytes) =>
+        new([(disk, range)], fileSystemBytes);
+
+    [Fact]
     public void DriveSummary_AccountsForVolumeExtentsWithoutSplittingTheirFilesystemCapacity()
     {
         var capacity = DiskCapacityInventory.Reconcile(0, 1000, [new DiskRange(50, 800)],
         [
-            new VolumeDiskExtent(0, new DiskRange(100, 100), 80),
-            new VolumeDiskExtent(0, new DiskRange(250, 200), null),
-            new VolumeDiskExtent(0, new DiskRange(500, 100), null),
-            new VolumeDiskExtent(1, new DiskRange(300, 400), null),
-            new VolumeDiskExtent(0, new DiskRange(900, 50), null),
-            new VolumeDiskExtent(0, new DiskRange(975, 100), null)
+            VolumeWithExtent(0, new DiskRange(100, 100), 80),
+            VolumeWithExtent(0, new DiskRange(250, 200), null),
+            VolumeWithExtent(0, new DiskRange(500, 100), null),
+            VolumeWithExtent(1, new DiskRange(300, 400), null),
+            VolumeWithExtent(0, new DiskRange(900, 50), null),
+            VolumeWithExtent(0, new DiskRange(975, 100), null)
         ]);
 
         Assert.Equal(new DiskCapacity(0, 1000, 800, 450, 100, 80, 400), capacity);
@@ -663,9 +712,9 @@ public sealed class VolumeSpaceTests
     {
         var capacity = DiskCapacityInventory.Reconcile(0, 1000, null,
         [
-            new VolumeDiskExtent(0, new DiskRange(50, 100), 80),
-            new VolumeDiskExtent(0, new DiskRange(200, 350), null),
-            new VolumeDiskExtent(0, new DiskRange(400, 200), null)
+            VolumeWithExtent(0, new DiskRange(50, 100), 80),
+            VolumeWithExtent(0, new DiskRange(200, 350), null),
+            VolumeWithExtent(0, new DiskRange(400, 200), null)
         ]);
 
         Assert.Equal(new DiskCapacity(0, 1000, null, 500, 100, 80, 0), capacity);
@@ -679,13 +728,13 @@ public sealed class VolumeSpaceTests
     [Fact]
     public void DriveSummary_ReportsKnownExtentsWhenDiskCapacityIsUnavailable()
     {
-        var extents = new VolumeDiskExtent[]
+        var extents = new VolumeDiskLayout[]
         {
-            new(7, new DiskRange(100, 200), null),
-            new(7, new DiskRange(250, 100), null),
-            new(7, new DiskRange(500, 50), 40),
-            new(7, new DiskRange(long.MaxValue - 1, 2), null),
-            new(8, new DiskRange(100, 900), null)
+            VolumeWithExtent(7, new DiskRange(100, 200), null),
+            VolumeWithExtent(7, new DiskRange(250, 100), null),
+            VolumeWithExtent(7, new DiskRange(500, 50), 40),
+            VolumeWithExtent(7, new DiskRange(long.MaxValue - 1, 2), null),
+            VolumeWithExtent(8, new DiskRange(100, 900), null)
         };
         var backingDisk = DiskCapacityInventory.Reconcile(7, null, null, extents);
         var deviceWithoutExtents = DiskCapacityInventory.Reconcile(9, null, null, extents);
@@ -703,9 +752,9 @@ public sealed class VolumeSpaceTests
     {
         var capacity = DiskCapacityInventory.Reconcile(0, 1000, [new DiskRange(100, 200), new DiskRange(500, 100)],
         [
-            new VolumeDiskExtent(0, new DiskRange(50, 125), null),
-            new VolumeDiskExtent(0, new DiskRange(250, 275), null),
-            new VolumeDiskExtent(0, new DiskRange(850, 50), null)
+            VolumeWithExtent(0, new DiskRange(50, 125), null),
+            VolumeWithExtent(0, new DiskRange(250, 275), null),
+            VolumeWithExtent(0, new DiskRange(850, 50), null)
         ]);
 
         Assert.Equal(new DiskCapacity(0, 1000, 300, 450, 0, 0, 150), capacity);
@@ -764,7 +813,7 @@ public sealed class VolumeSpaceTests
         Assert.Null(DiskCapacityInventory.ReadPartitionLayout(layout, 1535, 512));
 
         var capacity = DiskCapacityInventory.Reconcile(0, 4096, parsed.Ranges,
-            [new VolumeDiskExtent(0, new DiskRange(256, 512), null)], mbrSector: parsed.MbrSector);
+            [VolumeWithExtent(0, new DiskRange(256, 512), null)], mbrSector: parsed.MbrSector);
         Assert.Equal(256, capacity.UnassignedMbrSectorBytes);
         var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
         Assert.Contains("256 in the master boot record sector and 2,560 elsewhere outside partition and volume ranges.", summary.Summary);
@@ -787,9 +836,9 @@ public sealed class VolumeSpaceTests
 
         var capacity = DiskCapacityInventory.Reconcile(0, 1000, parsed.Ranges,
         [
-            new VolumeDiskExtent(0, new DiskRange(0, 75), null),
-            new VolumeDiskExtent(0, new DiskRange(280, 120), null),
-            new VolumeDiskExtent(0, new DiskRange(870, 100), null)
+            VolumeWithExtent(0, new DiskRange(0, 75), null),
+            VolumeWithExtent(0, new DiskRange(280, 120), null),
+            VolumeWithExtent(0, new DiskRange(870, 100), null)
         ], gptUsableRange: parsed.GptUsableRange);
 
         Assert.Equal(new DiskCapacity(0, 1000, 300, 295, 0, 0, 20, UnassignedGptUsableBytes: 395), capacity);

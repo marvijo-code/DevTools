@@ -15,6 +15,7 @@ public sealed class ParallelFileScanner
 {
     private const string EngineName = "Parallel enumeration";
     private const int ProgressBatchFiles = 4096;
+    private const int MaximumSharedDirectories = 256;
     private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(250);
     private static readonly EnumerationOptions DirectoryOptions = new()
     {
@@ -23,11 +24,19 @@ public sealed class ParallelFileScanner
         BufferSize = 16 * 1024
     };
 
-    public async Task<BiggestFilesResult> ScanAsync(
+    public Task<BiggestFilesResult> ScanAsync(
         BiggestFilesRequest request,
         IProgress<BiggestFilesProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) => ScanAsync(request, progress, cancellationToken, MaximumSharedDirectories);
+
+    internal async Task<BiggestFilesResult> ScanAsync(
+        BiggestFilesRequest request,
+        IProgress<BiggestFilesProgress>? progress,
+        CancellationToken cancellationToken,
+        int sharedDirectoryLimit)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(sharedDirectoryLimit, 1);
+
         var root = Path.GetFullPath(request.ScanRoot);
         if (!Directory.Exists(root))
         {
@@ -54,13 +63,13 @@ public sealed class ParallelFileScanner
         var workersScheduled = false;
         Task? extraWorkers = null;
 
-        void QueueChild(string path)
+        bool TryQueueChild(string path)
         {
             var outstanding = Interlocked.Increment(ref pending);
-            if (!writer.TryWrite(path))
+            if (outstanding > sharedDirectoryLimit || !writer.TryWrite(path))
             {
                 Interlocked.Decrement(ref pending);
-                return;
+                return false;
             }
 
             // One worker handles flat folders and single-child chains. Start planning while it keeps walking.
@@ -70,11 +79,64 @@ public sealed class ParallelFileScanner
                 Volatile.Write(ref workersScheduled, true);
                 extraWorkers = Task.Run(RunExtraWorkersAsync);
             }
+
+            return true;
+        }
+
+        // A worker that fills the queue walks the extra branch itself. Keep the suspended
+        // enumerators on an explicit stack so the parent resumes at its current entry.
+        void ScanBranch(string path, ScanTotals totals, Func<string, bool> tryQueueChild)
+        {
+            Stack<DirectoryScan>? parents = null;
+            DirectoryScan? scan = null;
+            try
+            {
+                while (true)
+                {
+                    scanToken.ThrowIfCancellationRequested();
+                    string? overflow = null;
+                    try
+                    {
+                        scan ??= new DirectoryScan(path, topN, tryQueueChild, totals, scanToken);
+                        overflow = scan.ReadUntilOverflow();
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+                    {
+                        // Skip directories that vanish or deny access mid-scan.
+                    }
+
+                    if (overflow is not null)
+                    {
+                        (parents ??= new Stack<DirectoryScan>()).Push(scan!);
+                        scan = null;
+                        path = overflow;
+                        continue;
+                    }
+
+                    scan?.Dispose();
+                    scan = null;
+                    if (parents is null || !parents.TryPop(out scan))
+                    {
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                scan?.Dispose();
+                if (parents is not null)
+                {
+                    foreach (var parent in parents)
+                    {
+                        parent.Dispose();
+                    }
+                }
+            }
         }
 
         async Task WorkerAsync(ScanTotals totals)
         {
-            Action<string> queueChild = QueueChild;
+            Func<string, bool> tryQueueChild = TryQueueChild;
             try
             {
                 while (await reader.WaitToReadAsync(scanToken).ConfigureAwait(false))
@@ -83,13 +145,7 @@ public sealed class ParallelFileScanner
                     {
                         try
                         {
-                            scanToken.ThrowIfCancellationRequested();
-                            using var scan = new DirectoryScan(directory, topN, queueChild, totals, scanToken);
-                            scan.AddLargestFiles();
-                        }
-                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
-                        {
-                            // Skip directories that vanish or deny access mid-scan.
+                            ScanBranch(directory, totals, tryQueueChild);
                         }
                         finally
                         {
@@ -235,28 +291,37 @@ public sealed class ParallelFileScanner
     private sealed class DirectoryScan(
         string directory,
         TopNAccumulator<FileSizeHit> top,
-        Action<string> queueChild,
+        Func<string, bool> tryQueueChild,
         ScanTotals totals,
-        CancellationToken cancellationToken) : FileSystemEnumerator<FileSizeHit>(directory, DirectoryOptions)
+        CancellationToken cancellationToken) : FileSystemEnumerator<ScanEntry>(directory, DirectoryOptions)
     {
         private int _files;
         private long _bytes;
+        private string? _overflowDirectory;
 
-        internal void AddLargestFiles()
+        internal string? ReadUntilOverflow()
         {
             try
             {
                 while (MoveNext())
                 {
-                    var hit = Current;
-                    top.TryAdd(hit.SizeBytes, hit);
+                    if (Current.File is { } hit)
+                    {
+                        top.TryAdd(hit.SizeBytes, hit);
+                    }
+                    else
+                    {
+                        return Current.Directory;
+                    }
                 }
+
+                return null;
             }
             finally
             {
                 if (_files > 0)
                 {
-                    totals.Add(_files, _bytes);
+                    PublishTotals();
                 }
             }
         }
@@ -267,28 +332,46 @@ public sealed class ParallelFileScanner
 
             if (entry.IsDirectory)
             {
-                if ((entry.Attributes & System.IO.FileAttributes.ReparsePoint) == 0)
+                if ((entry.Attributes & System.IO.FileAttributes.ReparsePoint) != 0)
                 {
-                    queueChild(entry.ToFullPath());
+                    return false;
                 }
 
-                return false;
+                var path = entry.ToFullPath();
+                if (tryQueueChild(path))
+                {
+                    return false;
+                }
+
+                _overflowDirectory = path;
+                return true;
             }
 
             var size = entry.Length;
             _bytes += size;
             if (++_files == ProgressBatchFiles)
             {
-                totals.Add(_files, _bytes);
-                _files = 0;
-                _bytes = 0;
+                PublishTotals();
             }
 
             return size > top.Threshold;
         }
 
-        protected override FileSizeHit TransformEntry(ref FileSystemEntry entry)
+        private void PublishTotals()
         {
+            totals.Add(_files, _bytes);
+            _files = 0;
+            _bytes = 0;
+        }
+
+        protected override ScanEntry TransformEntry(ref FileSystemEntry entry)
+        {
+            if (_overflowDirectory is { } path)
+            {
+                _overflowDirectory = null;
+                return new ScanEntry(path, null);
+            }
+
             DateTimeOffset? modified = null;
             try
             {
@@ -301,9 +384,11 @@ public sealed class ParallelFileScanner
 
             // Directory enumeration exposes logical size.
             var size = entry.Length;
-            return new FileSizeHit(entry.ToFullPath(), size, size, modified);
+            return new ScanEntry(null, new FileSizeHit(entry.ToFullPath(), size, size, modified));
         }
     }
+
+    private readonly record struct ScanEntry(string? Directory, FileSizeHit? File);
 
     private static int GetWorkerCount(string root)
     {

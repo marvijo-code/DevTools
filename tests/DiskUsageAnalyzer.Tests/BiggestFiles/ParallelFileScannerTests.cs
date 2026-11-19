@@ -65,6 +65,29 @@ public sealed class ParallelFileScannerTests : IDisposable
     }
 
     [Fact]
+    public async Task FullQueue_VisitsNestedOverflowAndResumesItsParents()
+    {
+        var expectedBytes = 0L;
+        for (var index = 0; index < 18; index++)
+        {
+            var size = 100L + index;
+            WriteFile($"folder-{index:D2}/outer.bin", size);
+            WriteFile($"folder-{index:D2}/nested/inner.bin", size * 2);
+            expectedBytes += size * 3;
+        }
+
+        var largest = Path.Combine(_root, "folder-17", "nested", "inner.bin");
+        var result = await new ParallelFileScanner().ScanAsync(new BiggestFilesRequest(_root, TopCount: 3), null,
+                CancellationToken.None, sharedDirectoryLimit: 2)
+            .WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(36, result.FilesSeen);
+        Assert.Equal(expectedBytes, result.BytesSeen);
+        Assert.Equal([234L, 232L, 230L], result.Top.Select(hit => hit.SizeBytes));
+        Assert.Equal(largest, result.Top[0].FullPath);
+    }
+
+    [Fact]
     public async Task ThrowsForMissingRoot()
     {
         var scanner = new ParallelFileScanner();

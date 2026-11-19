@@ -10,6 +10,8 @@ internal readonly record struct FolderFile(string Name, string Path, long Bytes)
 
 internal sealed record FolderPreview(IReadOnlyList<string> FolderNames, bool HasMore);
 
+internal readonly record struct FolderPreviewSize(long Bytes, bool IsComplete);
+
 internal sealed record FolderFileSnapshot(IReadOnlyList<FolderFile> Files, long TotalBytes, long FileCount)
 {
     internal bool Matches(long bytes, long fileCount) => TotalBytes == bytes && FileCount == fileCount;
@@ -199,6 +201,73 @@ internal static class FolderFileListing
 
         names.Sort(StringComparer.OrdinalIgnoreCase);
         return new FolderPreview(names, hasMore);
+    }
+
+    internal static FolderPreviewSize? ReadPreviewSize(string folder, int directoryLimit, int entryLimit,
+        CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(directoryLimit, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(entryLimit, 1);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
+
+        var pending = new Queue<string>();
+        pending.Enqueue(folder);
+        var directories = 1;
+        var entriesSeen = 0;
+        long bytes = 0;
+        var incomplete = false;
+        while (pending.TryDequeue(out var path))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if ((File.GetAttributes(path) & System.IO.FileAttributes.ReparsePoint) != 0)
+                {
+                    incomplete = true;
+                    continue;
+                }
+
+                var entries = new FileSystemEnumerable<(string? Directory, long Bytes)>(path,
+                    static (ref FileSystemEntry entry) => entry.IsDirectory
+                        ? ((entry.Attributes & System.IO.FileAttributes.ReparsePoint) == 0 ? entry.FileName.ToString() : null, 0)
+                        : (null, Math.Max(0, entry.Length)),
+                    ListingOptions);
+
+                foreach (var entry in entries)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (entriesSeen++ == entryLimit)
+                    {
+                        return bytes > 0 ? new FolderPreviewSize(bytes, IsComplete: false) : null;
+                    }
+
+                    if (entry.Directory is { } child)
+                    {
+                        if (directories < directoryLimit)
+                        {
+                            directories++;
+                            pending.Enqueue(Path.Join(path, child));
+                        }
+                        else
+                        {
+                            incomplete = true;
+                        }
+                    }
+                    else
+                    {
+                        bytes = checked(bytes + entry.Bytes);
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or
+                NotSupportedException or System.Security.SecurityException or OverflowException)
+            {
+                incomplete = true;
+            }
+        }
+
+        return incomplete && bytes == 0 ? null : new FolderPreviewSize(bytes, IsComplete: !incomplete);
     }
 
     public static FolderFileSnapshot? ReadLargest(string folder, int limit, CancellationToken cancellationToken = default)

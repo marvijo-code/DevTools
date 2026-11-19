@@ -228,6 +228,37 @@ public sealed class FolderFileListingTests
     }
 
     [Fact]
+    public void ReadPreviewSize_ReturnsExactSmallTotalsAndBoundedLowerBounds()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-folder-size-preview-");
+        var nested = fixture.CreateSubdirectory("nested");
+        var direct = Path.Combine(fixture.FullName, "direct.bin");
+        var child = Path.Combine(nested.FullName, "child.bin");
+        try
+        {
+            File.WriteAllBytes(direct, new byte[7]);
+            File.WriteAllBytes(child, new byte[13]);
+            Assert.Equal(new FolderPreviewSize(20, IsComplete: true),
+                FolderFileListing.ReadPreviewSize(fixture.FullName, 2, 3, CancellationToken.None));
+            Assert.Equal(new FolderPreviewSize(7, IsComplete: false),
+                FolderFileListing.ReadPreviewSize(fixture.FullName, 1, 3, CancellationToken.None));
+            Assert.Equal(new FolderPreviewSize(7, IsComplete: false),
+                FolderFileListing.ReadPreviewSize(fixture.FullName, 2, 2, CancellationToken.None));
+            Assert.Null(FolderFileListing.ReadPreviewSize(Path.Join(fixture.FullName, "missing"), 2, 3, CancellationToken.None));
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+            Assert.Throws<OperationCanceledException>(() => FolderFileListing.ReadPreviewSize(fixture.FullName, 2, 3, cts.Token));
+        }
+        finally
+        {
+            File.Delete(child);
+            nested.Delete();
+            File.Delete(direct);
+            fixture.Delete();
+        }
+    }
+
+    [Fact]
     public void ReadLargest_HonoursCancellationBeforeAccessingTheFolder()
     {
         using var cts = new CancellationTokenSource();

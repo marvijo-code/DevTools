@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using DevTools.Infrastructure;
 using DevTools.Services;
 using DevTools.Services.FolderSizes;
@@ -22,12 +23,13 @@ public sealed class FolderBrowserRow
         bool canOpen,
         bool canExpand,
         bool isExpanded,
-        bool isFile)
+        bool isFile,
+        bool isLowerBound = false)
     {
         Name = name;
         Path = path;
         SizeBytes = sizeBytes;
-        SizeText = sizeBytes is long bytes ? ByteFormatter.Format(bytes) : "—";
+        SizeText = sizeBytes is long bytes ? (isLowerBound ? "≥ " : string.Empty) + ByteFormatter.Format(bytes) : "—";
         DetailText = detail;
         SharePercent = sharePercent;
         Depth = depth;
@@ -85,6 +87,9 @@ public sealed partial class MainViewModel
 {
     private const int FolderBrowserMaxRows = 200;
     private const int FolderBrowserMaxFiles = 100;
+    private const int FolderBrowserPreviewSizeLimit = 48;
+    private const int FolderBrowserPreviewDirectoryLimit = 8;
+    private const int FolderBrowserPreviewEntryLimit = 2048;
     private const int FolderBrowserRecentListingLimit = 32;
     private const int FolderBrowserWideLayoutLimit = 32;
 
@@ -101,6 +106,7 @@ public sealed partial class MainViewModel
     private bool _showFolderBrowserVolumeSummary;
     private bool _canFolderBrowserGoUp;
     private bool _folderBrowserUseAllocation;
+    private bool _folderBrowserPreviewUsesAllocation;
     private CancellationTokenSource? _folderBrowserFileLoadCts;
     private CancellationTokenSource? _folderBrowserClickCts;
 
@@ -369,8 +375,9 @@ public sealed partial class MainViewModel
 
     private void ShowFolderBrowserPreview(string path, string status, bool showVolumeSummary)
     {
+        var useAllocation = FolderBrowserUseAllocation;
         var keepPreview = _folderBrowserFileTree is null && _folderBrowserFileLoadCts is not null &&
-            string.Equals(path, _folderBrowserPath, StringComparison.Ordinal);
+            _folderBrowserPreviewUsesAllocation == useAllocation && string.Equals(path, _folderBrowserPath, StringComparison.Ordinal);
         if (!keepPreview)
         {
             _folderBrowserExpanded.Clear();
@@ -391,13 +398,15 @@ public sealed partial class MainViewModel
 
         if (!keepPreview && path.Length > 0)
         {
+            _folderBrowserPreviewUsesAllocation = useAllocation;
             _folderBrowserFileLoadCts = new CancellationTokenSource();
-            _ = LoadFolderBrowserPreviewAsync(path, _folderBrowserFileLoadCts.Token);
+            _ = LoadFolderBrowserPreviewAsync(path, useAllocation, _folderBrowserFileLoadCts.Token);
         }
     }
 
-    private async Task LoadFolderBrowserPreviewAsync(string path, CancellationToken cancellationToken)
+    private async Task LoadFolderBrowserPreviewAsync(string path, bool useAllocation, CancellationToken cancellationToken)
     {
+        var started = Stopwatch.GetTimestamp();
         try
         {
             var preview = await Task.Run(
@@ -423,6 +432,10 @@ public sealed partial class MainViewModel
             }
 
             UpdateFolderBrowserRows(rows);
+            if (!useAllocation && preview.FolderNames.Count > 0)
+            {
+                await LoadFolderPreviewSizesAsync(preview.FolderNames.Count, rows, started, cancellationToken);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -431,6 +444,44 @@ public sealed partial class MainViewModel
         {
             AppLog.Error($"Loading the folder preview for '{path}' failed.", ex);
         }
+    }
+
+    private Task LoadFolderPreviewSizesAsync(int folderCount, IReadOnlyList<FolderBrowserRow> rows, long started,
+        CancellationToken cancellationToken)
+    {
+        var firstNonzeroSize = true;
+        IProgress<(int Index, FolderPreviewSize Size)> progress = new Progress<(int Index, FolderPreviewSize Size)>(value =>
+        {
+            if (cancellationToken.IsCancellationRequested || _folderBrowserFileTree is not null || FolderBrowserUseAllocation ||
+                value.Index >= _folderBrowserRows.Count || !ReferenceEquals(_folderBrowserRows[value.Index], rows[value.Index]))
+            {
+                return;
+            }
+
+            var row = rows[value.Index];
+            _folderBrowserRows[value.Index] = new FolderBrowserRow(row.Name, row.Path, value.Size.Bytes,
+                value.Size.IsComplete ? "Logical size from quick scan" : "Logical bytes counted so far",
+                0, row.Depth, row.CanOpen, row.CanExpand, row.IsExpanded, row.IsFile, isLowerBound: !value.Size.IsComplete);
+            if (firstNonzeroSize && value.Size.Bytes > 0)
+            {
+                firstNonzeroSize = false;
+                AppLog.Info($"Folder Browser first nonzero preview size shown after {Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms.");
+            }
+        });
+
+        return Task.Run(() =>
+        {
+            var count = Math.Min(folderCount, FolderBrowserPreviewSizeLimit);
+            for (var index = 0; index < count; index++)
+            {
+                var size = FolderFileListing.ReadPreviewSize(rows[index].Path, FolderBrowserPreviewDirectoryLimit,
+                    FolderBrowserPreviewEntryLimit, cancellationToken);
+                if (size is { } measured)
+                {
+                    progress.Report((index, measured));
+                }
+            }
+        }, cancellationToken);
     }
 
     private void CancelFolderBrowserFileLoads()

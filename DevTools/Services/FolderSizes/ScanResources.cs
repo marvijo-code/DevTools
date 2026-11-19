@@ -62,6 +62,20 @@ internal readonly record struct ScanResources(int LogicalProcessors, long? Memor
         return Math.Min(Math.Min(cpuLimit, memoryLimit), deviceLimit);
     }
 
+    internal int LargestFileWorkerCount(bool? seekPenalty)
+    {
+        // Directory reads can overlap on solid-state storage, even when some workers are waiting for I/O.
+        var cpuLimit = (int)Math.Clamp(2L * LogicalProcessors, 1, 32);
+        var memoryLimit = MemoryHeadroom is long available ? (int)Math.Clamp(available / (128L * MiB), 1, 32) : 4;
+        var deviceLimit = seekPenalty switch
+        {
+            true => 2,
+            false => 32,
+            null => 4
+        };
+        return Math.Min(Math.Min(cpuLimit, memoryLimit), deviceLimit);
+    }
+
     public (int ChunkBytes, int Parsers, int QueueCapacity, int CarryBytes) MftPlan(
         int records, long initializedBytes, int clusterBytes, int recordBytes, bool includeFileNames, bool deferFileNames = false)
     {

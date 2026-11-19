@@ -58,19 +58,29 @@ internal static class WindowsVolumePaths
         // The walker opens the final entry itself. Resolving its parent gets the volume that owns
         // that entry, even if the final entry is a junction or mount point on that volume.
         var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(fullPath));
-        if (parent is null)
+        return parent is null ? null : ResolveVolumeRoot(parent);
+    }
+
+    // Directory enumeration opens the target of its root path, including mounted folders.
+    internal static string? GetDirectoryVolumeRoot(string fullPath)
+    {
+        var root = Path.GetPathRoot(fullPath);
+        return !OperatingSystem.IsWindows() ||
+            (fullPath.Equals(root, StringComparison.OrdinalIgnoreCase) && GetDevicePath(root) is not null)
+            ? root
+            : ResolveVolumeRoot(fullPath);
+    }
+
+    private static string? ResolveVolumeRoot(string path)
+    {
+        if (!Path.EndsInDirectorySeparator(path))
         {
-            return null;
+            path += Path.DirectorySeparatorChar;
         }
 
-        if (!Path.EndsInDirectorySeparator(parent))
-        {
-            parent += Path.DirectorySeparatorChar;
-        }
-
-        var capacity = Math.Clamp(parent.Length + 2, 260, MaximumWindowsPathChars);
+        var capacity = Math.Clamp(path.Length + 2, 260, MaximumWindowsPathChars);
         var mount = new StringBuilder(capacity);
-        if (!GetVolumePathName(parent, mount, (uint)mount.Capacity))
+        if (!GetVolumePathName(path, mount, (uint)mount.Capacity))
         {
             return null;
         }

@@ -136,6 +136,13 @@ public sealed class VolumeSpaceTests
             Assert.Equal(volume, WindowsVolumePaths.GetVolumeName(byGuid), ignoreCase: true);
             Assert.Equal(root, WindowsVolumePaths.GetContainingVolumeRoot(root, root));
             Assert.Equal(volume, WindowsVolumePaths.GetContainingVolumeRoot(volume, volume));
+
+            var directoryVolume = Assert.IsType<string>(WindowsVolumePaths.GetDirectoryVolumeRoot(fixture.FullName));
+            var guidDirectory = Path.GetDirectoryName(guidLeaf)!;
+            var mountedDirectoryVolume = Assert.IsType<string>(WindowsVolumePaths.GetDirectoryVolumeRoot(guidDirectory));
+            Assert.Equal(volume, WindowsVolumePaths.GetVolumeName(directoryVolume), ignoreCase: true);
+            Assert.Equal(volume, WindowsVolumePaths.GetVolumeName(mountedDirectoryVolume), ignoreCase: true);
+            Assert.Equal(volume, WindowsVolumePaths.GetDirectoryVolumeRoot(volume), ignoreCase: true);
         }
         finally
         {

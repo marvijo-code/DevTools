@@ -34,6 +34,18 @@ public sealed class ScanResourcesTests
     }
 
     [Theory]
+    [InlineData(4, 4096L, false, 8)]
+    [InlineData(32, 8192L, false, 32)]
+    [InlineData(32, 8192L, true, 2)]
+    [InlineData(32, 8192L, null, 4)]
+    [InlineData(32, 160L, false, 1)]
+    [InlineData(1, null, false, 2)]
+    public void LargestFileWorkerCount_UsesCpuAndMemoryWithADiskLimit(int processors, long? memoryMiB, bool? seek, int workers)
+    {
+        Assert.Equal(workers, new ScanResources(processors, memoryMiB * MiB).LargestFileWorkerCount(seek));
+    }
+
+    [Theory]
     [InlineData(4, 2048L, 2, 2)]
     [InlineData(2, 4096L, 4, 1)]
     [InlineData(8, 1024L, 4, 1)]

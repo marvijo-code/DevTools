@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO.Enumeration;
 using System.Threading.Channels;
+using DevTools.Services.FolderSizes;
 
 namespace DevTools.Services.BiggestFiles;
 
@@ -48,20 +49,32 @@ public sealed class ParallelFileScanner
         writer.TryWrite(root);
 
         var stopwatch = Stopwatch.StartNew();
+        var firstTotals = new ScanTotals();
+        ScanTotals[] extraTotals = [];
+        var workersScheduled = false;
+        Task? extraWorkers = null;
 
         void QueueChild(string path)
         {
-            Interlocked.Increment(ref pending);
+            var outstanding = Interlocked.Increment(ref pending);
             if (!writer.TryWrite(path))
             {
                 Interlocked.Decrement(ref pending);
+                return;
+            }
+
+            // One worker handles flat folders and single-child chains. Start planning while it keeps walking.
+            if (outstanding > 2 && !Volatile.Read(ref workersScheduled))
+            {
+                // Only the first worker can reach this before the additional workers start.
+                Volatile.Write(ref workersScheduled, true);
+                extraWorkers = Task.Run(RunExtraWorkersAsync);
             }
         }
 
-        Action<string> queueChild = QueueChild;
-
         async Task WorkerAsync(ScanTotals totals)
         {
+            Action<string> queueChild = QueueChild;
             try
             {
                 while (await reader.WaitToReadAsync(scanToken).ConfigureAwait(false))
@@ -96,16 +109,39 @@ public sealed class ParallelFileScanner
             }
         }
 
-        var workerCount = Math.Clamp(Environment.ProcessorCount * 2, 4, 32);
-        var workers = new Task[workerCount];
-        var workerTotals = new ScanTotals[workerCount];
-        for (var i = 0; i < workerCount; i++)
+        async Task RunExtraWorkersAsync()
         {
-            var totals = workerTotals[i] = new ScanTotals();
-            workers[i] = Task.Run(() => WorkerAsync(totals), scanToken);
+            if (scanToken.IsCancellationRequested || Volatile.Read(ref pending) == 0)
+            {
+                return;
+            }
+
+            var extraCount = GetWorkerCount(root) - 1;
+            if (extraCount == 0 || scanToken.IsCancellationRequested || Volatile.Read(ref pending) == 0)
+            {
+                return;
+            }
+
+            var workers = new Task[extraCount];
+            var counters = new ScanTotals[extraCount];
+            for (var i = 0; i < workers.Length; i++)
+            {
+                var totals = counters[i] = new ScanTotals();
+                workers[i] = Task.Run(() => WorkerAsync(totals), scanToken);
+            }
+
+            Volatile.Write(ref extraTotals, counters);
+            await Task.WhenAll(workers).ConfigureAwait(false);
         }
 
-        var allWorkers = Task.WhenAll(workers);
+        async Task WaitForWorkersAsync(Task first)
+        {
+            // The first worker may schedule the others. Wait for its decision, then observe all worker errors.
+            await first.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            await (extraWorkers is { } additional ? Task.WhenAll(first, additional) : first).ConfigureAwait(false);
+        }
+
+        var allWorkers = WaitForWorkersAsync(Task.Run(() => WorkerAsync(firstTotals), scanToken));
 
         try
         {
@@ -155,9 +191,9 @@ public sealed class ParallelFileScanner
 
         (long Files, long Bytes) ReadTotals()
         {
-            long files = 0;
-            long bytes = 0;
-            foreach (var totals in workerTotals)
+            var files = firstTotals.Files;
+            var bytes = firstTotals.Bytes;
+            foreach (var totals in Volatile.Read(ref extraTotals))
             {
                 files += totals.Files;
                 bytes += totals.Bytes;
@@ -267,6 +303,15 @@ public sealed class ParallelFileScanner
             var size = entry.Length;
             return new FileSizeHit(entry.ToFullPath(), size, size, modified);
         }
+    }
+
+    private static int GetWorkerCount(string root)
+    {
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
+        var resources = ScanResources.Capture();
+        var volume = WindowsVolumePaths.GetDirectoryVolumeRoot(root);
+        var seekPenalty = ScanResources.ReadSeekPenalty(volume);
+        return resources.LargestFileWorkerCount(seekPenalty);
     }
 
     private static double ComputeRate(long files, TimeSpan elapsed)

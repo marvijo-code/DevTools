@@ -7,6 +7,7 @@ public sealed class DiskUsageSection : ObservableObject
 {
     private string _summary;
     private bool _isExpanded;
+    private WeakReference<DiskUsageSection>? _lastScanSource;
 
     public DiskUsageSection(string title, string summary, IReadOnlyList<DiskUsageEntry> entries)
     {
@@ -32,6 +33,31 @@ public sealed class DiskUsageSection : ObservableObject
     }
 
     public void UpdateFrom(DiskUsageSection source)
+    {
+        _lastScanSource = null;
+        CopyFrom(source);
+    }
+
+    internal void UpdateFromScan(DiskUsageSection source)
+    {
+        // The analyzer supplies a new section when its scan results change.
+        if (_lastScanSource?.TryGetTarget(out var previous) == true && ReferenceEquals(previous, source))
+        {
+            return;
+        }
+
+        CopyFrom(source);
+        if (_lastScanSource is null)
+        {
+            _lastScanSource = new WeakReference<DiskUsageSection>(source);
+        }
+        else
+        {
+            _lastScanSource.SetTarget(source);
+        }
+    }
+
+    private void CopyFrom(DiskUsageSection source)
     {
         if (!string.Equals(Title, source.Title, StringComparison.OrdinalIgnoreCase))
         {

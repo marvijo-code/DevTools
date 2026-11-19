@@ -582,17 +582,17 @@ public sealed partial class MainViewModel : ObservableObject
         try
         {
             SetDiskUsageRefreshing(true);
-            _hasDiskUsageSnapshot = false;
+            SetProperty(ref _hasDiskUsageSnapshot, false, nameof(HasDiskUsageSnapshot));
             if (_folderBrowserFileTree is null)
             {
                 CancelFolderBrowserFileLoads();
             }
 
             SetDiskUsageSections([]);
-            _diskUsageAnalysis = "Scanning disk usage and streaming results as sections complete.";
+            SetProperty(ref _diskUsageAnalysis, "Scanning disk usage and streaming results as sections complete.",
+                nameof(DiskUsageAnalysis));
             SetDiskUsageStatus("Starting disk usage refresh...");
             SetDiskUsageActivityText(DiskUsageAnimationFrames[0]);
-            RaiseDiskUsageProperties();
             StatusMessage = "Refreshing disk usage snapshot...";
 
             var progress = new Progress<DiskUsageProgress>(update =>
@@ -602,12 +602,12 @@ public sealed partial class MainViewModel : ObservableObject
                     return;
                 }
 
-                _diskUsageHeadline = update.Headline;
-                _diskUsageAnalysis = update.Analysis;
+                SetProperty(ref _diskUsageHeadline, update.Headline, nameof(DiskUsageHeadline));
+                SetProperty(ref _diskUsageAnalysis, update.Analysis, nameof(DiskUsageAnalysis));
                 SetDiskUsageSections(update.Sections);
-                _hasDiskUsageSnapshot = update.Sections.Count > 0 || update.IsCompleted;
+                SetProperty(ref _hasDiskUsageSnapshot, update.Sections.Count > 0 || update.IsCompleted,
+                    nameof(HasDiskUsageSnapshot));
                 SetDiskUsageStatus(update.StatusText);
-                RaiseDiskUsageProperties();
                 if (update.BrowseRoots is { } roots)
                 {
                     RefreshFolderBrowserDrives(roots, update.CompletedRoot);
@@ -617,12 +617,11 @@ public sealed partial class MainViewModel : ObservableObject
             var snapshot = await _diskUsageAnalyzer.CaptureAsync(progress, cancellationToken);
             acceptProgress = false;
             SetDiskUsageSections(snapshot.Sections);
-            _diskUsageHeadline = snapshot.Headline;
-            _diskUsageAnalysis = snapshot.Analysis;
-            _hasDiskUsageSnapshot = true;
+            SetProperty(ref _diskUsageHeadline, snapshot.Headline, nameof(DiskUsageHeadline));
+            SetProperty(ref _diskUsageAnalysis, snapshot.Analysis, nameof(DiskUsageAnalysis));
+            SetProperty(ref _hasDiskUsageSnapshot, true, nameof(HasDiskUsageSnapshot));
             SetDiskUsageStatus($"Last disk refresh: {snapshot.CapturedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}");
             SetDiskUsageActivityText("Snapshot ready");
-            RaiseDiskUsageProperties();
             RefreshFolderBrowserDrives(snapshot.BrowseRoots, scanCompleted: true);
             refreshCleanup = true;
             StatusMessage = "Disk usage snapshot refreshed.";
@@ -1668,15 +1667,6 @@ public sealed partial class MainViewModel : ObservableObject
         RaisePropertyChanged(nameof(DiskUsageActivityText));
     }
 
-    private void RaiseDiskUsageProperties()
-    {
-        RaisePropertyChanged(nameof(DiskUsageHeadline));
-        RaisePropertyChanged(nameof(DiskUsageAnalysis));
-        RaisePropertyChanged(nameof(DiskUsageActivityText));
-        RaisePropertyChanged(nameof(DiskUsageStatusText));
-        RaisePropertyChanged(nameof(HasDiskUsageSnapshot));
-    }
-
     private void SetDiskUsageSections(IReadOnlyList<DiskUsageSection> sections)
     {
         var previousVolumeNote = GetSelectedVolumeNote();
@@ -1703,7 +1693,7 @@ public sealed partial class MainViewModel : ObservableObject
             }
 
             var existingSection = _diskUsageSections[existingIndex];
-            existingSection.UpdateFrom(incomingSection);
+            existingSection.UpdateFromScan(incomingSection);
             if (existingIndex != i)
             {
                 _diskUsageSections.Move(existingIndex, i);

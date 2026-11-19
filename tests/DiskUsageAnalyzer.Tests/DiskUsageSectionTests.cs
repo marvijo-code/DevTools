@@ -86,6 +86,39 @@ public sealed class DiskUsageSectionTests
     }
 
     [Fact]
+    public void UpdateFromScan_ReusesUnchangedSectionsAndAppliesNewResults()
+    {
+        const string path = @"C:\Data";
+        var displayEntry = DiskUsageEntry.CreateCompleted(path, true, 100, "100 B");
+        var sourceEntry = DiskUsageEntry.CreateCompleted(path, true, 100, "100 B");
+        sourceEntry.SetExpandable(true);
+        var display = new DiskUsageSection("Largest Folders", "Original", [displayEntry]);
+        var source = new DiskUsageSection(display.Title, "Scanned", [sourceEntry]);
+        display.UpdateFromScan(source);
+
+        var expandedChild = DiskUsageEntry.CreateCompleted(path + @"\Project", true, 40, "40 B");
+        displayEntry.SetChildren([expandedChild]);
+        displayEntry.IsExpanded = true;
+        var notifications = new List<string?>();
+        displayEntry.PropertyChanged += (_, args) => notifications.Add(args.PropertyName);
+
+        display.UpdateFromScan(source);
+
+        Assert.Empty(notifications);
+        Assert.True(displayEntry.IsExpanded);
+        Assert.True(displayEntry.HasLoadedChildren);
+        Assert.Same(expandedChild, Assert.Single(displayEntry.Children));
+
+        var replacement = DiskUsageEntry.CreateCompleted(path, true, 250, "250 B");
+        display.UpdateFromScan(new DiskUsageSection(display.Title, "Rescanned", [replacement]));
+
+        Assert.Equal("Rescanned", display.Summary);
+        Assert.Same(displayEntry, Assert.Single(display.Entries));
+        Assert.Equal(250, displayEntry.SizeBytes);
+        Assert.Contains(nameof(DiskUsageEntry.SizeBytes), notifications);
+    }
+
+    [Fact]
     public void SetChildren_OrdersFilesAndFoldersBySizeDescending()
     {
         var entry = DiskUsageEntry.CreateCompleted("R:\\Repos", true, 100, "100 B");

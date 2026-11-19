@@ -40,6 +40,9 @@ public sealed class ParallelFileScannerTests : IDisposable
         WriteFile("sub/medium.bin", 5_000);
         WriteFile("sub/deep/large.bin", 9_000_000);
         WriteFile("sub/deep/huge.bin", 40_000_000);
+        var largestPath = Path.Combine(_root, "sub", "deep", "huge.bin");
+        var modified = new DateTime(2026, 2, 8, 12, 34, 56, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(largestPath, modified);
         WriteFile("other/mid.bin", 1_000_000);
 
         var scanner = new ParallelFileScanner();
@@ -56,7 +59,9 @@ public sealed class ParallelFileScannerTests : IDisposable
         Assert.Equal(
             new[] { 40_000_000L, 9_000_000L, 1_000_000L },
             result.Top.Select(hit => hit.SizeBytes).ToArray());
-        Assert.EndsWith("huge.bin", result.Top[0].FullPath);
+        Assert.Equal(largestPath, result.Top[0].FullPath);
+        Assert.Equal(40_000_000, result.Top[0].AllocatedBytes);
+        Assert.Equal(new DateTimeOffset(modified), result.Top[0].ModifiedUtc);
     }
 
     [Fact]

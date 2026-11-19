@@ -7,7 +7,7 @@ namespace DevTools.Services.BiggestFiles;
 /// <summary>
 /// Fallback scan engine that works on any filesystem without elevation. It walks the tree with a
 /// pool of workers pulling directories off a channel; each worker enumerates a single directory
-/// level with <see cref="FileSystemEnumerable{TResult}"/>, whose <c>FileSystemEntry.Length</c>
+/// level with <see cref="FileSystemEnumerator{TResult}"/>, whose <c>FileSystemEntry.Length</c>
 /// comes straight from the directory-read buffer (no per-file syscall).
 /// </summary>
 public sealed class ParallelFileScanner
@@ -44,97 +44,23 @@ public sealed class ParallelFileScanner
         var writer = channel.Writer;
         var reader = channel.Reader;
 
-        long filesSeen = 0;
-        long bytesSeen = 0;
         var pending = 1;
         writer.TryWrite(root);
 
         var stopwatch = Stopwatch.StartNew();
 
-        void ScanDirectory(string directory)
+        void QueueChild(string path)
         {
-            scanToken.ThrowIfCancellationRequested();
-            var batchFiles = 0;
-            long batchBytes = 0;
-
-            void PublishBatch()
+            Interlocked.Increment(ref pending);
+            if (!writer.TryWrite(path))
             {
-                if (batchFiles == 0)
-                {
-                    return;
-                }
-
-                Interlocked.Add(ref filesSeen, batchFiles);
-                Interlocked.Add(ref bytesSeen, batchBytes);
-                batchFiles = 0;
-                batchBytes = 0;
-            }
-
-            var enumerable = new FileSystemEnumerable<int>(
-                directory,
-                static (ref FileSystemEntry _) => 0,
-                DirectoryOptions)
-            {
-                ShouldIncludePredicate = (ref FileSystemEntry entry) =>
-                {
-                    scanToken.ThrowIfCancellationRequested();
-
-                    if (entry.IsDirectory)
-                    {
-                        if ((entry.Attributes & System.IO.FileAttributes.ReparsePoint) == 0)
-                        {
-                            var child = entry.ToFullPath();
-                            Interlocked.Increment(ref pending);
-                            if (!writer.TryWrite(child))
-                            {
-                                Interlocked.Decrement(ref pending);
-                            }
-                        }
-
-                        return false;
-                    }
-
-                    var length = entry.Length;
-                    batchBytes += length;
-                    if (++batchFiles == ProgressBatchFiles)
-                    {
-                        PublishBatch();
-                    }
-
-                    if (length > topN.Threshold)
-                    {
-                        DateTimeOffset? modified = null;
-                        try
-                        {
-                            modified = entry.LastWriteTimeUtc;
-                        }
-                        catch
-                        {
-                            // Timestamps are best-effort.
-                        }
-
-                        // Directory enumeration does not expose on-disk allocation; report logical size for both.
-                        topN.TryAdd(length, new FileSizeHit(entry.ToFullPath(), length, length, modified));
-                    }
-
-                    return false;
-                }
-            };
-
-            try
-            {
-                foreach (var _ in enumerable)
-                {
-                    // The predicate reads file metadata and only materializes candidates for the ranking.
-                }
-            }
-            finally
-            {
-                PublishBatch();
+                Interlocked.Decrement(ref pending);
             }
         }
 
-        async Task WorkerAsync()
+        Action<string> queueChild = QueueChild;
+
+        async Task WorkerAsync(ScanTotals totals)
         {
             try
             {
@@ -144,7 +70,9 @@ public sealed class ParallelFileScanner
                     {
                         try
                         {
-                            ScanDirectory(directory);
+                            scanToken.ThrowIfCancellationRequested();
+                            using var scan = new DirectoryScan(directory, topN, queueChild, totals, scanToken);
+                            scan.AddLargestFiles();
                         }
                         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
                         {
@@ -170,9 +98,11 @@ public sealed class ParallelFileScanner
 
         var workerCount = Math.Clamp(Environment.ProcessorCount * 2, 4, 32);
         var workers = new Task[workerCount];
+        var workerTotals = new ScanTotals[workerCount];
         for (var i = 0; i < workerCount; i++)
         {
-            workers[i] = Task.Run(WorkerAsync, scanToken);
+            var totals = workerTotals[i] = new ScanTotals();
+            workers[i] = Task.Run(() => WorkerAsync(totals), scanToken);
         }
 
         var allWorkers = Task.WhenAll(workers);
@@ -216,38 +146,126 @@ public sealed class ParallelFileScanner
         stopwatch.Stop();
 
         var finalTop = SnapshotTop();
+        var (files, bytes) = ReadTotals();
         progress?.Report(new BiggestFilesProgress(
-            "Done",
-            Interlocked.Read(ref filesSeen),
-            Interlocked.Read(ref bytesSeen),
-            stopwatch.Elapsed,
-            ComputeRate(Interlocked.Read(ref filesSeen), stopwatch.Elapsed),
-            finalTop,
-            IsCompleted: true));
+            "Done", files, bytes, stopwatch.Elapsed, ComputeRate(files, stopwatch.Elapsed),
+            finalTop, IsCompleted: true));
 
-        return new BiggestFilesResult(
-            finalTop,
-            Interlocked.Read(ref filesSeen),
-            Interlocked.Read(ref bytesSeen),
-            stopwatch.Elapsed,
-            EngineName,
-            Warning: null);
+        return new BiggestFilesResult(finalTop, files, bytes, stopwatch.Elapsed, EngineName, Warning: null);
+
+        (long Files, long Bytes) ReadTotals()
+        {
+            long files = 0;
+            long bytes = 0;
+            foreach (var totals in workerTotals)
+            {
+                files += totals.Files;
+                bytes += totals.Bytes;
+            }
+
+            return (files, bytes);
+        }
 
         void PublishProgress()
         {
-            progress?.Report(new BiggestFilesProgress(
-                "Enumerating",
-                Interlocked.Read(ref filesSeen),
-                Interlocked.Read(ref bytesSeen),
-                stopwatch.Elapsed,
-                ComputeRate(Interlocked.Read(ref filesSeen), stopwatch.Elapsed),
-                SnapshotTop(),
-                IsCompleted: false));
+            var (files, bytes) = ReadTotals();
+            var elapsed = stopwatch.Elapsed;
+            progress!.Report(new BiggestFilesProgress(
+                "Enumerating", files, bytes, elapsed, ComputeRate(files, elapsed), SnapshotTop(), IsCompleted: false));
         }
 
         IReadOnlyList<FileSizeHit> SnapshotTop()
         {
             return topN.Snapshot().Select(item => item.Item).ToList();
+        }
+    }
+
+    // Each worker owns its counters. The progress reader combines them without a shared update lock.
+    private sealed class ScanTotals
+    {
+        private long _files;
+        private long _bytes;
+
+        internal long Files => Volatile.Read(ref _files);
+        internal long Bytes => Volatile.Read(ref _bytes);
+
+        internal void Add(int files, long bytes)
+        {
+            Volatile.Write(ref _files, _files + files);
+            Volatile.Write(ref _bytes, _bytes + bytes);
+        }
+    }
+
+    private sealed class DirectoryScan(
+        string directory,
+        TopNAccumulator<FileSizeHit> top,
+        Action<string> queueChild,
+        ScanTotals totals,
+        CancellationToken cancellationToken) : FileSystemEnumerator<FileSizeHit>(directory, DirectoryOptions)
+    {
+        private int _files;
+        private long _bytes;
+
+        internal void AddLargestFiles()
+        {
+            try
+            {
+                while (MoveNext())
+                {
+                    var hit = Current;
+                    top.TryAdd(hit.SizeBytes, hit);
+                }
+            }
+            finally
+            {
+                if (_files > 0)
+                {
+                    totals.Add(_files, _bytes);
+                }
+            }
+        }
+
+        protected override bool ShouldIncludeEntry(ref FileSystemEntry entry)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (entry.IsDirectory)
+            {
+                if ((entry.Attributes & System.IO.FileAttributes.ReparsePoint) == 0)
+                {
+                    queueChild(entry.ToFullPath());
+                }
+
+                return false;
+            }
+
+            var size = entry.Length;
+            _bytes += size;
+            if (++_files == ProgressBatchFiles)
+            {
+                totals.Add(_files, _bytes);
+                _files = 0;
+                _bytes = 0;
+            }
+
+            return size > top.Threshold;
+        }
+
+        protected override FileSizeHit TransformEntry(ref FileSystemEntry entry)
+        {
+            DateTimeOffset? modified = null;
+            try
+            {
+                modified = entry.LastWriteTimeUtc;
+            }
+            catch
+            {
+                // Timestamps are best-effort.
+            }
+
+            // Directory enumeration exposes logical size.
+            var size = entry.Length;
+            return new FileSizeHit(entry.ToFullPath(), size, size, modified);
         }
     }
 

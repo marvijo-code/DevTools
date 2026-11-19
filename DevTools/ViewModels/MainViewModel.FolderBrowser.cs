@@ -23,13 +23,12 @@ public sealed class FolderBrowserRow
         bool canOpen,
         bool canExpand,
         bool isExpanded,
-        bool isFile,
-        bool isLowerBound = false)
+        bool isFile)
     {
         Name = name;
         Path = path;
         SizeBytes = sizeBytes;
-        SizeText = sizeBytes is long bytes ? (isLowerBound ? "≥ " : string.Empty) + ByteFormatter.Format(bytes) : "—";
+        SizeText = sizeBytes is long bytes ? ByteFormatter.Format(bytes) : "—";
         DetailText = detail;
         SharePercent = sharePercent;
         Depth = depth;
@@ -47,7 +46,7 @@ public sealed class FolderBrowserRow
 
     public long? SizeBytes { get; }
 
-    public bool HasMeasuredSize => SizeBytes.HasValue;
+    public bool HasMeasuredShare => SizeBytes.HasValue && SharePercent > 0;
 
     public string SizeText { get; }
 
@@ -96,6 +95,7 @@ public sealed partial class MainViewModel
     private readonly ObservableCollection<FolderBrowserRow> _folderBrowserRows = [];
     private readonly ObservableCollection<FolderBrowserDrive> _folderBrowserDrives = [];
     private readonly HashSet<string> _folderBrowserExpanded = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, CompletedFolderSize> _folderBrowserCompletedSizes = new(StringComparer.Ordinal);
     private readonly Dictionary<int, FolderFileSnapshot?> _folderBrowserFiles = [];
     private readonly HashSet<int> _folderBrowserFilesLoading = [];
     private readonly OrderedDictionary<int, FolderFileSnapshot> _recentFolderBrowserFiles = new();
@@ -181,10 +181,11 @@ public sealed partial class MainViewModel
         _folderBrowserPath = normalized;
         _canFolderBrowserGoUp = node != 0;
         _showFolderBrowserVolumeSummary = node == 0;
-        var allocation = tree.GetAllocatedBytes(node) is long allocatedBytes
+        var logicalComplete = HasExactSize(tree, node, showAllocation: false);
+        var allocation = HasExactSize(tree, node, showAllocation: true) && tree.GetAllocatedBytes(node) is long allocatedBytes
             ? $" {ByteFormatter.Format(allocatedBytes)} of attributed allocation."
-            : FolderBrowserUseAllocation ? " Allocation is unavailable for this scan." : string.Empty;
-        var coverage = tree.HasIncompleteScan(node) ? " Some folder listings were incomplete." : string.Empty;
+            : FolderBrowserUseAllocation ? " Exact allocation is unavailable for this scan." : string.Empty;
+        var coverage = string.Empty;
         if (tree.HasIncompleteAllocation(node))
         {
             coverage += " Allocation could not be fully measured.";
@@ -194,9 +195,10 @@ public sealed partial class MainViewModel
             coverage += DiskUsageAnalyzer.DescribeIncompleteMftAllocation(tree);
         }
 
-        _folderBrowserSummary =
-            $"{ByteFormatter.Format(tree.GetTotalBytes(node))} of logical file size in {tree.GetFileCount(node):N0} files.{allocation}{coverage} " +
-            $"Sized by {tree.EngineName} in {tree.Elapsed.TotalSeconds:F1}s.";
+        var logicalSize = logicalComplete
+            ? $"{ByteFormatter.Format(tree.GetTotalBytes(node))} of logical file size in {tree.GetFileCount(node):N0} files."
+            : "Exact logical size is unavailable because some folder listings were incomplete.";
+        _folderBrowserSummary = $"{logicalSize}{allocation}{coverage} Sized by {tree.EngineName} in {tree.Elapsed.TotalSeconds:F1}s.";
         RaisePropertyChanged(nameof(FolderBrowserPath));
         RaisePropertyChanged(nameof(FolderBrowserSummary));
         RaisePropertyChanged(nameof(CanFolderBrowserGoUp));
@@ -343,13 +345,20 @@ public sealed partial class MainViewModel
         }
 
         var path = keepLocation ? _folderBrowserPath : roots[0];
+        var driveScanCompleted = scanCompleted || completedRoot is not null;
+        var isDriveRoot = string.Equals(path, Path.GetPathRoot(path), StringComparison.OrdinalIgnoreCase);
+        if (!driveScanCompleted && isDriveRoot)
+        {
+            ShowPendingBrowserDrive(path);
+            return;
+        }
+
         if (BrowseFolder(path, skipUnchanged: true))
         {
             return;
         }
 
-        var driveScanCompleted = scanCompleted || completedRoot is not null;
-        if (string.Equals(path, Path.GetPathRoot(path), StringComparison.OrdinalIgnoreCase))
+        if (isDriveRoot)
         {
             ShowPendingBrowserDrive(path, driveScanCompleted);
             return;
@@ -420,8 +429,7 @@ public sealed partial class MainViewModel
             var rows = new List<FolderBrowserRow>(preview.FolderNames.Count + (preview.HasMore ? 1 : 0));
             foreach (var name in preview.FolderNames)
             {
-                rows.Add(new FolderBrowserRow(name, Path.Join(path, name), null, "Open to size this folder", 0, 0,
-                    canOpen: true, canExpand: false, isExpanded: false, isFile: false));
+                rows.Add(CreatePreviewFolderRow(name, Path.Join(path, name)));
             }
 
             if (preview.HasMore)
@@ -450,19 +458,19 @@ public sealed partial class MainViewModel
         CancellationToken cancellationToken)
     {
         var firstNonzeroSize = true;
-        IProgress<(int Index, FolderPreviewSize Size)> progress = new Progress<(int Index, FolderPreviewSize Size)>(value =>
+        IProgress<(int Index, long Bytes)> progress = new Progress<(int Index, long Bytes)>(value =>
         {
             if (cancellationToken.IsCancellationRequested || _folderBrowserFileTree is not null || FolderBrowserUseAllocation ||
-                value.Index >= _folderBrowserRows.Count || !ReferenceEquals(_folderBrowserRows[value.Index], rows[value.Index]))
+                value.Index >= _folderBrowserRows.Count || !ReferenceEquals(_folderBrowserRows[value.Index], rows[value.Index]) ||
+                _folderBrowserRows[value.Index].SizeBytes.HasValue)
             {
                 return;
             }
 
             var row = rows[value.Index];
-            _folderBrowserRows[value.Index] = new FolderBrowserRow(row.Name, row.Path, value.Size.Bytes,
-                value.Size.IsComplete ? "Logical size from quick scan" : "Logical bytes counted so far",
-                0, row.Depth, row.CanOpen, row.CanExpand, row.IsExpanded, row.IsFile, isLowerBound: !value.Size.IsComplete);
-            if (firstNonzeroSize && value.Size.Bytes > 0)
+            _folderBrowserRows[value.Index] = new FolderBrowserRow(row.Name, row.Path, value.Bytes, "Folder scan complete",
+                0, row.Depth, row.CanOpen, row.CanExpand, row.IsExpanded, row.IsFile);
+            if (firstNonzeroSize && value.Bytes > 0)
             {
                 firstNonzeroSize = false;
                 AppLog.Info($"Folder Browser first nonzero preview size shown after {Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms.");
@@ -474,7 +482,7 @@ public sealed partial class MainViewModel
             var count = Math.Min(folderCount, FolderBrowserPreviewSizeLimit);
             for (var index = 0; index < count; index++)
             {
-                var size = FolderFileListing.ReadPreviewSize(rows[index].Path, FolderBrowserPreviewDirectoryLimit,
+                var size = FolderFileListing.ReadExactPreviewSize(rows[index].Path, FolderBrowserPreviewDirectoryLimit,
                     FolderBrowserPreviewEntryLimit, cancellationToken);
                 if (size is { } measured)
                 {
@@ -482,6 +490,58 @@ public sealed partial class MainViewModel
                 }
             }
         }, cancellationToken);
+    }
+
+    private FolderBrowserRow CreatePreviewFolderRow(string name, string path)
+    {
+        long? bytes = null;
+        if (_folderBrowserCompletedSizes.TryGetValue(path, out var completed))
+        {
+            bytes = FolderBrowserUseAllocation ? completed.AllocatedBytes : completed.LogicalBytes;
+        }
+
+        return new FolderBrowserRow(name, path, bytes, bytes.HasValue ? "Folder scan complete" : "Waiting for exact size",
+            0, 0, canOpen: true, canExpand: false, isExpanded: false, isFile: false);
+    }
+
+    private void ApplyCompletedFolderSizes(IReadOnlyList<CompletedFolderSize> completed)
+    {
+        if (completed.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var folder in completed)
+        {
+            _folderBrowserCompletedSizes[folder.Path] = folder;
+        }
+
+        if (_folderBrowserFileTree is not null)
+        {
+            return;
+        }
+
+        var updated = 0;
+        for (var index = 0; index < _folderBrowserRows.Count; index++)
+        {
+            var row = _folderBrowserRows[index];
+            if (row.IsFile || !row.CanOpen)
+            {
+                continue;
+            }
+
+            var replacement = CreatePreviewFolderRow(row.Name, row.Path);
+            if (replacement.SizeBytes.HasValue && !row.HasSamePresentation(replacement))
+            {
+                _folderBrowserRows[index] = replacement;
+                updated++;
+            }
+        }
+
+        if (updated > 0)
+        {
+            AppLog.Info($"Folder Browser updated {updated:N0} exact folder sizes during the drive scan.");
+        }
     }
 
     private void CancelFolderBrowserFileLoads()
@@ -550,7 +610,8 @@ public sealed partial class MainViewModel
 
         var rows = new List<FolderBrowserRow>();
         var pendingFolders = new List<FolderFileRequest>();
-        AppendLevel(tree, node, 0, Math.Max(1, total.Value), showAllocation, rows, pendingFolders);
+        var rootTotal = HasExactSize(tree, node, showAllocation) ? total.Value : 0;
+        AppendLevel(tree, node, 0, rootTotal, showAllocation, rows, pendingFolders);
 
         UpdateFolderBrowserRows(rows);
 
@@ -644,6 +705,9 @@ public sealed partial class MainViewModel
         return layout;
     }
 
+    private static bool HasExactSize(FolderTree tree, int node, bool showAllocation) =>
+        !tree.HasIncompleteScan(node) && (!showAllocation || !tree.HasIncompleteAllocation(node));
+
     /// <summary>Adds the largest entries and recurses into expanded folders.</summary>
     private void AppendLevel(
         FolderTree tree, int node, int depth, long rootTotal, bool showAllocation,
@@ -652,40 +716,40 @@ public sealed partial class MainViewModel
         var folderPath = tree.GetPath(node);
         var layout = GetFolderBrowserLayout(tree, node, showAllocation);
         var entries = new List<(long Bytes, string Name, FolderBrowserRow Row, int ChildNode)>();
+        var exact = HasExactSize(tree, node, showAllocation);
+        double Share(long size) => rootTotal > 0 ? size * 100d / rootTotal : 0;
+        string ShareText(double share) => rootTotal > 0 ? $" - {share:0.0}%" : string.Empty;
 
         foreach (var child in layout.Children)
         {
             var size = showAllocation ? tree.GetAllocatedBytes(child)!.Value : tree.GetTotalBytes(child);
             var name = tree.GetName(child);
             var childPath = Path.Join(folderPath, name);
-            var share = size * 100d / rootTotal;
+            var share = Share(size);
             var expanded = _folderBrowserExpanded.Contains(childPath);
             var hasContent = tree.HasChildFolders(child) || (showAllocation ? size > 0 : tree.GetFileCount(child) > 0);
-            var coverage = tree.HasIncompleteScan(child) ? " - incomplete listing" : string.Empty;
-            if (tree.HasIncompleteAllocation(child))
-            {
-                coverage += " - incomplete allocation";
-            }
+            var complete = HasExactSize(tree, child, showAllocation);
             var row = new FolderBrowserRow(
                 name,
                 childPath,
-                size,
-                $"{tree.GetFileCount(child):N0} files - {share:0.0}%{coverage}",
-                share,
+                complete ? size : null,
+                complete ? $"{tree.GetFileCount(child):N0} files{ShareText(share)}" : "Exact size unavailable",
+                complete ? share : 0,
                 depth,
                 canOpen: hasContent,
                 canExpand: hasContent,
                 isExpanded: expanded && hasContent,
                 isFile: false);
-            entries.Add((size, row.Name, row, expanded && hasContent ? child : -1));
+            entries.Add((complete ? size : -1, row.Name, row, expanded && hasContent ? child : -1));
         }
 
         var directBytes = layout.DirectBytes;
         if (layout.OtherFolderCount > 0)
         {
-            var share = layout.OtherFolderBytes * 100d / rootTotal;
-            entries.Add((layout.OtherFolderBytes, string.Empty, new FolderBrowserRow(
-                "[other folders]", folderPath, layout.OtherFolderBytes, $"{layout.OtherFolderCount:N0} more folders - {share:0.0}%",
+            var share = exact ? Share(layout.OtherFolderBytes) : 0;
+            entries.Add((exact ? layout.OtherFolderBytes : -1, string.Empty, new FolderBrowserRow(
+                "[other folders]", folderPath, exact ? layout.OtherFolderBytes : null,
+                $"{layout.OtherFolderCount:N0} more folders{(exact ? ShareText(share) : " - exact size unavailable")}",
                 share, depth, canOpen: false, canExpand: false, isExpanded: false, isFile: false), -1));
         }
 
@@ -693,9 +757,10 @@ public sealed partial class MainViewModel
         {
             if (directBytes > 0)
             {
-                var share = directBytes * 100d / rootTotal;
-                entries.Add((directBytes, string.Empty, new FolderBrowserRow(
-                    "Direct allocation", folderPath, directBytes, $"Files, streams and folder metadata - {share:0.0}%",
+                var share = exact ? Share(directBytes) : 0;
+                entries.Add((exact ? directBytes : -1, string.Empty, new FolderBrowserRow(
+                    "Direct allocation", folderPath, exact ? directBytes : null,
+                    exact ? $"Files, streams and folder metadata{ShareText(share)}" : "Exact allocation unavailable",
                     share, depth, canOpen: false, canExpand: false, isExpanded: false, isFile: false), -1));
             }
         }
@@ -724,9 +789,9 @@ public sealed partial class MainViewModel
                 foreach (var file in listing.Files)
                 {
                     listed += file.Bytes;
-                    var share = file.Bytes * 100d / rootTotal;
+                    var share = Share(file.Bytes);
                     entries.Add((file.Bytes, file.Name, new FolderBrowserRow(
-                        file.Name, file.Path, file.Bytes, $"file - {share:0.0}%",
+                        file.Name, file.Path, file.Bytes, $"file{ShareText(share)}",
                         share, depth, canOpen: false, canExpand: false, isExpanded: false, isFile: true), -1));
                 }
 
@@ -740,9 +805,9 @@ public sealed partial class MainViewModel
 
         void AddFileSummary(string title, long bytes, string detail)
         {
-            var share = bytes * 100d / rootTotal;
-            entries.Add((bytes, string.Empty, new FolderBrowserRow(
-                title, folderPath, bytes, $"{detail} - {share:0.0}%",
+            var share = exact ? Share(bytes) : 0;
+            entries.Add((exact ? bytes : -1, string.Empty, new FolderBrowserRow(
+                title, folderPath, exact ? bytes : null, $"{detail}{(exact ? ShareText(share) : " - exact size unavailable")}",
                 share, depth, canOpen: false, canExpand: false, isExpanded: false, isFile: true), -1));
         }
 

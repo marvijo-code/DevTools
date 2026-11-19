@@ -10,8 +10,6 @@ internal readonly record struct FolderFile(string Name, string Path, long Bytes)
 
 internal sealed record FolderPreview(IReadOnlyList<string> FolderNames, bool HasMore);
 
-internal readonly record struct FolderPreviewSize(long Bytes, bool IsComplete);
-
 internal sealed record FolderFileSnapshot(IReadOnlyList<FolderFile> Files, long TotalBytes, long FileCount)
 {
     internal bool Matches(long bytes, long fileCount) => TotalBytes == bytes && FileCount == fileCount;
@@ -203,7 +201,7 @@ internal static class FolderFileListing
         return new FolderPreview(names, hasMore);
     }
 
-    internal static FolderPreviewSize? ReadPreviewSize(string folder, int directoryLimit, int entryLimit,
+    internal static long? ReadExactPreviewSize(string folder, int directoryLimit, int entryLimit,
         CancellationToken cancellationToken)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(directoryLimit, 1);
@@ -239,7 +237,7 @@ internal static class FolderFileListing
                     cancellationToken.ThrowIfCancellationRequested();
                     if (entriesSeen++ == entryLimit)
                     {
-                        return bytes > 0 ? new FolderPreviewSize(bytes, IsComplete: false) : null;
+                        return null;
                     }
 
                     if (entry.Directory is { } child)
@@ -267,7 +265,7 @@ internal static class FolderFileListing
             }
         }
 
-        return incomplete && bytes == 0 ? null : new FolderPreviewSize(bytes, IsComplete: !incomplete);
+        return incomplete ? null : bytes;
     }
 
     public static FolderFileSnapshot? ReadLargest(string folder, int limit, CancellationToken cancellationToken = default)

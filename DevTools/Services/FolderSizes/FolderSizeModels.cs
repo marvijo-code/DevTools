@@ -33,10 +33,15 @@ public sealed record FolderSizeResult(
 /// <summary>Describes which engine a folder-size scan will use and why.</summary>
 public sealed record FolderSizeEngineSelection(bool UseMft, string EngineName, string Reason);
 
+internal readonly record struct CompletedFolderSize(string Path, long LogicalBytes, long? AllocatedBytes, long FileCount);
+
 /// <summary>Progress of an all-folders scan of one drive.</summary>
 public sealed record FolderScanProgress(
     string DriveRoot,
     string EngineName,
     string Message,
     long ItemsSeen,
-    TimeSpan Elapsed);
+    TimeSpan Elapsed)
+{
+    internal IReadOnlyList<CompletedFolderSize> CompletedFolders { get; init; } = [];
+}

@@ -228,7 +228,83 @@ public sealed class FolderFileListingTests
     }
 
     [Fact]
-    public void ReadPreviewSize_ReturnsExactSmallTotalsAndBoundedLowerBounds()
+    public async Task Walker_ReportsExactSubtreeTotalsBeforeReturningTheDriveTree()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-exact-progress-");
+        var first = fixture.CreateSubdirectory("first");
+        var nested = first.CreateSubdirectory("nested");
+        var second = fixture.CreateSubdirectory("second");
+        var firstFile = Path.Combine(first.FullName, "first.bin");
+        var nestedFile = Path.Combine(nested.FullName, "nested.bin");
+        var secondFile = Path.Combine(second.FullName, "second.bin");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var release = new ManualResetEventSlim();
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completed = new List<CompletedFolderSize>();
+        Task<FolderTree>? scan = null;
+        try
+        {
+            File.WriteAllBytes(firstFile, new byte[7]);
+            File.WriteAllBytes(nestedFile, new byte[13]);
+            File.WriteAllBytes(secondFile, new byte[31]);
+            var progress = new InlineProgress<FolderScanProgress>(update =>
+            {
+                if (update.CompletedFolders.Count > 0)
+                {
+                    completed.AddRange(update.CompletedFolders);
+                    ready.TrySetResult();
+                    release.Wait(deadline.Token);
+                }
+            });
+            scan = new ParallelFolderWalker().ScanAsync(fixture.FullName, progress, deadline.Token, workerCount: 4,
+                measureAllocation: true);
+            await ready.Task.WaitAsync(deadline.Token);
+            Assert.False(scan.IsCompleted);
+            release.Set();
+
+            var tree = await scan.WaitAsync(deadline.Token);
+            Assert.Equal(2, completed.Count);
+            var firstSize = Assert.Single(completed, entry => entry.Path == first.FullName);
+            var secondSize = Assert.Single(completed, entry => entry.Path == second.FullName);
+            Assert.Equal(20, firstSize.LogicalBytes);
+            Assert.Equal(31, secondSize.LogicalBytes);
+            Assert.Equal(2, firstSize.FileCount);
+            foreach (var folder in completed)
+            {
+                var node = tree.Find(folder.Path);
+                Assert.Equal(tree.GetTotalBytes(node), folder.LogicalBytes);
+                if (folder.AllocatedBytes.HasValue)
+                {
+                    Assert.Equal(tree.GetAllocatedBytes(node), folder.AllocatedBytes);
+                }
+            }
+        }
+        finally
+        {
+            release.Set();
+            if (scan is not null)
+            {
+                try { await scan; }
+                catch (OperationCanceledException) when (deadline.IsCancellationRequested) { }
+            }
+
+            File.Delete(firstFile);
+            File.Delete(nestedFile);
+            File.Delete(secondFile);
+            nested.Delete();
+            first.Delete();
+            second.Delete();
+            fixture.Delete();
+        }
+    }
+
+    private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
+    {
+        public void Report(T value) => report(value);
+    }
+
+    [Fact]
+    public void ReadExactPreviewSize_SuppressesTotalsWhenEitherBudgetIsExceeded()
     {
         var fixture = Directory.CreateTempSubdirectory("devtools-folder-size-preview-");
         var nested = fixture.CreateSubdirectory("nested");
@@ -238,16 +314,13 @@ public sealed class FolderFileListingTests
         {
             File.WriteAllBytes(direct, new byte[7]);
             File.WriteAllBytes(child, new byte[13]);
-            Assert.Equal(new FolderPreviewSize(20, IsComplete: true),
-                FolderFileListing.ReadPreviewSize(fixture.FullName, 2, 3, CancellationToken.None));
-            Assert.Equal(new FolderPreviewSize(7, IsComplete: false),
-                FolderFileListing.ReadPreviewSize(fixture.FullName, 1, 3, CancellationToken.None));
-            Assert.Equal(new FolderPreviewSize(7, IsComplete: false),
-                FolderFileListing.ReadPreviewSize(fixture.FullName, 2, 2, CancellationToken.None));
-            Assert.Null(FolderFileListing.ReadPreviewSize(Path.Join(fixture.FullName, "missing"), 2, 3, CancellationToken.None));
+            Assert.Equal(20, FolderFileListing.ReadExactPreviewSize(fixture.FullName, 2, 3, CancellationToken.None));
+            Assert.Null(FolderFileListing.ReadExactPreviewSize(fixture.FullName, 1, 3, CancellationToken.None));
+            Assert.Null(FolderFileListing.ReadExactPreviewSize(fixture.FullName, 2, 2, CancellationToken.None));
+            Assert.Null(FolderFileListing.ReadExactPreviewSize(Path.Join(fixture.FullName, "missing"), 2, 3, CancellationToken.None));
             using var cts = new CancellationTokenSource();
             cts.Cancel();
-            Assert.Throws<OperationCanceledException>(() => FolderFileListing.ReadPreviewSize(fixture.FullName, 2, 3, cts.Token));
+            Assert.Throws<OperationCanceledException>(() => FolderFileListing.ReadExactPreviewSize(fixture.FullName, 2, 3, cts.Token));
         }
         finally
         {

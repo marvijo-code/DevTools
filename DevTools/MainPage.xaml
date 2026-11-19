@@ -941,7 +941,7 @@
                               </Grid>
                               <ProgressBar Grid.Column="1"
                                            Value="{Binding SharePercent}"
-                                           Visibility="{Binding HasMeasuredSize, Converter={StaticResource BoolToVisibilityConverter}}"
+                                           Visibility="{Binding HasMeasuredShare, Converter={StaticResource BoolToVisibilityConverter}}"
                                            Maximum="100"
                                            VerticalAlignment="Center" />
                               <TextBlock Grid.Column="2"

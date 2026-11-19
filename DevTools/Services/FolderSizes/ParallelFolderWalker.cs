@@ -79,14 +79,13 @@ public sealed class ParallelFolderWalker
         var pending = 1;
         var queuedStreamBatches = 0;
         long filesSeen = 0;
+        List<CompletedFolderSize>? completedFolders = progress is null ? null : [];
         queue.Add(new WalkJob(startNode, fullRoot), scanToken);
 
         var workers = workerCount is int requested
             ? Math.Clamp(requested, 1, 16)
             : resources.WalkWorkerCount(ScanResources.ReadSeekPenalty(volumeRoot), prioritize, volumeShare);
-        DirectoryAllocationReader.TryScheduleStreams? scheduleStreams = allocationIndex is not null && workers > 1
-            ? TryQueueStreams
-            : null;
+        var shareStreamJobs = allocationIndex is not null && workers > 1;
         // A priority walk can reuse the scan thread when it does not report progress.
         var scanThreadWorks = prioritize && progress is null;
         var dedicatedWorkers = workers - (scanThreadWorks ? 1 : 0);
@@ -102,7 +101,7 @@ public sealed class ParallelFolderWalker
 
         // Stream jobs use the same workers as directory jobs. Bound the backlog so a wide
         // directory can spend spare capacity without flooding the queue with file IDs and handles.
-        bool TryQueueStreams(int node, SafeFileHandle hint, ReadOnlySpan<ulong> ids)
+        bool TryQueueStreams(int node, SafeFileHandle hint, ReadOnlySpan<ulong> ids, FolderBranch? branch)
         {
             if (queue.Count >= workers)
             {
@@ -127,7 +126,15 @@ public sealed class ParallelFolderWalker
 
                 var batch = new StreamBatch(copy, ids.ToArray());
                 Interlocked.Increment(ref pending);
-                queue.Add(new WalkJob(node, null, Streams: batch), scanToken);
+                if (branch is not null)
+                {
+                    lock (builderLock)
+                    {
+                        branch.Pending++;
+                    }
+                }
+
+                queue.Add(new WalkJob(node, null, Streams: batch, Branch: branch), scanToken);
                 queued = true;
                 return true;
             }
@@ -141,20 +148,22 @@ public sealed class ParallelFolderWalker
             }
         }
 
-        void QueueChildJobs(int firstNode, string parentPath, List<string> names)
+        void QueueChildJobs(int firstNode, string parentPath, List<string> names, FolderBranch? branch, bool startBranches)
         {
             if (names.Count == 0)
             {
                 return;
             }
 
-            var batchSize = GetDirectoryBatchSize(names.Count, workers);
+            var batchSize = startBranches ? 1 : GetDirectoryBatchSize(names.Count, workers);
             Interlocked.Add(ref pending, 1 + (names.Count - 1) / batchSize);
             if (batchSize == 1)
             {
                 for (var index = 0; index < names.Count; index++)
                 {
-                    queue.Add(new WalkJob(firstNode + index, Path.Combine(parentPath, names[index])), scanToken);
+                    var childPath = Path.Combine(parentPath, names[index]);
+                    var childBranch = startBranches ? new FolderBranch(childPath) : branch;
+                    queue.Add(new WalkJob(firstNode + index, childPath, Branch: childBranch), scanToken);
                 }
 
                 return;
@@ -165,7 +174,7 @@ public sealed class ParallelFolderWalker
             for (var offset = 0; offset < children.Length; offset += batchSize)
             {
                 var length = Math.Min(batchSize, children.Length - offset);
-                queue.Add(new WalkJob(firstNode + offset, parentPath, children.AsMemory(offset, length)), scanToken);
+                queue.Add(new WalkJob(firstNode + offset, parentPath, children.AsMemory(offset, length), Branch: branch), scanToken);
             }
         }
 
@@ -189,6 +198,53 @@ public sealed class ParallelFolderWalker
             }
         }
 
+        // Called while the builder is locked. A branch settles after its directories and any queued stream work settle.
+        void FinishBranchWork(FolderBranch? branch, int children, long logicalBytes, long allocatedBytes, long files,
+            bool incomplete, bool incompleteAllocation)
+        {
+            if (branch is null)
+            {
+                return;
+            }
+
+            branch.LogicalBytes += Math.Max(0, logicalBytes);
+            branch.AllocatedBytes += allocatedBytes;
+            branch.Files += files;
+            branch.Incomplete |= incomplete;
+            branch.IncompleteAllocation |= incompleteAllocation;
+            branch.Pending += children - 1;
+            if (branch.Pending == 0 && !branch.Incomplete)
+            {
+                completedFolders!.Add(new CompletedFolderSize(branch.Path, branch.LogicalBytes,
+                    trackAllocation && !branch.IncompleteAllocation ? branch.AllocatedBytes : null, branch.Files));
+            }
+        }
+
+        void ReportProgress(bool completedOnly = false)
+        {
+            if (progress is null)
+            {
+                return;
+            }
+
+            CompletedFolderSize[] ready;
+            int folders;
+            lock (builderLock)
+            {
+                ready = completedFolders!.Count > 0 ? completedFolders.ToArray() : [];
+                completedFolders.Clear();
+                folders = builder.FolderCount;
+            }
+
+            if (!completedOnly || ready.Length > 0)
+            {
+                var files = Interlocked.Read(ref filesSeen);
+                progress.Report(new FolderScanProgress(
+                    driveRoot, EngineName, $"Walking folders: {files:N0} files in {folders:N0} folders so far.",
+                    files, stopwatch.Elapsed) { CompletedFolders = ready });
+            }
+        }
+
         void ConsumeWork()
         {
             try
@@ -199,8 +255,13 @@ public sealed class ParallelFolderWalker
                         measureAllocation: trackAllocation)
                     : null;
                 var subfolders = new List<string>();
-                foreach (var (node, directory, children, streams) in queue.GetConsumingEnumerable(scanToken))
+                FolderBranch? currentBranch = null;
+                DirectoryAllocationReader.TryScheduleStreams? scheduleStreams = shareStreamJobs
+                    ? (int node, SafeFileHandle hint, ReadOnlySpan<ulong> ids) => TryQueueStreams(node, hint, ids, currentBranch)
+                    : null;
+                foreach (var (node, directory, children, streams, branch) in queue.GetConsumingEnumerable(scanToken))
                 {
+                    currentBranch = branch;
                     using var hint = streams?.Hint;
                     if (streams is not null)
                     {
@@ -215,6 +276,8 @@ public sealed class ParallelFolderWalker
                             {
                                 builder.MarkIncompleteAllocation(node);
                             }
+
+                            FinishBranchWork(branch, 0, 0, streamBytes, 0, false, incompleteStreams);
                         }
 
                         CompleteWork();
@@ -281,9 +344,10 @@ public sealed class ParallelFolderWalker
                         }
 
                         firstChild = builder.AppendEnumeratedChildren(node, subfolders);
+                        FinishBranchWork(currentBranch, subfolders.Count, bytes, allocatedBytes, files, incomplete, incompleteAllocation);
                     }
 
-                    QueueChildJobs(firstChild, path, subfolders);
+                    QueueChildJobs(firstChild, path, subfolders, currentBranch, completedFolders is not null && node == startNode);
                     Interlocked.Add(ref filesSeen, files);
                 }
             }
@@ -323,12 +387,8 @@ public sealed class ParallelFolderWalker
                     continue;
                 }
 
-                progress?.Report(new FolderScanProgress(
-                    driveRoot,
-                    EngineName,
-                    $"Walking folders: {Interlocked.Read(ref filesSeen):N0} files in {builder.FolderCount:N0} folders so far.",
-                    Interlocked.Read(ref filesSeen),
-                    stopwatch.Elapsed));
+                cancellationToken.ThrowIfCancellationRequested();
+                ReportProgress();
             }
         }
         finally
@@ -354,6 +414,7 @@ public sealed class ParallelFolderWalker
             throw new InvalidOperationException($"Folder walk of {fullRoot} failed: {failure.Message}", failure);
         }
 
+        ReportProgress(completedOnly: true);
         stopwatch.Stop();
         return builder.Build(EngineName, stopwatch.Elapsed);
     }
@@ -434,7 +495,18 @@ public sealed class ParallelFolderWalker
             Math.Min(MaximumDirectoriesPerJob, 1 + (childCount - 1) / (workers * 2));
 
     private readonly record struct WalkJob(int Node, string? Path, ReadOnlyMemory<string> Children = default,
-        StreamBatch? Streams = null);
+        StreamBatch? Streams = null, FolderBranch? Branch = null);
+
+    private sealed class FolderBranch(string path)
+    {
+        public string Path { get; } = path;
+        public int Pending = 1;
+        public long LogicalBytes;
+        public long AllocatedBytes;
+        public long Files;
+        public bool Incomplete;
+        public bool IncompleteAllocation;
+    }
 
     private sealed record StreamBatch(SafeFileHandle Hint, ulong[] FileIds);
 }

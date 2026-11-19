@@ -141,7 +141,7 @@ public sealed class DiskUsageAnalyzer
                 lock (progressLock)
                 {
                     var now = DateTime.UtcNow;
-                    if ((now - lastStatus).TotalMilliseconds < 400)
+                    if ((now - lastStatus).TotalMilliseconds < 400 && update.CompletedFolders.Count == 0)
                     {
                         return;
                     }
@@ -150,7 +150,10 @@ public sealed class DiskUsageAnalyzer
                     var elapsed = update.Elapsed > TimeSpan.Zero ? $" ({update.Elapsed.TotalSeconds:F0}s)" : string.Empty;
                     sections[sectionIndex] = CreatePendingSection(title, $"{update.EngineName}: {update.Message}{elapsed}");
                     currentStatus = $"Volume {sectionIndex + 1} of {drives.Count} ({drive.DisplayRoot}): {update.Message}";
-                    progress?.Report(new DiskUsageProgress(headline, currentStatus, currentAnalysis, sections.ToList(), false));
+                    progress?.Report(new DiskUsageProgress(headline, currentStatus, currentAnalysis, sections.ToList(), false)
+                    {
+                        CompletedFolders = update.CompletedFolders
+                    });
                 }
             });
 
@@ -1334,4 +1337,5 @@ public sealed record DiskUsageProgress(string Headline, string StatusText, strin
 {
     public IReadOnlyList<string>? BrowseRoots { get; init; }
     public string? CompletedRoot { get; init; }
+    internal IReadOnlyList<CompletedFolderSize> CompletedFolders { get; init; } = [];
 }

@@ -145,6 +145,31 @@ public sealed class ResourceAdvisorTests
         Assert.Equal(ResourceAdviceSeverity.Info, findings[^1].Severity);
     }
 
+    [Fact]
+    public void Analyze_UsesTheRetainedHistoryForVolumeTrends()
+    {
+        const string root = @"V:\";
+        var history = new ResourceHistory(120);
+        var sample = CreateSample();
+        for (var minute = 0; minute < 122; minute++)
+        {
+            history.Add(sample with
+            {
+                Timestamp = DateTimeOffset.UnixEpoch.AddMinutes(minute),
+                Volumes = [new VolumeUsage(root, "Fixture", 800 * Gigabyte, (500 - minute) * Gigabyte)]
+            });
+
+            if (minute == 118)
+            {
+                Assert.DoesNotContain(_advisor.Analyze(history), advice => advice.Title.Contains(" is filling at "));
+            }
+        }
+
+        var trend = Assert.Single(_advisor.Analyze(history), advice => advice.Title.StartsWith(root + " is filling at "));
+        Assert.Contains(DevTools.Infrastructure.ByteFormatter.Format(119 * Gigabyte), trend.Detail);
+        Assert.Equal(ResourceAdviceSeverity.Critical, trend.Severity);
+    }
+
     private static ResourceHistory Fill(ResourceSample sample)
     {
         // The advisor averages over a 30-sample window, so a condition must be sustained to register.

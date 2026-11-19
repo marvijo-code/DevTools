@@ -1533,6 +1533,11 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (SetProperty(ref _activeTab, tab, nameof(ActiveTab)))
         {
+            if (IsResourcesVisible)
+            {
+                RaiseResourceSeriesChanged();
+            }
+
             SaveSettings();
             RaisePropertyChanged(nameof(IsKillProcessesVisible));
             RaisePropertyChanged(nameof(IsWorkflowExplorerVisible));

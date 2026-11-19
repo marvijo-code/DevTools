@@ -32,8 +32,7 @@ public sealed class FolderBrowserRow
         Path = path;
         SizeBytes = sizeBytes;
         ScannedBytes = sizeBytes.HasValue ? null : scannedBytes;
-        SizeText = sizeBytes is long bytes ? ByteFormatter.Format(bytes) :
-            ScannedBytes is long scanned ? $"{scanned:N0} B" : "—";
+        SizeText = (sizeBytes ?? ScannedBytes) is long bytes ? ByteFormatter.Format(bytes) : "—";
         DetailText = detail;
         SharePercent = sharePercent;
         Depth = depth;
@@ -144,7 +143,7 @@ public sealed partial class MainViewModel
         {
             var summary = GetSelectedVolumeNote() ?? _folderBrowserSummary;
             return _folderBrowserScannedRootBytes > 0 && !FolderBrowserUseAllocation
-                ? $"{summary} {_folderBrowserScannedRootBytes:N0} B scanned."
+                ? $"{summary} {ByteFormatter.Format(_folderBrowserScannedRootBytes)} scanned."
                 : summary;
         }
     }
@@ -229,7 +228,7 @@ public sealed partial class MainViewModel
 
         var logicalSize = logicalComplete
             ? $"{ByteFormatter.Format(tree.GetTotalBytes(node))} of logical file size in {tree.GetFileCount(node):N0} files."
-            : $"Scanned {tree.GetTotalBytes(node):N0} B. Some folder listings could not be read.";
+            : $"Scanned {ByteFormatter.Format(tree.GetTotalBytes(node))}. Some folder listings could not be read.";
         _folderBrowserSummary = $"{logicalSize}{allocation}{coverage} Sized by {tree.EngineName} in {tree.Elapsed.TotalSeconds:F1}s.";
         RaisePropertyChanged(nameof(FolderBrowserPath));
         RaisePropertyChanged(nameof(FolderBrowserSummary));
@@ -615,7 +614,7 @@ public sealed partial class MainViewModel
                 latestBytes = folder.Bytes;
             }
 
-            rows.Add(new FolderBrowserLiveSize(folder.Path[prefix.Length..], folder.Path, $"{folder.Bytes:N0} B"));
+            rows.Add(new FolderBrowserLiveSize(folder.Path[prefix.Length..], folder.Path, ByteFormatter.Format(folder.Bytes)));
         }
 
         if (rows.Count == 0)

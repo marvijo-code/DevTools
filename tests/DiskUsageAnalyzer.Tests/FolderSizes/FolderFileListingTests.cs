@@ -270,7 +270,7 @@ public sealed class FolderFileListingTests
             Assert.False(early.AllocationAttempted);
             var liveView = Assert.IsType<ParallelFolderWalker.LogicalFolderWalk>(liveWalk)
                 .Capture(fixture.FullName, ["child"], new HashSet<string> { child.FullName, nested.FullName },
-                    [], new HashSet<string>(), 200);
+                    new Dictionary<string, long>(), 200);
             Assert.Equal(8204, liveView.ScannedBytes);
             Assert.Collection(liveView.Rows,
                 row => { Assert.Equal(8204, row.ScannedBytes); Assert.True(row.HasExactSize); },
@@ -327,8 +327,8 @@ public sealed class FolderFileListingTests
 
         var leafPath = Path.Join(innerPath, "leaf");
         Assert.Equal(new LiveFolderSize(leafPath, 11), Assert.Single(walk.Drain()));
-        var noOverrides = new HashSet<string>();
-        var reading = walk.Capture(root, ["outer"], expanded, [], noOverrides, 200);
+        var quickSizes = new Dictionary<string, long>();
+        var reading = walk.Capture(root, ["outer"], expanded, quickSizes, 200);
         Assert.Equal(26, reading.ScannedBytes);
         Assert.Equal(new long[] { 23, 18, 11, 0 }, reading.Rows.Select(row => row.ScannedBytes));
         Assert.Equal(new[] { 0, 1, 2, 2 }, reading.Rows.Select(row => row.Depth));
@@ -336,27 +336,87 @@ public sealed class FolderFileListingTests
         Assert.False(reading.Rows[1].IsSettled);
         Assert.True(reading.Rows[2].HasExactSize);
 
-        var revealed = walk.Capture(root, ["unrelated"], noOverrides, [leafPath], noOverrides, 1);
-        Assert.Equal(new[] { "outer", "inner", "leaf", "unrelated" }, revealed.Rows.Select(row => row.Name));
-        Assert.Equal(new[] { 0, 1, 2, 0 }, revealed.Rows.Select(row => row.Depth));
-        Assert.Equal(new long[] { 23, 18, 11, 0 }, revealed.Rows.Select(row => row.ScannedBytes));
-        Assert.True(revealed.Rows[0].IsExpanded);
-        Assert.True(revealed.Rows[1].IsExpanded);
-
-        var collapsed = walk.Capture(root, ["outer"], noOverrides, [leafPath], new HashSet<string> { innerPath }, 1);
-        Assert.Equal(new[] { "outer", "inner" }, collapsed.Rows.Select(row => row.Name));
-        Assert.Equal(18, collapsed.Rows[1].ScannedBytes);
-        Assert.False(collapsed.Rows[1].IsExpanded);
+        var collapsed = Assert.Single(walk.Capture(root, ["outer"], new HashSet<string>(), quickSizes, 200).Rows);
+        Assert.Equal(outerPath, collapsed.Path);
+        Assert.Equal(23, collapsed.ScannedBytes);
+        Assert.False(collapsed.IsExpanded);
 
         walk.FinishListing(sibling, 0, 0, 13, incomplete: true);
 
         Assert.Empty(walk.Drain());
-        var settled = walk.Capture(root, ["outer"], expanded, [], noOverrides, 200);
+        var settled = walk.Capture(root, ["outer"], expanded, quickSizes, 200);
         Assert.Equal(39, settled.ScannedBytes);
-        Assert.Equal(new long[] { 36, 31, 11, 13 }, settled.Rows.Select(row => row.ScannedBytes));
+        Assert.Equal(new long[] { 36, 31, 13, 11 }, settled.Rows.Select(row => row.ScannedBytes));
         Assert.All(settled.Rows, row => Assert.True(row.IsSettled));
         Assert.False(settled.Rows[0].HasExactSize);
         Assert.False(settled.Rows[1].HasExactSize);
+    }
+
+    [Fact]
+    public void LogicalWalk_ChoosesTheLargestFoldersEvenWhenThePreviewOmittedThem()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var builder = new FolderTreeBuilder(root);
+        var walk = new ParallelFolderWalker.LogicalFolderWalk(root, 0, builder, new object());
+        var expanded = new HashSet<string>();
+        var quickSizes = new Dictionary<string, long> { [Path.Join(root, "large")] = 30 };
+        var preview = walk.Capture(root, ["small", "large"], expanded, quickSizes, 2);
+        Assert.Equal(new[] { "large", "small" }, preview.Rows.Select(row => row.Name));
+
+        var first = builder.AppendEnumeratedChildren(0, ["small", "large", "medium"]);
+        walk.FinishListing(0, first, 3, 0, incomplete: false);
+        walk.FinishListing(first, 0, 0, 2, incomplete: false);
+        walk.FinishListing(first + 1, 0, 0, 30, incomplete: false);
+        walk.FinishListing(first + 2, 0, 0, 12, incomplete: false);
+
+        var live = walk.Capture(root, ["small"], expanded, quickSizes, 2);
+        Assert.Equal(new[] { "large", "medium" }, live.Rows.Select(row => row.Name));
+        Assert.Equal(new long[] { 30, 12 }, live.Rows.Select(row => row.ScannedBytes));
+        Assert.True(live.HasMore.GetValueOrDefault());
+        Assert.All(live.Rows, row => Assert.False(row.IsExpanded));
+    }
+
+    [Fact]
+    public void ReadLargest_CanKeepSystemFilesOutOfTheVisibleRankingAndSummary()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var folder = Directory.CreateTempSubdirectory("devtools-system-files-");
+        var system = Path.Join(folder.FullName, "system.bin");
+        var ordinary = Path.Join(folder.FullName, "ordinary.bin");
+        var hidden = Path.Join(folder.FullName, "hidden.bin");
+        try
+        {
+            File.WriteAllBytes(system, new byte[100]);
+            File.WriteAllBytes(ordinary, new byte[23]);
+            File.WriteAllBytes(hidden, new byte[7]);
+            File.SetAttributes(system, FileAttributes.System | FileAttributes.Hidden);
+            File.SetAttributes(hidden, FileAttributes.Hidden);
+
+            var filtered = Assert.IsType<FolderFileSnapshot>(
+                FolderFileListing.ReadLargest(folder.FullName, 1, includeSystemFiles: false));
+            Assert.True(filtered.Matches(130, 3));
+            Assert.Equal("ordinary.bin", Assert.Single(filtered.Files).Name);
+            Assert.Equal(30, filtered.VisibleBytes);
+            Assert.Equal(2, filtered.VisibleFileCount);
+
+            var all = Assert.IsType<FolderFileSnapshot>(
+                FolderFileListing.ReadLargest(folder.FullName, 1, includeSystemFiles: true));
+            Assert.True(all.Matches(130, 3));
+            Assert.Equal("system.bin", Assert.Single(all.Files).Name);
+            Assert.Equal(130, all.VisibleBytes);
+            Assert.Equal(3, all.VisibleFileCount);
+        }
+        finally
+        {
+            File.Delete(system);
+            File.Delete(ordinary);
+            File.Delete(hidden);
+            folder.Delete();
+        }
     }
 
     [Fact]

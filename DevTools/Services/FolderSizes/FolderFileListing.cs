@@ -12,6 +12,10 @@ internal sealed record FolderPreview(IReadOnlyList<string> FolderNames, bool Has
 
 internal sealed record FolderFileSnapshot(IReadOnlyList<FolderFile> Files, long TotalBytes, long FileCount)
 {
+    public long VisibleBytes { get; init; } = TotalBytes;
+
+    public long VisibleFileCount { get; init; } = FileCount;
+
     internal bool Matches(long bytes, long fileCount) => TotalBytes == bytes && FileCount == fileCount;
 }
 
@@ -32,8 +36,8 @@ internal static class FolderFileListing
     };
 
     internal static IAsyncEnumerable<IReadOnlyList<FolderFileResult>> ReadBatchesAsync(
-        IReadOnlyList<FolderFileRequest> folders, int limit, CancellationToken cancellationToken) =>
-        ReadBatchesAsync(folders, (path, token) => ReadLargest(path, limit, token), cancellationToken,
+        IReadOnlyList<FolderFileRequest> folders, int limit, CancellationToken cancellationToken, bool includeSystemFiles = true) =>
+        ReadBatchesAsync(folders, (path, token) => ReadLargest(path, limit, token, includeSystemFiles), cancellationToken,
             () => PlanReaders(folders));
 
     internal static async IAsyncEnumerable<IReadOnlyList<FolderFileResult>> ReadBatchesAsync(
@@ -268,7 +272,8 @@ internal static class FolderFileListing
         return incomplete ? null : bytes;
     }
 
-    public static FolderFileSnapshot? ReadLargest(string folder, int limit, CancellationToken cancellationToken = default)
+    public static FolderFileSnapshot? ReadLargest(string folder, int limit, CancellationToken cancellationToken = default,
+        bool includeSystemFiles = true)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var largest = new TopNAccumulator<string>(limit);
@@ -276,6 +281,8 @@ internal static class FolderFileListing
         string? directory = null;
         long totalBytes = 0;
         long fileCount = 0;
+        long visibleBytes = 0;
+        long visibleFileCount = 0;
         try
         {
             if ((File.GetAttributes(folder) & System.IO.FileAttributes.ReparsePoint) != 0)
@@ -303,6 +310,13 @@ internal static class FolderFileListing
                 var bytes = Math.Max(0, entry.Length);
                 totalBytes = checked(totalBytes + bytes);
                 fileCount++;
+                if (!includeSystemFiles && (entry.Attributes & System.IO.FileAttributes.System) != 0)
+                {
+                    return false;
+                }
+
+                visibleBytes += bytes;
+                visibleFileCount++;
                 return bytes > largest.Threshold;
             };
 
@@ -320,6 +334,10 @@ internal static class FolderFileListing
             ? []
             : largest.Snapshot().Select(entry =>
                 new FolderFile(entry.Item, Path.Join(directory, entry.Item), entry.SizeBytes)).ToArray();
-        return new FolderFileSnapshot(files, totalBytes, fileCount);
+        return new FolderFileSnapshot(files, totalBytes, fileCount)
+        {
+            VisibleBytes = visibleBytes,
+            VisibleFileCount = visibleFileCount
+        };
     }
 }

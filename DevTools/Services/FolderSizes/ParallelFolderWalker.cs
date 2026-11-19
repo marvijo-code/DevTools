@@ -610,102 +610,70 @@ public sealed class ParallelFolderWalker
         }
 
         public LiveFolderView Capture(string path, IReadOnlyList<string> previewNames, IReadOnlySet<string> expanded,
-            IReadOnlyList<string> recentPaths, IReadOnlySet<string> collapsed, int limit)
+            IReadOnlyDictionary<string, long> quickSizes, int limit)
         {
             lock (_sync)
             {
                 var parent = FindNode(path);
-                var revealed = GetRecentBranches(path, parent, recentPaths);
                 var rows = new List<LiveFolderRow>(previewNames.Count);
-                revealed.TryGetValue(parent, out var activeRoots);
-                if (activeRoots is not null)
+                var rootListed = parent >= 0 && _folders[parent].IsListed;
+                if (rootListed)
                 {
-                    foreach (var child in activeRoots)
+                    AddChildren(_folders[parent], path, 0);
+                }
+                else
+                {
+                    foreach (var name in previewNames.OrderByDescending(name => PreviewSize(path, name)))
                     {
-                        AddRow(child, _builder.GetName(child), path, 0);
+                        AddRow(-1, name, path, 0);
                     }
                 }
 
-                foreach (var name in previewNames)
+                return new LiveFolderView(parent < 0 ? 0 : _folders[parent].ScannedBytes, rows,
+                    rootListed ? _folders[parent].ChildCount > limit : null);
+
+                long PreviewSize(string parentPath, string name) =>
+                    quickSizes.Count > 0 && quickSizes.TryGetValue(Path.Join(parentPath, name), out var bytes) ? bytes : -1;
+
+                long SortSize(int child, string parentPath, int depth)
                 {
-                    var child = FindChild(parent, name);
-                    if (activeRoots?.Contains(child) != true)
+                    var folder = _folders[child];
+                    var settled = folder.IsListed && folder.RemainingChildren == 0;
+                    var quick = !settled && depth == 0 ? PreviewSize(parentPath, _builder.GetName(child)) : -1;
+                    if (quick >= 0)
                     {
-                        AddRow(child, name, path, 0);
+                        return quick;
                     }
+
+                    return folder.ScannedBytes > 0 || (settled && !folder.Incomplete) ? folder.ScannedBytes : -1;
                 }
 
-                return new LiveFolderView(parent < 0 ? 0 : _folders[parent].ScannedBytes, rows);
+                void AddChildren(FolderState parentFolder, string parentPath, int depth)
+                {
+                    var children = Enumerable.Range(parentFolder.FirstChild, parentFolder.ChildCount);
+                    foreach (var child in children.OrderByDescending(child => SortSize(child, parentPath, depth))
+                                 .ThenBy(_builder.GetName, StringComparer.OrdinalIgnoreCase).Take(limit))
+                    {
+                        AddRow(child, _builder.GetName(child), parentPath, depth);
+                    }
+                }
 
                 void AddRow(int node, string name, string parentPath, int depth)
                 {
                     var fullPath = Path.Join(parentPath, name);
                     var folder = node < 0 ? default : _folders[node];
                     var canExpand = !folder.IsListed || folder.ChildCount > 0;
-                    var manuallyExpanded = expanded.Contains(fullPath);
-                    revealed.TryGetValue(node, out var activeChildren);
-                    var showRecent = activeChildren is not null && !collapsed.Contains(fullPath);
-                    var isExpanded = canExpand && (manuallyExpanded || showRecent);
+                    var isExpanded = canExpand && expanded.Contains(fullPath);
                     var settled = folder.IsListed && folder.RemainingChildren == 0;
                     rows.Add(new LiveFolderRow(name, fullPath, depth, folder.ScannedBytes, settled,
                         settled && !folder.Incomplete, canExpand, isExpanded));
 
-                    if (showRecent)
+                    if (isExpanded)
                     {
-                        foreach (var child in activeChildren!)
-                        {
-                            AddRow(child, _builder.GetName(child), fullPath, depth + 1);
-                        }
-                    }
-
-                    if (manuallyExpanded)
-                    {
-                        var children = Enumerable.Range(folder.FirstChild, Math.Min(folder.ChildCount, limit));
-                        foreach (var child in children.OrderBy(_builder.GetName, StringComparer.OrdinalIgnoreCase))
-                        {
-                            if (!showRecent || !activeChildren!.Contains(child))
-                            {
-                                AddRow(child, _builder.GetName(child), fullPath, depth + 1);
-                            }
-                        }
+                        AddChildren(folder, fullPath, depth + 1);
                     }
                 }
             }
-        }
-
-        private Dictionary<int, List<int>> GetRecentBranches(string path, int parent, IReadOnlyList<string> recentPaths)
-        {
-            var branches = new Dictionary<int, List<int>>();
-            if (parent < 0 || recentPaths.Count == 0)
-            {
-                return branches;
-            }
-
-            var prefix = Path.EndsInDirectorySeparator(path) ? path : path + Path.DirectorySeparatorChar;
-            foreach (var recentPath in recentPaths)
-            {
-                if (!recentPath.StartsWith(prefix, StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                for (var child = FindNode(recentPath); child >= 0 && child != parent && child != _root; child = _folders[child].Parent)
-                {
-                    var ancestor = _folders[child].Parent;
-                    if (!branches.TryGetValue(ancestor, out var children))
-                    {
-                        children = [];
-                        branches.Add(ancestor, children);
-                    }
-
-                    if (!children.Contains(child))
-                    {
-                        children.Add(child);
-                    }
-                }
-            }
-
-            return branches;
         }
 
         private int FindNode(string path)

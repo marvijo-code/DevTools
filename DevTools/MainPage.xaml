@@ -902,6 +902,8 @@
                                   OffContent="Logical file size"
                                   OnContent="Attributed allocation"
                                   IsOn="{Binding FolderBrowserUseAllocation, Mode=TwoWay}" />
+                    <CheckBox Content="Show system files"
+                              IsChecked="{Binding FolderBrowserShowSystemFiles, Mode=TwoWay}" />
                     <TextBlock Text="{Binding FolderBrowserSummary}"
                                TextWrapping="WrapWholeWords"
                                FontSize="12"

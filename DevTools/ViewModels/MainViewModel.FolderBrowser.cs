@@ -104,6 +104,7 @@ public sealed partial class MainViewModel
     private readonly ObservableCollection<FolderBrowserRow> _folderBrowserRows = [];
     private readonly ObservableCollection<FolderBrowserDrive> _folderBrowserDrives = [];
     private readonly HashSet<string> _folderBrowserExpanded = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _folderBrowserCollapsed = new(StringComparer.Ordinal);
     private readonly Dictionary<string, CompletedFolderSize> _folderBrowserCompletedSizes = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ParallelFolderWalker.LogicalFolderWalk> _folderBrowserLiveWalks = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long> _folderBrowserQuickSizes = new(StringComparer.Ordinal);
@@ -206,6 +207,7 @@ public sealed partial class MainViewModel
         }
 
         ClearLiveFolderSizes();
+        _folderBrowserCollapsed.Clear();
         _folderBrowserPreview = null;
         _folderBrowserQuickSizes.Clear();
         _folderBrowserScannedRootBytes = 0;
@@ -336,19 +338,35 @@ public sealed partial class MainViewModel
             return;
         }
 
+        if (_folderBrowserFileTree is null)
+        {
+            var row = _folderBrowserRows.FirstOrDefault(candidate => candidate.Path == path && candidate.CanExpand);
+            if (row is null)
+            {
+                return;
+            }
+
+            if (row.IsExpanded)
+            {
+                _folderBrowserExpanded.Remove(path);
+                _folderBrowserCollapsed.Add(path);
+            }
+            else
+            {
+                _folderBrowserCollapsed.Remove(path);
+                _folderBrowserExpanded.Add(path);
+            }
+
+            RebuildFolderBrowserPreview();
+            return;
+        }
+
         if (!_folderBrowserExpanded.Remove(path))
         {
             _folderBrowserExpanded.Add(path);
         }
 
-        if (_folderBrowserFileTree is null)
-        {
-            RebuildFolderBrowserPreview();
-        }
-        else
-        {
-            RebuildFolderBrowserRows();
-        }
+        RebuildFolderBrowserRows();
     }
 
     private void RefreshFolderBrowserDrives(IReadOnlyList<string> roots, string? completedRoot = null, bool scanCompleted = false)
@@ -428,6 +446,7 @@ public sealed partial class MainViewModel
         if (!keepPreview)
         {
             ClearLiveFolderSizes();
+            _folderBrowserCollapsed.Clear();
             _folderBrowserPreview = null;
             _folderBrowserQuickSizes.Clear();
             _folderBrowserScannedRootBytes = 0;
@@ -521,7 +540,7 @@ public sealed partial class MainViewModel
         }, cancellationToken);
     }
 
-    private void RebuildFolderBrowserPreview()
+    private void RebuildFolderBrowserPreview(IReadOnlyList<FolderBrowserLiveSize>? recent = null)
     {
         if (_folderBrowserPreview is not { } preview)
         {
@@ -531,7 +550,9 @@ public sealed partial class MainViewModel
         var driveRoot = Path.GetPathRoot(_folderBrowserPath);
         var live = !FolderBrowserUseAllocation && driveRoot is not null &&
             _folderBrowserLiveWalks.TryGetValue(driveRoot, out var walk)
-            ? walk.Capture(_folderBrowserPath, preview.FolderNames, _folderBrowserExpanded, FolderBrowserMaxRows)
+            ? walk.Capture(_folderBrowserPath, preview.FolderNames, _folderBrowserExpanded,
+                (recent ?? _folderBrowserLiveSizes).Select(folder => folder.Path).ToArray(),
+                _folderBrowserCollapsed, FolderBrowserMaxRows)
             : null;
 
         var rows = new List<FolderBrowserRow>(live?.Rows.Count ?? preview.FolderNames.Count);
@@ -589,12 +610,12 @@ public sealed partial class MainViewModel
             canExpand: live?.CanExpand ?? false, isExpanded: live?.IsExpanded ?? false, isFile: false, scannedBytes);
     }
 
-    private void ApplyLiveFolderSizes(IReadOnlyList<LiveFolderSize> subfolders)
+    private bool TryShowLiveFolderSizes(IReadOnlyList<LiveFolderSize> subfolders)
     {
         if (subfolders.Count == 0 || FolderBrowserUseAllocation || _folderBrowserFileTree is not null ||
             _folderBrowserPreview is null || _folderBrowserPath.Length == 0)
         {
-            return;
+            return false;
         }
 
         var prefix = Path.EndsInDirectorySeparator(_folderBrowserPath)
@@ -619,19 +640,26 @@ public sealed partial class MainViewModel
 
         if (rows.Count == 0)
         {
-            return;
+            return false;
         }
 
         var published = rows.Count;
-        var latestPath = rows[0].Path;
-        var ancestor = _folderBrowserRows.LastOrDefault(row => row.CanOpen && !row.IsFile &&
-            latestPath.StartsWith(row.Path + Path.DirectorySeparatorChar, StringComparison.Ordinal));
-        var parentBytes = ancestor?.SizeBytes ?? ancestor?.ScannedBytes;
         rows.AddRange(_folderBrowserLiveSizes.Take(FolderBrowserLiveSizeLimit - published));
+        RebuildFolderBrowserPreview(rows);
         SetLiveFolderSizes(rows);
+
+        var latest = rows[0];
+        var ancestors = _folderBrowserRows.Where(row => row.CanOpen && !row.IsFile &&
+            latest.Path.StartsWith(row.Path + Path.DirectorySeparatorChar, StringComparison.Ordinal)).ToArray();
+        var ancestor = ancestors.LastOrDefault();
+        var parentBytes = ancestor?.SizeBytes ?? ancestor?.ScannedBytes;
         var parent = parentBytes is long measured ? $", {measured:N0} B in '{ancestor!.Name}'" : string.Empty;
+        var expectedParents = latest.Name.Count(character => character == Path.DirectorySeparatorChar);
+        var measuredParents = ancestors.Count(row => (row.SizeBytes ?? row.ScannedBytes) >= latestBytes);
         AppLog.Info($"Folder Browser published {published:N0} live exact subfolder sizes under {_folderBrowserPath} " +
-            $"({latestBytes:N0} B in the latest folder{parent}, {_folderBrowserScannedRootBytes:N0} B in its browser root).");
+            $"({latestBytes:N0} B in the latest folder{parent}, {_folderBrowserScannedRootBytes:N0} B in its browser root, " +
+            $"{measuredParents}/{expectedParents} parent rows with sizes in the main list).");
+        return true;
     }
 
     private void ClearLiveFolderSizes()
@@ -653,7 +681,8 @@ public sealed partial class MainViewModel
         }
     }
 
-    private void ApplyFolderScanProgress(IReadOnlyList<CompletedFolderSize> completed, ParallelFolderWalker.LogicalFolderWalk? live)
+    private void ApplyFolderScanProgress(IReadOnlyList<CompletedFolderSize> completed,
+        ParallelFolderWalker.LogicalFolderWalk? live, IReadOnlyList<LiveFolderSize> subfolders)
     {
         foreach (var folder in completed)
         {
@@ -665,8 +694,9 @@ public sealed partial class MainViewModel
             _folderBrowserLiveWalks[live.ScanRoot] = live;
         }
 
-        if (_folderBrowserFileTree is null && (completed.Count > 0 || (live is not null && !FolderBrowserUseAllocation &&
-            string.Equals(live.ScanRoot, Path.GetPathRoot(_folderBrowserPath), StringComparison.OrdinalIgnoreCase))))
+        if (!TryShowLiveFolderSizes(subfolders) && _folderBrowserFileTree is null &&
+            (completed.Count > 0 || (live is not null && !FolderBrowserUseAllocation &&
+                string.Equals(live.ScanRoot, Path.GetPathRoot(_folderBrowserPath), StringComparison.OrdinalIgnoreCase))))
         {
             RebuildFolderBrowserPreview();
         }

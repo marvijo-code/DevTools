@@ -592,6 +592,7 @@ public sealed partial class MainViewModel : ObservableObject
             _folderBrowserCompletedSizes.Clear();
             _folderBrowserLiveWalks.Clear();
             _folderBrowserQuickSizes.Clear();
+            _folderBrowserCollapsed.Clear();
             _folderBrowserScannedRootBytes = 0;
             ClearLiveFolderSizes();
             SetProperty(ref _diskUsageAnalysis, "Scanning disk usage and streaming results as sections complete.",
@@ -633,8 +634,7 @@ public sealed partial class MainViewModel : ObservableObject
                     _folderBrowserLiveWalks.Remove(completedRoot);
                 }
 
-                ApplyFolderScanProgress(update.CompletedFolders, update.LiveWalk);
-                ApplyLiveFolderSizes(update.LiveSubfolders);
+                ApplyFolderScanProgress(update.CompletedFolders, update.LiveWalk, update.LiveSubfolders);
             });
 
             var snapshot = await _diskUsageAnalyzer.CaptureAsync(progress, cancellationToken);

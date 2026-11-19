@@ -269,7 +269,8 @@ public sealed class FolderFileListingTests
             Assert.Equal(8204, early.LogicalBytes);
             Assert.False(early.AllocationAttempted);
             var liveView = Assert.IsType<ParallelFolderWalker.LogicalFolderWalk>(liveWalk)
-                .Capture(fixture.FullName, ["child"], new HashSet<string> { child.FullName, nested.FullName }, 200);
+                .Capture(fixture.FullName, ["child"], new HashSet<string> { child.FullName, nested.FullName },
+                    [], new HashSet<string>(), 200);
             Assert.Equal(8204, liveView.ScannedBytes);
             Assert.Collection(liveView.Rows,
                 row => { Assert.Equal(8204, row.ScannedBytes); Assert.True(row.HasExactSize); },
@@ -320,12 +321,14 @@ public sealed class FolderFileListingTests
         walk.FinishListing(0, outer, 1, 3, incomplete: false);
         var inner = builder.AppendEnumeratedChildren(outer, ["inner"]);
         walk.FinishListing(outer, inner, 1, 5, incomplete: false);
-        var leaf = builder.AppendEnumeratedChildren(inner, ["leaf", "sibling"]);
-        walk.FinishListing(inner, leaf, 2, 7, incomplete: false);
-        walk.FinishListing(leaf, 0, 0, 11, incomplete: false);
+        var sibling = builder.AppendEnumeratedChildren(inner, ["sibling", "leaf"]);
+        walk.FinishListing(inner, sibling, 2, 7, incomplete: false);
+        walk.FinishListing(sibling + 1, 0, 0, 11, incomplete: false);
 
-        Assert.Equal(new LiveFolderSize(Path.Join(innerPath, "leaf"), 11), Assert.Single(walk.Drain()));
-        var reading = walk.Capture(root, ["outer"], expanded, 200);
+        var leafPath = Path.Join(innerPath, "leaf");
+        Assert.Equal(new LiveFolderSize(leafPath, 11), Assert.Single(walk.Drain()));
+        var noOverrides = new HashSet<string>();
+        var reading = walk.Capture(root, ["outer"], expanded, [], noOverrides, 200);
         Assert.Equal(26, reading.ScannedBytes);
         Assert.Equal(new long[] { 23, 18, 11, 0 }, reading.Rows.Select(row => row.ScannedBytes));
         Assert.Equal(new[] { 0, 1, 2, 2 }, reading.Rows.Select(row => row.Depth));
@@ -333,10 +336,22 @@ public sealed class FolderFileListingTests
         Assert.False(reading.Rows[1].IsSettled);
         Assert.True(reading.Rows[2].HasExactSize);
 
-        walk.FinishListing(leaf + 1, 0, 0, 13, incomplete: true);
+        var revealed = walk.Capture(root, ["unrelated"], noOverrides, [leafPath], noOverrides, 1);
+        Assert.Equal(new[] { "outer", "inner", "leaf", "unrelated" }, revealed.Rows.Select(row => row.Name));
+        Assert.Equal(new[] { 0, 1, 2, 0 }, revealed.Rows.Select(row => row.Depth));
+        Assert.Equal(new long[] { 23, 18, 11, 0 }, revealed.Rows.Select(row => row.ScannedBytes));
+        Assert.True(revealed.Rows[0].IsExpanded);
+        Assert.True(revealed.Rows[1].IsExpanded);
+
+        var collapsed = walk.Capture(root, ["outer"], noOverrides, [leafPath], new HashSet<string> { innerPath }, 1);
+        Assert.Equal(new[] { "outer", "inner" }, collapsed.Rows.Select(row => row.Name));
+        Assert.Equal(18, collapsed.Rows[1].ScannedBytes);
+        Assert.False(collapsed.Rows[1].IsExpanded);
+
+        walk.FinishListing(sibling, 0, 0, 13, incomplete: true);
 
         Assert.Empty(walk.Drain());
-        var settled = walk.Capture(root, ["outer"], expanded, 200);
+        var settled = walk.Capture(root, ["outer"], expanded, [], noOverrides, 200);
         Assert.Equal(39, settled.ScannedBytes);
         Assert.Equal(new long[] { 36, 31, 11, 13 }, settled.Rows.Select(row => row.ScannedBytes));
         Assert.All(settled.Rows, row => Assert.True(row.IsSettled));

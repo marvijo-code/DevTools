@@ -789,6 +789,7 @@ public sealed partial class MainPage : Page
 
     private void RegisterZoomKeyboardAccelerators()
     {
+        KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
         RegisterZoomAccelerator(VirtualKey.Add, VirtualKeyModifiers.Control, zoomIn: true);
         RegisterZoomAccelerator(VirtualKey.Subtract, VirtualKeyModifiers.Control, zoomIn: false);
     }

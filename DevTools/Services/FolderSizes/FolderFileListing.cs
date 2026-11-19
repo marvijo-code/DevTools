@@ -20,7 +20,8 @@ internal readonly record struct FolderFileResult(FolderFileRequest Folder, Folde
 
 internal static class FolderFileListing
 {
-
+    private const int MinimumFilesForParallelRead = 1024;
+    private const int MaximumConcurrentReads = 4;
     private static readonly TimeSpan MinimumUpdateInterval = TimeSpan.FromMilliseconds(50);
 
     private static readonly EnumerationOptions ListingOptions = new()
@@ -30,9 +31,14 @@ internal static class FolderFileListing
         BufferSize = 16 * 1024
     };
 
+    internal static IAsyncEnumerable<IReadOnlyList<FolderFileResult>> ReadBatchesAsync(
+        IReadOnlyList<FolderFileRequest> folders, int limit, CancellationToken cancellationToken) =>
+        ReadBatchesAsync(folders, (path, token) => ReadLargest(path, limit, token), cancellationToken,
+            () => PlanReaders(folders));
+
     internal static async IAsyncEnumerable<IReadOnlyList<FolderFileResult>> ReadBatchesAsync(
         IReadOnlyList<FolderFileRequest> folders, Func<string, CancellationToken, FolderFileSnapshot?> read,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        [EnumeratorCancellation] CancellationToken cancellationToken, Func<int>? selectReaders = null)
     {
         if (folders.Count == 0)
         {
@@ -53,17 +59,39 @@ internal static class FolderFileListing
         var channel = Channel.CreateUnbounded<FolderFileResult>(new UnboundedChannelOptions
         {
             SingleReader = true,
-            SingleWriter = true
+            SingleWriter = selectReaders is null
         });
-        var producer = Task.Run(() =>
+
+        void ReadFolder(FolderFileRequest folder, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            var listing = read(folder.Path, token);
+            channel.Writer.TryWrite(new FolderFileResult(folder, listing));
+        }
+
+        var producer = Task.Run(async () =>
         {
             try
             {
-                foreach (var folder in folders)
+                var token = stopped.Token;
+                token.ThrowIfCancellationRequested();
+                var readers = Math.Clamp(selectReaders?.Invoke() ?? 1, 1, Math.Min(folders.Count, MaximumConcurrentReads));
+                if (readers == 1)
                 {
-                    stopped.Token.ThrowIfCancellationRequested();
-                    var listing = read(folder.Path, stopped.Token);
-                    channel.Writer.TryWrite(new FolderFileResult(folder, listing));
+                    foreach (var folder in folders)
+                    {
+                        ReadFolder(folder, token);
+                    }
+                }
+                else
+                {
+                    await Parallel.ForAsync(0, folders.Count,
+                        new ParallelOptions { MaxDegreeOfParallelism = readers, CancellationToken = token },
+                        (index, workerToken) =>
+                        {
+                            ReadFolder(folders[index], workerToken);
+                            return ValueTask.CompletedTask;
+                        }).ConfigureAwait(false);
                 }
 
                 channel.Writer.Complete();
@@ -104,6 +132,29 @@ internal static class FolderFileListing
             stopped.Cancel();
             await producer.ConfigureAwait(false);
         }
+    }
+
+    private static int PlanReaders(IReadOnlyList<FolderFileRequest> folders)
+    {
+        var largeFolders = folders.Count(folder => folder.FileCount >= MinimumFilesForParallelRead);
+        if (largeFolders < 2)
+        {
+            return 1;
+        }
+
+        var readers = Math.Min(largeFolders, ScanResources.Capture().WalkWorkerCount(seekPenalty: false, prioritize: true));
+        if (readers < 2)
+        {
+            return 1;
+        }
+
+        // Requests in a batch come from the same folder tree. Probe the first folder's actual volume.
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
+        var firstPath = folders[0].Path;
+        var volume = Path.GetPathRoot(firstPath) is { } root
+            ? WindowsVolumePaths.GetContainingVolumeRoot(firstPath, root)
+            : null;
+        return ScanResources.ReadSeekPenalty(volume) is false ? readers : 1;
     }
 
     internal static FolderPreview? ReadChildFolders(string folder, int limit, CancellationToken cancellationToken)
@@ -154,6 +205,7 @@ internal static class FolderFileListing
     {
         cancellationToken.ThrowIfCancellationRequested();
         var largest = new TopNAccumulator<string>(limit);
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
         string? directory = null;
         long totalBytes = 0;
         long fileCount = 0;

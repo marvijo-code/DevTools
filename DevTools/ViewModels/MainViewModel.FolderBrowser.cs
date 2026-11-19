@@ -718,8 +718,7 @@ public sealed partial class MainViewModel
     {
         try
         {
-            await foreach (var ready in FolderFileListing.ReadBatchesAsync(folders,
-                static (path, token) => FolderFileListing.ReadLargest(path, FolderBrowserMaxFiles, token), cancellationToken))
+            await foreach (var ready in FolderFileListing.ReadBatchesAsync(folders, FolderBrowserMaxFiles, cancellationToken))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 foreach (var (folder, listing) in ready)

@@ -107,6 +107,75 @@ public sealed class FolderFileListingTests
     }
 
     [Fact]
+    public async Task ReadBatchesAsync_ParallelReadersCanPublishWhileTheFirstFolderIsBlocked()
+    {
+        using var blocked = new ManualResetEventSlim();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        FolderFileRequest[] folders = [new(1, "blocked", 0, 0), new(2, "ready", 0, 0), new(3, "later", 0, 0)];
+        FolderFileSnapshot Snapshot(string path, CancellationToken token)
+        {
+            if (path == "blocked")
+            {
+                blocked.Wait(token);
+            }
+
+            return new FolderFileSnapshot([], 0, 0);
+        }
+
+        await using var batches = FolderFileListing.ReadBatchesAsync(folders, Snapshot, deadline.Token, static () => 2)
+            .GetAsyncEnumerator();
+        Assert.True(await batches.MoveNextAsync());
+        var completed = batches.Current.Select(result => result.Folder.Node).ToList();
+        Assert.DoesNotContain(1, completed);
+        blocked.Set();
+
+        while (await batches.MoveNextAsync())
+        {
+            completed.AddRange(batches.Current.Select(result => result.Folder.Node));
+        }
+
+        Assert.Equal([1, 2, 3], completed.Order());
+    }
+
+    [Fact]
+    public async Task ReadBatchesAsync_ParallelFailureCancelsTheOtherReader()
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var started = new ManualResetEventSlim();
+        using var blocked = new ManualResetEventSlim();
+        var failure = new InvalidOperationException("Folder reader failed.");
+        var readerCancelled = false;
+        FolderFileRequest[] folders = [new(1, "blocked", 0, 0), new(2, "failure", 0, 0)];
+        FolderFileSnapshot Snapshot(string path, CancellationToken token)
+        {
+            if (path == "failure")
+            {
+                started.Wait(token);
+                throw failure;
+            }
+
+            started.Set();
+            try
+            {
+                blocked.Wait(token);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                readerCancelled = true;
+                throw;
+            }
+
+            return new FolderFileSnapshot([], 0, 0);
+        }
+
+        await using var batches = FolderFileListing.ReadBatchesAsync(folders, Snapshot, deadline.Token, static () => 2)
+            .GetAsyncEnumerator();
+        var observed = await Assert.ThrowsAsync<InvalidOperationException>(() => batches.MoveNextAsync().AsTask());
+        Assert.Same(failure, observed);
+        Assert.True(readerCancelled);
+    }
+
+    [Fact]
     public void ReadChildFolders_ReturnsASortedBoundedPreviewOfImmediateDirectories()
     {
         var fixture = Directory.CreateTempSubdirectory("devtools-folder-preview-");

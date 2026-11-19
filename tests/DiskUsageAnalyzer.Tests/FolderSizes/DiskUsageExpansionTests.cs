@@ -225,6 +225,96 @@ public sealed class DiskUsageExpansionTests
     }
 
     [Fact]
+    public async Task PublishedVolumeTree_CompletesSharedRequestsAndCancelsTheRedundantWalk()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-volume-wins-");
+        var pending = new TaskCompletionSource<FolderTree>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var workerToken = CancellationToken.None;
+        var calls = 0;
+        var analyzer = new DevTools.Services.DiskUsageAnalyzer((_, token, _) =>
+        {
+            calls++;
+            workerToken = token;
+            return pending.Task.WaitAsync(token);
+        });
+
+        try
+        {
+            var root = fixture.Root.FullName;
+            var generation = analyzer.ReplaceVolumeInventory([new DriveDescriptor(root, "Fixture", "NTFS", null)], []);
+            var priority = analyzer.SizeFolderNowAsync(fixture.FullName, CancellationToken.None, measureAllocation: true);
+            var measurement = analyzer.MeasureDirectoryBytesAsync(fixture.FullName, CancellationToken.None);
+            var entry = DiskUsageEntry.CreateCompleted(fixture.FullName, true, null, "Pending");
+            var expansion = analyzer.ExpandEntryAsync(entry, CancellationToken.None);
+            Assert.Equal(1, calls);
+
+            var child = Path.Combine(fixture.FullName, "child");
+            var builder = new FolderTreeBuilder(root, trackAllocation: true);
+            builder.AddFilesToFolder(builder.AddFolder(child), 73, 1, 4096);
+            builder.AddFilesToFolder(builder.AddFolder(fixture.FullName + "-sibling"), 256, 1, 4096);
+            var volume = builder.Build("Volume fixture", TimeSpan.Zero);
+            analyzer.PublishVolumeTree(generation, root, volume);
+
+            Assert.True(await priority.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(73, await measurement.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(child, Assert.Single(await expansion.WaitAsync(TimeSpan.FromSeconds(5))).Path);
+            Assert.True(workerToken.IsCancellationRequested);
+            Assert.False(pending.Task.IsCompleted);
+            Assert.True(analyzer.TryFindNode(fixture.FullName, out var tree, out _));
+            Assert.Same(volume, tree);
+        }
+        finally
+        {
+            pending.TrySetCanceled();
+            fixture.Delete();
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PublishedVolumeTree_WaitsForCompleteCoverageInTheRequestedMode(bool measureAllocation)
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-volume-coverage-");
+        var pending = new TaskCompletionSource<FolderTree>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var analyzer = new DevTools.Services.DiskUsageAnalyzer((_, token, _) => pending.Task.WaitAsync(token));
+        try
+        {
+            var root = fixture.Root.FullName;
+            var path = fixture.FullName;
+            var generation = analyzer.ReplaceVolumeInventory([new DriveDescriptor(root, "Fixture", "NTFS", null)], []);
+            var priority = analyzer.SizeFolderNowAsync(path, CancellationToken.None, measureAllocation);
+            var measurement = analyzer.MeasureDirectoryBytesAsync(path, CancellationToken.None);
+
+            var partial = new FolderTreeBuilder(root, trackAllocation: true);
+            var partialNode = partial.AddFolder(path);
+            partial.AddFilesToFolder(partialNode, 17, 1, 4096);
+            if (measureAllocation)
+            {
+                partial.MarkIncompleteAllocation(partialNode);
+            }
+            else
+            {
+                partial.MarkIncompleteDirectory(partialNode);
+            }
+
+            analyzer.PublishVolumeTree(generation, root, partial.Build("Partial fixture", TimeSpan.Zero));
+
+            var complete = new FolderTreeBuilder(root, trackAllocation: true);
+            complete.AddFilesToFolder(complete.AddFolder(path), 73, 1, 4096);
+            analyzer.PublishVolumeTree(generation, root, complete.Build("Complete fixture", TimeSpan.Zero));
+
+            Assert.True(await priority.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(73, await measurement.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally
+        {
+            pending.TrySetCanceled();
+            fixture.Delete();
+        }
+    }
+
+    [Fact]
     public async Task CancelingLastRequest_CancelsTheWalkAndAllowsRetry()
     {
         var fixture = Directory.CreateTempSubdirectory("devtools-shared-walk-retry-");

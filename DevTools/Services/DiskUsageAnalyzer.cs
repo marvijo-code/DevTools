@@ -281,6 +281,14 @@ public sealed class DiskUsageAnalyzer
             else
             {
                 _trees[root] = tree;
+                foreach (var (key, walk) in _folderWalks)
+                {
+                    if (key.InventoryVersion == inventoryVersion && !walk.Worker.IsCompleted &&
+                        CanSupplyFolder(tree, key.Path, key.Allocation))
+                    {
+                        walk.PublishedTree.TrySetResult(tree);
+                    }
+                }
             }
 
             // Old priority scans can fill gaps while a refresh is pending. The new volume
@@ -631,6 +639,13 @@ public sealed class DiskUsageAnalyzer
                 return null;
             }
 
+            var root = Path.GetPathRoot(normalized);
+            if (root is not null && _trees.TryGetValue(root, out var volumeTree) &&
+                CanSupplyFolder(volumeTree, normalized, measureAllocation))
+            {
+                return volumeTree;
+            }
+
             if (cacheResult && _overlayTrees.TryGetValue(normalized, out var cachedResult) &&
                 cachedResult.InventoryVersion == inventoryVersion &&
                 (cachedResult.AllocationRequested || (!measureAllocation && cachedResult.Tree.Find(normalized) >= 0)))
@@ -668,7 +683,8 @@ public sealed class DiskUsageAnalyzer
 
         try
         {
-            var tree = await walk.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            var completed = await walk.FirstResult.WaitAsync(cancellationToken).ConfigureAwait(false);
+            var tree = await completed.ConfigureAwait(false);
             lock (_treesLock)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -677,7 +693,7 @@ public sealed class DiskUsageAnalyzer
                     return null;
                 }
 
-                if (cacheResult &&
+                if (cacheResult && ReferenceEquals(completed, walk.Worker) &&
                     (!_overlayTrees.TryGetValue(normalized, out var cached) || cached.InventoryVersion != inventoryVersion ||
                      !cached.AllocationRequested))
                 {
@@ -703,7 +719,7 @@ public sealed class DiskUsageAnalyzer
             {
                 // Keep cancellation and asynchronous cleanup outside the tree lock.
                 using var source = walk.Cancellation;
-                if (!walk.Task.IsCompleted)
+                if (!walk.Worker.IsCompleted)
                 {
                     try
                     {
@@ -717,7 +733,7 @@ public sealed class DiskUsageAnalyzer
 
                 try
                 {
-                    await walk.Task.ConfigureAwait(false);
+                    await walk.Worker.ConfigureAwait(false);
                 }
                 catch
                 {
@@ -727,10 +743,26 @@ public sealed class DiskUsageAnalyzer
         }
     }
 
-    private sealed class FolderWalk(Task<FolderTree> task, CancellationTokenSource cancellation)
+    private static bool CanSupplyFolder(FolderTree tree, string path, bool measureAllocation)
     {
-        public Task<FolderTree> Task { get; } = task;
-        public CancellationTokenSource Cancellation { get; } = cancellation;
+        var node = tree.Find(path);
+        return node >= 0 && !tree.HasIncompleteScan(node) &&
+            (!measureAllocation || (tree.GetAllocatedBytes(node).HasValue && !tree.HasIncompleteAllocation(node)));
+    }
+
+    private sealed class FolderWalk
+    {
+        public FolderWalk(Task<FolderTree> worker, CancellationTokenSource cancellation)
+        {
+            Worker = worker;
+            Cancellation = cancellation;
+            FirstResult = Task.WhenAny(worker, PublishedTree.Task);
+        }
+
+        public Task<FolderTree> Worker { get; }
+        public TaskCompletionSource<FolderTree> PublishedTree { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<Task<FolderTree>> FirstResult { get; }
+        public CancellationTokenSource Cancellation { get; }
         public int Waiters { get; set; }
     }
 
@@ -773,7 +805,8 @@ public sealed class DiskUsageAnalyzer
             var scanPath = ResolveWalkPath(path, out var inventoryVersion);
             var walked = await WalkFolderSharedAsync(scanPath, inventoryVersion, measureAllocation: false, cacheResult: false,
                 cancellationToken).ConfigureAwait(false);
-            return walked?.TotalBytes;
+            var walkedNode = walked?.Find(scanPath) ?? -1;
+            return walkedNode < 0 ? null : walked!.GetTotalBytes(walkedNode);
         }
         catch (OperationCanceledException)
         {

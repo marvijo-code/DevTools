@@ -139,15 +139,7 @@ public sealed partial class MainViewModel
                 return;
             }
 
-            if (value)
-            {
-                _ = BrowseFolderAsync(_folderBrowserPath);
-            }
-            else
-            {
-                _folderBrowserClickCts?.Cancel();
-                BrowseFolder(_folderBrowserPath);
-            }
+            _ = BrowseFolderAsync(_folderBrowserPath);
         }
     }
 
@@ -157,7 +149,8 @@ public sealed partial class MainViewModel
     private bool BrowseFolder(string? path, bool skipUnchanged)
     {
         if (string.IsNullOrWhiteSpace(path) ||
-            !_diskUsageAnalyzer.TryFindNode(path, FolderBrowserUseAllocation, out var tree, out var node) || tree is null)
+            !_diskUsageAnalyzer.TryFindNode(path, FolderBrowserUseAllocation, out var tree, out var node) || tree is null ||
+            (FolderBrowserUseAllocation && !tree.GetAllocatedBytes(node).HasValue))
         {
             return false;
         }
@@ -220,10 +213,16 @@ public sealed partial class MainViewModel
         var measureAllocation = FolderBrowserUseAllocation;
         if (_diskUsageAnalyzer.TryFindNode(path, measureAllocation, out var tree, out var node) && tree is not null)
         {
-            ShowFolderBrowserLocation(tree, node, skipUnchanged: false);
-            // A volume root is already covered by the all-drive scan.
-            if (!measureAllocation || node == 0 || tree.GetAllocatedBytes(node).HasValue)
+            if (!measureAllocation || tree.GetAllocatedBytes(node).HasValue)
             {
+                ShowFolderBrowserLocation(tree, node, skipUnchanged: false);
+                return;
+            }
+
+            if (node == 0)
+            {
+                // The drive scan already attempted allocation for this volume.
+                ShowPendingBrowserDrive(path, scanCompleted: true);
                 return;
             }
         }
@@ -235,12 +234,13 @@ public sealed partial class MainViewModel
         }
 
         var cts = _folderBrowserClickCts = new CancellationTokenSource();
-        _showFolderBrowserVolumeSummary = false;
-        _folderBrowserSummary = $"Sizing {path} first. The all-drive scan pauses until this finishes.";
-        RaisePropertyChanged(nameof(FolderBrowserSummary));
+        var status = $"Sizing {path} first. The all-drive scan pauses until this finishes.";
+        ShowFolderBrowserPreview(path, status, showVolumeSummary: false);
+
         try
         {
-            var sized = await _diskUsageAnalyzer.SizeFolderNowAsync(path, cts.Token, measureAllocation);
+            var token = cts.Token;
+            var sized = await Task.Run(() => _diskUsageAnalyzer.SizeFolderNowAsync(path, token, measureAllocation), token);
             if (!cts.IsCancellationRequested && (!sized || !BrowseFolder(path)))
             {
                 _showFolderBrowserVolumeSummary = false;
@@ -256,6 +256,7 @@ public sealed partial class MainViewModel
             AppLog.Error($"Sizing clicked folder '{path}' failed.", ex);
             if (!cts.IsCancellationRequested)
             {
+                _showFolderBrowserVolumeSummary = false;
                 _folderBrowserSummary = $"Could not size {path}: {ex.Message}";
                 RaisePropertyChanged(nameof(FolderBrowserSummary));
             }
@@ -273,13 +274,19 @@ public sealed partial class MainViewModel
 
     public void BrowseFolderUp()
     {
-        if (!_canFolderBrowserGoUp ||
-            !_diskUsageAnalyzer.TryFindNode(_folderBrowserPath, FolderBrowserUseAllocation, out var tree, out var node) || tree is null)
+        if (!_canFolderBrowserGoUp)
         {
             return;
         }
 
-        _ = BrowseFolderAsync(tree.GetPath(tree.GetParent(node)));
+        var parent = _diskUsageAnalyzer.TryFindNode(_folderBrowserPath, FolderBrowserUseAllocation, out var tree, out var node) &&
+            tree is not null && node != 0
+            ? tree.GetPath(tree.GetParent(node))
+            : GetFolderBrowserParentPath(_folderBrowserPath);
+        if (!string.IsNullOrEmpty(parent))
+        {
+            _ = BrowseFolderAsync(parent);
+        }
     }
 
     /// <summary>Expands or collapses a folder row in place.</summary>
@@ -318,25 +325,52 @@ public sealed partial class MainViewModel
 
         if (roots.Count == 0)
         {
+            _folderBrowserClickCts?.Cancel();
             ShowPendingBrowserDrive(string.Empty, scanCompleted);
             return;
         }
 
-        var path = selectedRoot is not null && roots.Contains(selectedRoot, StringComparer.OrdinalIgnoreCase)
-            ? _folderBrowserPath
-            : roots[0];
-        var rootPath = Path.GetPathRoot(path)!;
-        if (!BrowseFolder(path, skipUnchanged: true) &&
-            (string.Equals(path, rootPath, StringComparison.OrdinalIgnoreCase) || !BrowseFolder(rootPath, skipUnchanged: true)))
+        var keepLocation = selectedRoot is not null && roots.Contains(selectedRoot, StringComparer.OrdinalIgnoreCase);
+        if (!keepLocation)
         {
-            ShowPendingBrowserDrive(rootPath, scanCompleted || completedRoot is not null);
+            _folderBrowserClickCts?.Cancel();
         }
+
+        var path = keepLocation ? _folderBrowserPath : roots[0];
+        if (BrowseFolder(path, skipUnchanged: true))
+        {
+            return;
+        }
+
+        var driveScanCompleted = scanCompleted || completedRoot is not null;
+        if (string.Equals(path, Path.GetPathRoot(path), StringComparison.OrdinalIgnoreCase))
+        {
+            ShowPendingBrowserDrive(path, driveScanCompleted);
+            return;
+        }
+
+        var status = _folderBrowserClickCts is { IsCancellationRequested: false } ? _folderBrowserSummary :
+            driveScanCompleted ? $"Folder sizes for {path} are unavailable." : $"Waiting for folder sizes in {path}.";
+        ShowFolderBrowserPreview(path, status, showVolumeSummary: false);
     }
 
     private void ShowPendingBrowserDrive(string path, bool scanCompleted = false)
     {
+        var status = string.IsNullOrEmpty(path)
+            ? "No local volumes are available."
+            : scanCompleted
+                ? $"Folder sizes for {path} are unavailable."
+                : $"Waiting for the drive scan of {path}.";
+        ShowFolderBrowserPreview(path, status, showVolumeSummary: true);
+    }
+
+    private static string? GetFolderBrowserParentPath(string path) =>
+        Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(path));
+
+    private void ShowFolderBrowserPreview(string path, string status, bool showVolumeSummary)
+    {
         var keepPreview = _folderBrowserFileTree is null && _folderBrowserFileLoadCts is not null &&
-            string.Equals(path, _folderBrowserPath, StringComparison.OrdinalIgnoreCase);
+            string.Equals(path, _folderBrowserPath, StringComparison.Ordinal);
         if (!keepPreview)
         {
             _folderBrowserExpanded.Clear();
@@ -348,13 +382,9 @@ public sealed partial class MainViewModel
         }
 
         _folderBrowserPath = path;
-        _canFolderBrowserGoUp = false;
-        _showFolderBrowserVolumeSummary = true;
-        _folderBrowserSummary = string.IsNullOrEmpty(path)
-            ? "No local volumes are available."
-            : scanCompleted
-                ? $"Folder sizes for {path} are unavailable."
-                : $"Waiting for the drive scan of {path}.";
+        _canFolderBrowserGoUp = !showVolumeSummary && !string.IsNullOrEmpty(GetFolderBrowserParentPath(path));
+        _showFolderBrowserVolumeSummary = showVolumeSummary;
+        _folderBrowserSummary = status;
         RaisePropertyChanged(nameof(FolderBrowserPath));
         RaisePropertyChanged(nameof(FolderBrowserSummary));
         RaisePropertyChanged(nameof(CanFolderBrowserGoUp));

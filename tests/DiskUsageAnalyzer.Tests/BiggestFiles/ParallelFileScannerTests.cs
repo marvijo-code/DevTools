@@ -40,18 +40,51 @@ public sealed class ParallelFileScannerTests : IDisposable
         WriteFile("sub/medium.bin", 5_000);
         WriteFile("sub/deep/large.bin", 9_000_000);
         WriteFile("sub/deep/huge.bin", 40_000_000);
+        var largestPath = Path.Combine(_root, "sub", "deep", "huge.bin");
+        var modified = new DateTime(2026, 2, 8, 12, 34, 56, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(largestPath, modified);
         WriteFile("other/mid.bin", 1_000_000);
 
         var scanner = new ParallelFileScanner();
-        var result = await scanner.ScanAsync(new BiggestFilesRequest(_root, TopCount: 3), progress: null, CancellationToken.None);
+        var progress = new RecordingProgress();
+        var result = await scanner.ScanAsync(new BiggestFilesRequest(_root, TopCount: 3), progress, CancellationToken.None);
 
         Assert.Equal("Parallel enumeration", result.EngineName);
         Assert.Equal(5, result.FilesSeen);
+        Assert.Equal(50_005_100, result.BytesSeen);
+        var done = Assert.Single(progress.Reports, report => report.IsCompleted);
+        Assert.Equal(result.FilesSeen, done.FilesSeen);
+        Assert.Equal(result.BytesSeen, done.BytesSeen);
         Assert.Equal(3, result.Top.Count);
         Assert.Equal(
             new[] { 40_000_000L, 9_000_000L, 1_000_000L },
             result.Top.Select(hit => hit.SizeBytes).ToArray());
-        Assert.EndsWith("huge.bin", result.Top[0].FullPath);
+        Assert.Equal(largestPath, result.Top[0].FullPath);
+        Assert.Equal(40_000_000, result.Top[0].AllocatedBytes);
+        Assert.Equal(new DateTimeOffset(modified), result.Top[0].ModifiedUtc);
+    }
+
+    [Fact]
+    public async Task FullQueue_VisitsNestedOverflowAndResumesItsParents()
+    {
+        var expectedBytes = 0L;
+        for (var index = 0; index < 18; index++)
+        {
+            var size = 100L + index;
+            WriteFile($"folder-{index:D2}/outer.bin", size);
+            WriteFile($"folder-{index:D2}/nested/inner.bin", size * 2);
+            expectedBytes += size * 3;
+        }
+
+        var largest = Path.Combine(_root, "folder-17", "nested", "inner.bin");
+        var result = await new ParallelFileScanner().ScanAsync(new BiggestFilesRequest(_root, TopCount: 3), null,
+                CancellationToken.None, sharedDirectoryLimit: 2)
+            .WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(36, result.FilesSeen);
+        Assert.Equal(expectedBytes, result.BytesSeen);
+        Assert.Equal([234L, 232L, 230L], result.Top.Select(hit => hit.SizeBytes));
+        Assert.Equal(largest, result.Top[0].FullPath);
     }
 
     [Fact]
@@ -94,5 +127,12 @@ public sealed class ParallelFileScannerTests : IDisposable
         Assert.Equal(5, result.Top.Count);
         Assert.Equal(20_000L, result.Top[0].SizeBytes);
         Assert.Equal(16_000L, result.Top[4].SizeBytes);
+    }
+
+    private sealed class RecordingProgress : IProgress<BiggestFilesProgress>
+    {
+        internal List<BiggestFilesProgress> Reports { get; } = [];
+
+        public void Report(BiggestFilesProgress value) => Reports.Add(value);
     }
 }

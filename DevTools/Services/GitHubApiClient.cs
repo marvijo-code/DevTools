@@ -8,7 +8,7 @@ using DevTools.Models;
 
 namespace DevTools.Services;
 
-public sealed class GitHubApiClient
+public sealed partial class GitHubApiClient
 {
     private enum AuthSource
     {
@@ -17,11 +17,6 @@ public sealed class GitHubApiClient
         GhCliToken
     }
 
-    private static readonly string[] GhExecutableCandidates =
-    [
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "GitHub CLI", "gh.exe"),
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "GitHub CLI", "gh.exe")
-    ];
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -38,25 +33,27 @@ public sealed class GitHubApiClient
         "github-actions"
     };
 
-    private static readonly Regex TargetProcessIdPattern = new(@"^(?<id>\d+)\s*-", RegexOptions.Compiled);
+    [GeneratedRegex(@"^(?<id>\d+)\s*-")]
+    private static partial Regex TargetProcessIdPattern();
 
-    private readonly HttpClient _httpClient;
+    private readonly Lazy<HttpClient> _httpClient = new(CreateHttpClient);
     private string? _token;
     private string? _ghExecutablePath;
     private string? _authenticatedLogin;
     private bool _isManualPatPinned;
     private AuthSource? _authSource;
 
-    public GitHubApiClient()
+    private static HttpClient CreateHttpClient()
     {
-        _httpClient = new HttpClient
+        var client = new HttpClient
         {
             BaseAddress = new Uri("https://api.github.com/")
         };
 
-        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("DevTools/1.0");
-        _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-        _httpClient.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("DevTools/1.0");
+        client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+        client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
+        return client;
     }
 
     public async Task<string> GetAuthSummaryAsync(CancellationToken cancellationToken)
@@ -403,7 +400,7 @@ public sealed class GitHubApiClient
             return null;
         }
 
-        var match = TargetProcessIdPattern.Match(title.Trim());
+        var match = TargetProcessIdPattern().Match(title.Trim());
         if (!match.Success)
         {
             return null;
@@ -616,7 +613,7 @@ public sealed class GitHubApiClient
 
         AddAuthHeader(request);
 
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        using var response = await _httpClient.Value.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadAsStringAsync(cancellationToken);
     }
@@ -626,7 +623,7 @@ public sealed class GitHubApiClient
         using var request = new HttpRequestMessage(HttpMethod.Get, relativeUrl);
         AddAuthHeader(request);
 
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        using var response = await _httpClient.Value.SendAsync(request, cancellationToken);
         var content = await response.Content.ReadAsStringAsync(cancellationToken);
 
         if (!response.IsSuccessStatusCode)
@@ -748,7 +745,13 @@ public sealed class GitHubApiClient
             return _ghExecutablePath;
         }
 
-        foreach (var candidate in GhExecutableCandidates.Where(File.Exists))
+        string[] candidates =
+        [
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "GitHub CLI", "gh.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "GitHub CLI", "gh.exe")
+        ];
+
+        foreach (var candidate in candidates.Where(File.Exists))
         {
             _ghExecutablePath = candidate;
             AppLog.Info($"Resolved gh executable from candidate path: {_ghExecutablePath}");

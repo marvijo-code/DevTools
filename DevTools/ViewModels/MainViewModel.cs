@@ -48,23 +48,25 @@ public sealed partial class MainViewModel : ObservableObject
     private DateTimeOffset _nextTimedRefreshAt = DateTimeOffset.MinValue;
     private readonly ProcessKillCatalog _processKillCatalog = new();
     private readonly ProcessKiller _processKiller = new();
-    private readonly GitHubApiClient _gitHubApiClient = new();
+    private readonly Lazy<GitHubApiClient> _gitHubApiClient;
     private readonly SemaphoreSlim _diskUsageRefreshGate = new(1, 1);
     private readonly SemaphoreSlim _killProcessesRefreshGate = new(1, 1);
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private readonly Dictionary<string, bool> _diskUsageSectionExpansionStates = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _diskUsageExpansionInProgress = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _diskUsageExpansionInProgress = new(StringComparer.Ordinal);
     private ProcessViewState _processViewState = new();
     private Dictionary<string, bool> _killProcessSectionExpansionStates => _processViewState.ExpandedSections;
     private readonly List<WorkflowRunItem> _allRuns = [];
+    private WorkflowRunItem[] _liveWorkflowRuns = [];
     private readonly ObservableCollection<DiskUsageSection> _diskUsageSections = [];
     private readonly ObservableCollection<ProcessKillSection> _killProcessSections = [];
     private readonly BiggestFilesEngine _biggestFilesEngine = new();
     private readonly SemaphoreSlim _biggestFilesGate = new(1, 1);
     private readonly ObservableCollection<BiggestFileEntry> _biggestFiles = [];
     private readonly List<BiggestFileEntry> _allBiggestFiles = [];
-    private readonly DiskCleanupService _diskCleanupService = new();
+    private readonly Lazy<DiskCleanupService> _diskCleanupService = new(static () => new DiskCleanupService());
     private readonly SemaphoreSlim _bulkCleanupGate = new(1, 1);
+    private Task? _bulkCleanupAvailabilityCheck;
     private CancellationTokenSource? _bulkCleanupCts;
 
     private string _ownerInput = string.Empty;
@@ -105,6 +107,7 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _runAsAdministrator = true;
     private bool _isBulkCleanupRunning;
     private string _bulkCleanupStatusText = "Not run yet.";
+    private string? _bulkCleanupUnavailableReason = "Checking cleanup requirements...";
     private string _bulkCleanupHeadline = "One button cleanup: package caches, stale build output, the intermediates of already-published video episodes, and crashed-git debris with expired agent checkpoints.";
     private string _bulkCleanupReportText = string.Empty;
     private bool _isLoadingSettings;
@@ -112,13 +115,18 @@ public sealed partial class MainViewModel : ObservableObject
     private string? _encryptedPersonalAccessToken;
     private int _diskUsageAnimationFrame;
 
-    public MainViewModel()
+    public MainViewModel() : this(null)
     {
-        _worktreeAnalyzer = new WorktreeAnalyzer(_gitHubApiClient, _diskUsageAnalyzer);
+    }
+
+    internal MainViewModel(Task<AppSettings?>? startupSettingsRead)
+    {
+        _gitHubApiClient = new Lazy<GitHubApiClient>(CreateGitHubApiClient);
+        _worktreeAnalyzer = new Lazy<WorktreeAnalyzer>(() => new WorktreeAnalyzer(_gitHubApiClient.Value, _diskUsageAnalyzer));
         _cleanupAdvisor = new CleanupAdvisor(_diskUsageAnalyzer);
         Repositories = [];
         Runs = [];
-        LoadSettings();
+        LoadSettings(startupSettingsRead);
     }
 
     public ObservableCollection<RepositoryDefinition> Repositories { get; }
@@ -186,6 +194,10 @@ public sealed partial class MainViewModel : ObservableObject
 
     public MainContentTab ActiveTab => _activeTab;
 
+    internal bool NeedsLiveDisplayUpdates =>
+        (IsWorkflowExplorerVisible && _liveWorkflowRuns.Length > 0) ||
+        (IsDiskUsageVisible && IsDiskUsageRefreshing);
+
     public ObservableCollection<BiggestFileEntry> BiggestFiles => _biggestFiles;
 
     public IReadOnlyList<int> BiggestFilesTopCountOptions => BiggestFilesTopCountChoices;
@@ -242,11 +254,11 @@ public sealed partial class MainViewModel : ObservableObject
     public bool HasBulkCleanupReport => !string.IsNullOrWhiteSpace(_bulkCleanupReportText);
 
     /// <summary>True when pwsh 7 and the cleanup script are both on this machine.</summary>
-    public bool IsBulkCleanupAvailable => _diskCleanupService.IsAvailable;
+    public bool IsBulkCleanupAvailable => _bulkCleanupUnavailableReason is null;
 
     public string BulkCleanupAvailabilityText =>
-        _diskCleanupService.GetUnavailableReason() ??
-        $"Runs {_diskCleanupService.ScriptPath} with the Caches, BuildArtifacts and PublishedVideos lanes.";
+        _bulkCleanupUnavailableReason ??
+        $"Runs {DiskCleanupService.DefaultScriptPath} with the Caches, BuildArtifacts and PublishedVideos lanes.";
 
     public string BulkCleanupButtonText => IsBulkCleanupRunning ? "Cleaning up..." : "Bulk Cleanup PC";
 
@@ -391,11 +403,11 @@ public sealed partial class MainViewModel : ObservableObject
             : $"Last refresh: {_lastRefreshAt.Value.LocalDateTime:yyyy-MM-dd HH:mm:ss}";
 
     public string VisibleRunsText =>
-        _allRuns.Count == Runs.Count
-            ? $"{Runs.Count} runs"
-            : $"{Runs.Count} of {_allRuns.Count} runs";
+        _lastRefreshAt is null
+            ? string.Empty
+            : _allRuns.Count == Runs.Count ? $"{Runs.Count} runs" : $"{Runs.Count} of {_allRuns.Count} runs";
 
-    public string RepositorySummaryText => $"{Repositories.Count} repo(s)";
+    public string RepositorySummaryText => _repositoriesLoaded ? $"{Repositories.Count} repo(s)" : string.Empty;
 
     public string RefreshIntervalSummary =>
         AutoRefreshEnabled
@@ -463,7 +475,7 @@ public sealed partial class MainViewModel : ObservableObject
         AppLog.Info("InitializeAsync started.");
         EnsureRepositoriesLoaded();
 
-        AuthMessage = await _gitHubApiClient.GetAuthSummaryAsync(cancellationToken);
+        AuthMessage = await _gitHubApiClient.Value.GetAuthSummaryAsync(cancellationToken);
         await RefreshAsync(cancellationToken);
         AppLog.Info("InitializeAsync completed.");
     }
@@ -473,14 +485,14 @@ public sealed partial class MainViewModel : ObservableObject
         AppLog.Info("ReloadAuthAsync started.");
         EnsureRepositoriesLoaded();
         AuthMessage = "Checking GitHub auth...";
-        AuthMessage = await _gitHubApiClient.ReloadAuthAsync(cancellationToken);
+        AuthMessage = await _gitHubApiClient.Value.ReloadAuthAsync(cancellationToken);
         AppLog.Info("ReloadAuthAsync completed.");
     }
 
     public bool LaunchGhLogin()
     {
         AppLog.Info("LaunchGhLogin requested.");
-        var launched = _gitHubApiClient.TryLaunchGhLogin();
+        var launched = _gitHubApiClient.Value.TryLaunchGhLogin();
         StatusMessage = launched
             ? "Opened gh auth login in a terminal window. Complete the browser sign-in, then click Reload Auth."
             : "GitHub CLI was not found. Install GitHub CLI first.";
@@ -496,7 +508,7 @@ public sealed partial class MainViewModel : ObservableObject
             return false;
         }
 
-        _gitHubApiClient.SetPersonalAccessToken(trimmed);
+        _gitHubApiClient.Value.SetPersonalAccessToken(trimmed);
         _encryptedPersonalAccessToken = ProtectSecret(trimmed);
         SaveSettings();
         AuthMessage = "Using manual PAT (default).";
@@ -507,7 +519,7 @@ public sealed partial class MainViewModel : ObservableObject
     public bool ClearPersonalAccessToken()
     {
         _encryptedPersonalAccessToken = null;
-        _gitHubApiClient.ClearPersonalAccessToken();
+        _gitHubApiClient.Value.ClearPersonalAccessToken();
         SaveSettings();
         AuthMessage = "No token configured. Paste a PAT and click Use PAT, or click Use gh Token for a temporary session token.";
         StatusMessage = "Manual PAT cleared.";
@@ -516,18 +528,43 @@ public sealed partial class MainViewModel : ObservableObject
 
     public async Task UseGhTokenAsync(CancellationToken cancellationToken)
     {
-        AuthMessage = await _gitHubApiClient.UseGhTokenAsync(cancellationToken);
+        AuthMessage = await _gitHubApiClient.Value.UseGhTokenAsync(cancellationToken);
         StatusMessage = "Using gh token for this session. Manual PAT remains preferred when set.";
     }
 
     public async Task EnsureDiskUsageLoadedAsync(CancellationToken cancellationToken)
     {
-        if (_hasDiskUsageSnapshot || IsDiskUsageRefreshing)
+        if (_bulkCleanupAvailabilityCheck is null || _bulkCleanupAvailabilityCheck.IsCompleted)
         {
-            return;
+            _bulkCleanupAvailabilityCheck = CheckBulkCleanupAvailabilityAsync();
         }
 
-        await RefreshDiskUsageAsync(cancellationToken);
+        var availabilityCheck = _bulkCleanupAvailabilityCheck;
+        if (!_hasDiskUsageSnapshot && !IsDiskUsageRefreshing)
+        {
+            await RefreshDiskUsageAsync(cancellationToken);
+        }
+
+        await availabilityCheck;
+    }
+
+    private async Task CheckBulkCleanupAvailabilityAsync()
+    {
+        string? reason;
+        try
+        {
+            reason = await Task.Run(() => _diskCleanupService.Value.GetUnavailableReason());
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Checking bulk cleanup requirements failed.", ex);
+            reason = "Could not check cleanup requirements.";
+        }
+
+        if (SetProperty(ref _bulkCleanupUnavailableReason, reason, nameof(BulkCleanupAvailabilityText)))
+        {
+            RaisePropertyChanged(nameof(IsBulkCleanupAvailable));
+        }
     }
 
     public async Task RefreshDiskUsageAsync(CancellationToken cancellationToken)
@@ -540,48 +577,76 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
+        var refreshCleanup = false;
+        var acceptProgress = true;
         try
         {
             SetDiskUsageRefreshing(true);
-            _hasDiskUsageSnapshot = false;
+            SetProperty(ref _hasDiskUsageSnapshot, false, nameof(HasDiskUsageSnapshot));
+            if (_folderBrowserFileTree is null)
+            {
+                CancelFolderBrowserFileLoads();
+            }
+
             SetDiskUsageSections([]);
-            _diskUsageAnalysis = "Scanning disk usage and streaming results as sections complete.";
+            _folderBrowserCompletedSizes.Clear();
+            _folderBrowserLiveWalks.Clear();
+            _folderBrowserQuickSizes.Clear();
+            _folderBrowserScannedRootBytes = 0;
+            ClearLiveFolderSizes();
+            SetProperty(ref _diskUsageAnalysis, "Scanning disk usage and streaming results as sections complete.",
+                nameof(DiskUsageAnalysis));
             SetDiskUsageStatus("Starting disk usage refresh...");
             SetDiskUsageActivityText(DiskUsageAnimationFrames[0]);
-            RaiseDiskUsageProperties();
             StatusMessage = "Refreshing disk usage snapshot...";
-
-            // The cleanup options are quick to check, so they fill in while the slower full scan runs.
-            var cleanupTask = RefreshCleanupOptionsAsync(cancellationToken);
-
-            // Show the drives and open the system drive at once; sizing it on demand beats waiting for the scan.
-            RefreshFolderBrowserDrives();
 
             var progress = new Progress<DiskUsageProgress>(update =>
             {
-                _diskUsageHeadline = update.Headline;
-                _diskUsageAnalysis = update.Analysis;
-                SetDiskUsageSections(update.Sections);
-                _hasDiskUsageSnapshot = update.Sections.Count > 0 || update.IsCompleted;
-                SetDiskUsageStatus(update.StatusText);
-                RaiseDiskUsageProperties();
-                if (_diskUsageAnalyzer.Trees.Count != _folderBrowserTreeCount)
+                if (!acceptProgress)
                 {
-                    RefreshFolderBrowserDrives();
+                    return;
                 }
+
+                SetProperty(ref _diskUsageHeadline, update.Headline, nameof(DiskUsageHeadline));
+                SetProperty(ref _diskUsageAnalysis, update.Analysis, nameof(DiskUsageAnalysis));
+                SetDiskUsageSections(update.Sections);
+                SetProperty(ref _hasDiskUsageSnapshot, update.Sections.Count > 0 || update.IsCompleted,
+                    nameof(HasDiskUsageSnapshot));
+                SetDiskUsageStatus(update.StatusText);
+                if (update.BrowseRoots is { } roots)
+                {
+                    RefreshFolderBrowserDrives(roots, update.CompletedRoot);
+                }
+
+                if (update.LogicalRoot is { } logicalRoot)
+                {
+                    _folderBrowserLiveWalks.Remove(logicalRoot);
+                    if (!FolderBrowserUseAllocation &&
+                        string.Equals(Path.GetPathRoot(_folderBrowserPath), logicalRoot, StringComparison.OrdinalIgnoreCase))
+                    {
+                        BrowseFolder(_folderBrowserPath, skipUnchanged: true);
+                    }
+                }
+
+                if (update.CompletedRoot is { } completedRoot)
+                {
+                    _folderBrowserLiveWalks.Remove(completedRoot);
+                }
+
+                ApplyFolderScanProgress(update.CompletedFolders, update.LiveWalk, update.LiveSubfolders);
             });
 
             var snapshot = await _diskUsageAnalyzer.CaptureAsync(progress, cancellationToken);
+            acceptProgress = false;
+            _folderBrowserLiveWalks.Clear();
             SetDiskUsageSections(snapshot.Sections);
-            _diskUsageHeadline = snapshot.Headline;
-            _diskUsageAnalysis = snapshot.Analysis;
-            _hasDiskUsageSnapshot = true;
+            SetProperty(ref _diskUsageHeadline, snapshot.Headline, nameof(DiskUsageHeadline));
+            SetProperty(ref _diskUsageAnalysis, snapshot.Analysis, nameof(DiskUsageAnalysis));
+            SetProperty(ref _hasDiskUsageSnapshot, true, nameof(HasDiskUsageSnapshot));
             SetDiskUsageStatus($"Last disk refresh: {snapshot.CapturedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}");
             SetDiskUsageActivityText("Snapshot ready");
-            RaiseDiskUsageProperties();
-            RefreshFolderBrowserDrives();
-            await cleanupTask;
-
+            RefreshFolderBrowserDrives(snapshot.BrowseRoots, scanCompleted: true);
+            refreshCleanup = true;
             StatusMessage = "Disk usage snapshot refreshed.";
             AppLog.Info("RefreshDiskUsageAsync completed.");
         }
@@ -601,9 +666,17 @@ public sealed partial class MainViewModel : ObservableObject
         }
         finally
         {
+            acceptProgress = false;
+            _folderBrowserLiveWalks.Clear();
             SetDiskUsageRefreshing(false);
             _diskUsageRefreshGate.Release();
             AppLog.Info("RefreshDiskUsageAsync finished.");
+        }
+
+        if (refreshCleanup && !cancellationToken.IsCancellationRequested)
+        {
+            // Reuse the drive trees and let cleanup maintain its own refresh state.
+            _ = RefreshCleanupOptionsAsync(cancellationToken);
         }
     }
 
@@ -658,7 +731,7 @@ public sealed partial class MainViewModel : ObservableObject
             StatusMessage = "Refreshing workflow runs...";
 
             var fetchTasks = Repositories
-                .Select(repository => _gitHubApiClient.GetWorkflowRunsAsync(repository, 25, cancellationToken))
+                .Select(repository => _gitHubApiClient.Value.GetWorkflowRunsAsync(repository, 25, cancellationToken))
                 .ToList();
             AppLog.Info($"Refreshing {Repositories.Count} repositories.");
 
@@ -688,8 +761,10 @@ public sealed partial class MainViewModel : ObservableObject
                 existingRun.PropertyChanged -= WorkflowRunItem_PropertyChanged;
             }
 
+            var previouslyNeededLiveUpdates = NeedsLiveDisplayUpdates;
             _allRuns.Clear();
             _allRuns.AddRange(combined);
+            _liveWorkflowRuns = combined.Where(static run => run.IsActivelyRunning).ToArray();
 
             foreach (var run in _allRuns)
             {
@@ -697,6 +772,11 @@ public sealed partial class MainViewModel : ObservableObject
             }
 
             ApplyRunFilter();
+
+            if (NeedsLiveDisplayUpdates != previouslyNeededLiveUpdates)
+            {
+                RaisePropertyChanged(nameof(NeedsLiveDisplayUpdates));
+            }
 
             if (SelectedRun is not null)
             {
@@ -755,7 +835,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         AppLog.Info($"ResolveSelectedRunAsync started for run {run.Id}.");
-        await _gitHubApiClient.ResolveRunDetailsAsync(run, cancellationToken);
+        await _gitHubApiClient.Value.ResolveRunDetailsAsync(run, cancellationToken);
         if (ReferenceEquals(SelectedRun, run) && !string.IsNullOrWhiteSpace(RunFilterText))
         {
             ApplyRunFilter();
@@ -763,9 +843,21 @@ public sealed partial class MainViewModel : ObservableObject
         AppLog.Info($"ResolveSelectedRunAsync completed for run {run.Id}.");
     }
 
+    internal void RefreshLiveDisplay()
+    {
+        if (IsWorkflowExplorerVisible)
+        {
+            RefreshLiveRunMetrics();
+        }
+        else if (IsDiskUsageVisible && IsDiskUsageRefreshing)
+        {
+            RefreshDiskUsageAnimation();
+        }
+    }
+
     public void RefreshLiveRunMetrics()
     {
-        foreach (var run in _allRuns)
+        foreach (var run in _liveWorkflowRuns)
         {
             run.RefreshLiveTiming();
         }
@@ -981,7 +1073,7 @@ public sealed partial class MainViewModel : ObservableObject
                 RaisePropertyChanged(nameof(HasBulkCleanupReport));
             });
 
-            var result = await _diskCleanupService.RunAsync(execute, progress, cts.Token);
+            var result = await _diskCleanupService.Value.RunAsync(execute, progress, cts.Token);
 
             SetBulkCleanupStatus(result.Message);
             StatusMessage = result.Message;
@@ -1120,7 +1212,7 @@ public sealed partial class MainViewModel : ObservableObject
             RaiseKillProcessesProperties();
             StatusMessage = "Refreshing process list...";
 
-            var sections = await Task.Run(() => _processKillCatalog.CaptureSections(), cancellationToken);
+            var sections = await Task.Run(() => _processKillCatalog.CaptureUnfilteredSections(), cancellationToken);
             _allKillProcessSections.Clear();
             _allKillProcessSections.AddRange(sections);
             ApplyProcessFilter();
@@ -1465,6 +1557,11 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (SetProperty(ref _activeTab, tab, nameof(ActiveTab)))
         {
+            if (IsResourcesVisible)
+            {
+                RaiseResourceSeriesChanged();
+            }
+
             SaveSettings();
             RaisePropertyChanged(nameof(IsKillProcessesVisible));
             RaisePropertyChanged(nameof(IsWorkflowExplorerVisible));
@@ -1474,6 +1571,7 @@ public sealed partial class MainViewModel : ObservableObject
             RaisePropertyChanged(nameof(IsWorktreesVisible));
             RaisePropertyChanged(nameof(ContextPaneTitle));
             RaisePropertyChanged(nameof(ContextPaneSubtitle));
+            RaisePropertyChanged(nameof(NeedsLiveDisplayUpdates));
         }
     }
 
@@ -1564,14 +1662,15 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void SetDiskUsageRefreshing(bool isRefreshing)
     {
-        if (SetProperty(ref _isDiskUsageRefreshing, isRefreshing, nameof(IsDiskUsageRefreshing)))
-        {
-            RaisePropertyChanged(nameof(DiskUsageStatusText));
-        }
-
         if (isRefreshing)
         {
             _diskUsageAnimationFrame = 0;
+        }
+
+        if (SetProperty(ref _isDiskUsageRefreshing, isRefreshing, nameof(IsDiskUsageRefreshing)))
+        {
+            RaisePropertyChanged(nameof(DiskUsageStatusText));
+            RaisePropertyChanged(nameof(NeedsLiveDisplayUpdates));
         }
     }
 
@@ -1597,17 +1696,9 @@ public sealed partial class MainViewModel : ObservableObject
         RaisePropertyChanged(nameof(DiskUsageActivityText));
     }
 
-    private void RaiseDiskUsageProperties()
-    {
-        RaisePropertyChanged(nameof(DiskUsageHeadline));
-        RaisePropertyChanged(nameof(DiskUsageAnalysis));
-        RaisePropertyChanged(nameof(DiskUsageActivityText));
-        RaisePropertyChanged(nameof(DiskUsageStatusText));
-        RaisePropertyChanged(nameof(HasDiskUsageSnapshot));
-    }
-
     private void SetDiskUsageSections(IReadOnlyList<DiskUsageSection> sections)
     {
+        var previousVolumeNote = GetSelectedVolumeNote();
         RememberDiskUsageSectionExpansionStates();
         var incomingTitles = new HashSet<string>(sections.Select(section => section.Title), StringComparer.OrdinalIgnoreCase);
 
@@ -1631,7 +1722,7 @@ public sealed partial class MainViewModel : ObservableObject
             }
 
             var existingSection = _diskUsageSections[existingIndex];
-            existingSection.UpdateFrom(incomingSection);
+            existingSection.UpdateFromScan(incomingSection);
             if (existingIndex != i)
             {
                 _diskUsageSections.Move(existingIndex, i);
@@ -1644,6 +1735,11 @@ public sealed partial class MainViewModel : ObservableObject
             {
                 _diskUsageSections.RemoveAt(i);
             }
+        }
+
+        if (!string.Equals(previousVolumeNote, GetSelectedVolumeNote(), StringComparison.Ordinal))
+        {
+            RaisePropertyChanged(nameof(FolderBrowserSummary));
         }
     }
 
@@ -1668,23 +1764,15 @@ public sealed partial class MainViewModel : ObservableObject
         return -1;
     }
 
-    private void LoadSettings()
+    internal static AppSettings? ReadSettings() => AppSettings.Read(SettingsFilePath);
+
+    private void LoadSettings(Task<AppSettings?>? startupSettingsRead)
     {
         _isLoadingSettings = true;
 
         try
         {
-            if (!File.Exists(SettingsFilePath))
-            {
-                return;
-            }
-
-            var settings = JsonSerializer.Deserialize<AppSettings>(
-                File.ReadAllText(SettingsFilePath),
-                new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true
-                });
+            var settings = startupSettingsRead is null ? ReadSettings() : startupSettingsRead.GetAwaiter().GetResult();
 
             if (settings is null)
             {
@@ -1710,12 +1798,6 @@ public sealed partial class MainViewModel : ObservableObject
                 ? settings.ResourceIntervalSeconds
                 : 1;
             _runAsAdministrator = settings.RunAsAdministrator;
-
-            var persistedPat = UnprotectSecret(_encryptedPersonalAccessToken);
-            if (!string.IsNullOrWhiteSpace(persistedPat))
-            {
-                _gitHubApiClient.SetPersonalAccessToken(persistedPat);
-            }
         }
         catch (Exception ex)
         {
@@ -1725,6 +1807,18 @@ public sealed partial class MainViewModel : ObservableObject
         {
             _isLoadingSettings = false;
         }
+    }
+
+    private GitHubApiClient CreateGitHubApiClient()
+    {
+        var client = new GitHubApiClient();
+        var persistedPat = UnprotectSecret(_encryptedPersonalAccessToken);
+        if (!string.IsNullOrWhiteSpace(persistedPat))
+        {
+            client.SetPersonalAccessToken(persistedPat);
+        }
+
+        return client;
     }
 
     private void SaveSettings()
@@ -1755,10 +1849,7 @@ public sealed partial class MainViewModel : ObservableObject
                         ResourceIntervalSeconds = _resourceIntervalSeconds,
                         RunAsAdministrator = _runAsAdministrator
                     },
-                    new JsonSerializerOptions
-                    {
-                        WriteIndented = true
-                    }));
+                    AppSettingsJsonContext.Default.AppSettings));
             File.Move(SettingsFilePath + ".tmp", SettingsFilePath, overwrite: true);
         }
         catch (Exception ex)
@@ -1928,28 +2019,4 @@ public sealed partial class MainViewModel : ObservableObject
             : MainContentTab.KillProcesses;
     }
 
-    private sealed class AppSettings
-    {
-        public ProcessViewState? ProcessView { get; set; }
-        public bool AutoRefreshEnabled { get; set; } = true;
-
-        public int RefreshIntervalSeconds { get; set; } = 10;
-
-        public string? ActiveTab { get; set; }
-
-        public bool IsDiskUsageVisible { get; set; }
-
-        public string? EncryptedPersonalAccessToken { get; set; }
-
-        public string? BiggestFilesScanRoot { get; set; }
-
-        public int BiggestFilesTopCount { get; set; } = 100;
-
-        public bool ResourceMonitoringEnabled { get; set; } = true;
-
-        public int ResourceIntervalSeconds { get; set; } = 1;
-
-        /// <summary>Read by Start-DevTools.ps1: start DevTools with administrator rights.</summary>
-        public bool RunAsAdministrator { get; set; } = true;
-    }
 }

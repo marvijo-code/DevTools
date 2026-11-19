@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\DevTools\Models\ProcessViewState.cs" Link="Models\ProcessViewState.cs" />
+    <Compile Include="..\..\DevTools\Models\AppSettings.cs" Link="Models\AppSettings.cs" />
     <Compile Include="..\..\DevTools\Models\AppActivityEntry.cs" Link="Models\AppActivityEntry.cs" />
     <Compile Include="..\..\DevTools\Services\FirefoxSessionReader.cs" Link="Services\FirefoxSessionReader.cs" />
     <Compile Include="..\..\DevTools\Models\WorkspaceContext.cs" Link="Models\WorkspaceContext.cs" />
@@ -46,13 +47,22 @@
     <Compile Include="..\..\DevTools\Services\BiggestFiles\ParallelFileScanner.cs" Link="Services\BiggestFiles\ParallelFileScanner.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\MftRecordParser.cs" Link="Services\BiggestFiles\Ntfs\MftRecordParser.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\MftTable.cs" Link="Services\BiggestFiles\Ntfs\MftTable.cs" />
+    <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\MftScanner.cs" Link="Services\BiggestFiles\Ntfs\MftScanner.cs" />
+    <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\MftExtentMapReader.cs" Link="Services\BiggestFiles\Ntfs\MftExtentMapReader.cs" />
+    <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\NtfsVolumeBitmap.cs" Link="Services\BiggestFiles\Ntfs\NtfsVolumeBitmap.cs" />
     <Compile Include="..\..\DevTools\Services\BiggestFiles\Ntfs\NativeMethods.cs" Link="Services\BiggestFiles\Ntfs\NativeMethods.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\FolderSizeModels.cs" Link="Services\FolderSizes\FolderSizeModels.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\FolderSizeEngine.cs" Link="Services\FolderSizes\FolderSizeEngine.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\MftFolderSizeScanner.cs" Link="Services\FolderSizes\MftFolderSizeScanner.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\FolderTree.cs" Link="Services\FolderSizes\FolderTree.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\FolderFileListing.cs" Link="Services\FolderSizes\FolderFileListing.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\DirectoryAllocationReader.cs" Link="Services\FolderSizes\DirectoryAllocationReader.cs" />
+    <Compile Include="..\..\DevTools\Services\Resources\NativeResourceApi.cs" Link="Services\Resources\NativeResourceApi.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\ParallelFolderWalker.cs" Link="Services\FolderSizes\ParallelFolderWalker.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\ScanGate.cs" Link="Services\FolderSizes\ScanGate.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\ScanResources.cs" Link="Services\FolderSizes\ScanResources.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\WindowsVolumePaths.cs" Link="Services\FolderSizes\WindowsVolumePaths.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\DiskCapacityInventory.cs" Link="Services\FolderSizes\DiskCapacityInventory.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\DriveUsageService.cs" Link="Services\FolderSizes\DriveUsageService.cs" />    <Compile Include="..\..\DevTools\Models\ResourceSample.cs" Link="Models\ResourceSample.cs" />
     <Compile Include="..\..\DevTools\Models\AgentSessionUsage.cs" Link="Models\AgentSessionUsage.cs" />
     <Compile Include="..\..\DevTools\Models\AgentSessionEntry.cs" Link="Models\AgentSessionEntry.cs" />

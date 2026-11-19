@@ -68,6 +68,10 @@ internal static class NativeResourceApi
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetSystemTimes(out long lpIdleTime, out long lpKernelTime, out long lpUserTime);
 
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref MemoryStatus status);
+
     [DllImport("psapi.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetPerformanceInfo(out PerformanceInformation pPerformanceInformation, int cb);
@@ -78,6 +82,20 @@ internal static class NativeResourceApi
         IntPtr systemInformation,
         int systemInformationLength,
         out int returnLength);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryStatus
+    {
+        public uint Length;
+        public uint Load;
+        public ulong TotalPhysical;
+        public ulong AvailablePhysical;
+        public ulong TotalCommit;
+        public ulong AvailableCommit;
+        public ulong TotalVirtual;
+        public ulong AvailableVirtual;
+        public ulong Reserved;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct PerformanceInformation
@@ -96,6 +114,19 @@ internal static class NativeResourceApi
         public int HandleCount;
         public int ProcessCount;
         public int ThreadCount;
+    }
+
+    internal static long? ReadMemoryHeadroom()
+    {
+        var status = new MemoryStatus { Length = (uint)Marshal.SizeOf<MemoryStatus>() };
+        if (!GlobalMemoryStatusEx(ref status))
+        {
+            return null;
+        }
+
+        // The available commit value also respects any limit on this process.
+        var available = Math.Min(status.AvailablePhysical, Math.Min(status.AvailableCommit, status.AvailableVirtual));
+        return (long)Math.Min(available, (ulong)long.MaxValue);
     }
 
     /// <summary>Reads machine-wide CPU time, physical memory and commit charge.</summary>

@@ -21,6 +21,7 @@ public sealed class MftFolderSizeScanner
     {
         var root = Path.GetFullPath(request.ScanRoot);
         var stopwatch = Stopwatch.StartNew();
+        using var scan = await MftTableLoader.EnterScanAsync(cancellationToken).ConfigureAwait(false);
 
         var table = await MftTableLoader.LoadAsync(
             root,
@@ -64,22 +65,28 @@ public sealed class MftFolderSizeScanner
     public Task<FolderTree> ScanTreeAsync(
         string driveRoot,
         IProgress<FolderSizeProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        ScanTreeAsync(driveRoot, progress, cancellationToken, volumeShare: 1);
+
+    internal Task<FolderTree> ScanTreeAsync(
+        string driveRoot,
+        IProgress<FolderSizeProgress>? progress,
+        CancellationToken cancellationToken,
+        int volumeShare)
     {
         return Task.Run(async () =>
         {
             var root = FolderTree.NormalizeRoot(driveRoot);
             var stopwatch = Stopwatch.StartNew();
+            using var scan = await MftTableLoader.EnterScanAsync(cancellationToken).ConfigureAwait(false);
             var table = await MftTableLoader.LoadAsync(
                 root,
                 (parsed, total, elapsed) => progress?.Report(new FolderSizeProgress(
                     "Reading MFT", parsed, total, elapsed, Array.Empty<FolderSizeHit>(), IsCompleted: false)),
                 stopwatch,
                 cancellationToken,
-                keepFileNames: false).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            var tree = BuildTree(table, root, EngineName, stopwatch);
-            return tree;
+                keepFileNames: false, volumeShare: volumeShare).ConfigureAwait(false);
+            return BuildTree(table, root, EngineName, stopwatch, cancellationToken);
         }, cancellationToken);
     }
 
@@ -88,108 +95,168 @@ public sealed class MftFolderSizeScanner
     /// (breadth first from the root), then every file adds its size to its folder and a reverse
     /// pass rolls the totals up. Hard links count once, like the biggest-files scan.
     /// </summary>
-    internal static FolderTree BuildTree(MftRecordTable table, string rootPath, string engineName, Stopwatch stopwatch)
+    internal static FolderTree BuildTree(
+        MftRecordTable table, string rootPath, string engineName, Stopwatch stopwatch,
+        CancellationToken cancellationToken = default)
     {
+        ScanGate.Wait(cancellationToken);
         var recordCount = table.RecordCount;
         var root = (int)MftRecordTable.RootRecordNumber;
 
-        // Child-directory index by parent record (counting sort).
-        var childStart = new int[recordCount + 1];
-        for (var r = 0; r < recordCount; r++)
+        // Positive entries point to the first child edge. Once a directory is attached
+        // to the tree, the same entry stores the bitwise complement of its node number.
+        var recordLinks = new int[recordCount];
+        var directoryCount = 0;
+        for (var record = 0; record < recordCount; record++)
         {
-            if (r == root || !table.IsNamedDirectory(r))
+            WaitForTreeBatch(record, cancellationToken);
+            directoryCount += table.IsNamedDirectory(record) ? 1 : 0;
+        }
+
+        var children = new (int Record, int Next)[directoryCount];
+        var edgeCount = 0;
+        for (var record = recordCount - 1; record >= 0; record--)
+        {
+            WaitForTreeBatch(record, cancellationToken);
+            if (record == root || !table.IsNamedDirectory(record))
             {
                 continue;
             }
 
-            var p = (int)table.Parent[r];
-            if (p >= 0 && p < recordCount && p != r)
+            var parent = table.Parent[record];
+            if (parent < (uint)recordCount && parent != record)
             {
-                childStart[p + 1]++;
+                children[edgeCount] = (record, recordLinks[parent]);
+                recordLinks[parent] = ++edgeCount;
             }
         }
 
-        for (var i = 0; i < recordCount; i++)
+        // Queue record numbers in the parent array. A queued folder's parent has already
+        // been numbered, so replace the record number with the parent index when dequeuing.
+        var capacity = edgeCount + 1;
+        var nodeParents = new int[capacity];
+        var nodeNames = new string[capacity];
+        var childStarts = new int[capacity + 1];
+        nodeParents[0] = root;
+        var count = 1;
+        for (var head = 0; head < count; head++)
         {
-            childStart[i + 1] += childStart[i];
+            WaitForTreeBatch(head, cancellationToken);
+            var record = nodeParents[head];
+            nodeParents[head] = head == 0 ? 0 : ~recordLinks[table.Parent[record]];
+            nodeNames[head] = head == 0 ? string.Empty : table.Names[record] ?? "<unnamed>";
+
+            childStarts[head] = count - 1;
+            // Each record has at most one parent edge and the root has no parent edge.
+            // A cycle therefore cannot be reached from the root.
+            var edge = recordLinks[record];
+            recordLinks[record] = ~head;
+            while (edge > 0)
+            {
+                WaitForTreeBatch(count, cancellationToken);
+                var (child, next) = children[edge - 1];
+                nodeParents[count++] = child;
+                edge = next;
+            }
         }
 
-        var children = new int[childStart[recordCount]];
-        var cursor = (int[])childStart.Clone();
-        for (var r = 0; r < recordCount; r++)
+        childStarts[count] = count - 1;
+        if (count < capacity)
         {
-            if (r == root || !table.IsNamedDirectory(r))
-            {
-                continue;
-            }
-
-            var p = (int)table.Parent[r];
-            if (p >= 0 && p < recordCount && p != r)
-            {
-                children[cursor[p]++] = r;
-            }
+            // Some directory records have no verified path from the root.
+            Array.Resize(ref nodeParents, count);
+            Array.Resize(ref nodeNames, count);
+            Array.Resize(ref childStarts, count + 1);
         }
 
-        // Breadth-first numbering so every parent node index is lower than its children.
-        var recordToNode = new int[recordCount];
-        Array.Fill(recordToNode, -1);
-        var nodeParent = new List<int>(children.Length + 1) { 0 };
-        var nodeNames = new List<string>(children.Length + 1) { string.Empty };
-        var nodeRecords = new List<int>(children.Length + 1) { root };
-        recordToNode[root] = 0;
-        for (var head = 0; head < nodeRecords.Count; head++)
-        {
-            var record = nodeRecords[head];
-            for (var i = childStart[record]; i < childStart[record + 1]; i++)
-            {
-                var child = children[i];
-                if (recordToNode[child] >= 0)
-                {
-                    continue;
-                }
-
-                recordToNode[child] = nodeRecords.Count;
-                nodeParent.Add(head);
-                nodeNames.Add(table.Names[child] ?? "<unnamed>");
-                nodeRecords.Add(child);
-            }
-        }
-
-        var count = nodeRecords.Count;
         var totals = new long[count];
         var files = new long[count];
+        var recordAllocation = table.RecordAllocation;
+        var allocated = recordAllocation is null ? null : new long[count];
+        long reservedClusters = 0;
+        long unlinkedClusters = 0;
+        var incompleteRecords = 0;
         for (var r = 0; r < recordCount; r++)
         {
-            if (r < MftRecordTable.FirstUserRecordNumber || !table.IsNamedFile(r))
+            WaitForTreeBatch(r, cancellationToken);
+            if ((table.Flags[r] & MftRecordTable.FlagIncompleteAllocation) != 0)
+            {
+                incompleteRecords++;
+            }
+
+            var parentNode = -1;
+            var isUserFile = r >= MftRecordTable.FirstUserRecordNumber && table.IsNamedFile(r);
+            if (isUserFile)
+            {
+                var parent = table.Parent[r];
+                if (parent < (uint)recordCount && recordLinks[parent] < 0)
+                {
+                    parentNode = ~recordLinks[parent];
+                    totals[parentNode] += Math.Max(0, table.RealSize[r]);
+                    files[parentNode]++;
+                }
+            }
+
+            var clusters = recordAllocation?.GetClusters(r) ?? 0;
+            if (clusters <= 0)
             {
                 continue;
             }
 
-            var p = (int)table.Parent[r];
-            if (p < 0 || p >= recordCount)
+            if (r < MftRecordTable.FirstUserRecordNumber)
             {
+                reservedClusters = checked(reservedClusters + clusters);
                 continue;
             }
 
-            var node = recordToNode[p];
-            if (node < 0)
+            var allocationNode = recordLinks[r] < 0 ? ~recordLinks[r] : isUserFile ? parentNode : -1;
+            if (allocationNode >= 0)
             {
-                continue;
+                ref var folderClusters = ref allocated![allocationNode];
+                folderClusters = checked(folderClusters + clusters);
             }
-
-            totals[node] += Math.Max(0, table.RealSize[r]);
-            files[node]++;
+            else
+            {
+                unlinkedClusters = checked(unlinkedClusters + clusters);
+            }
         }
 
-        var parentArray = nodeParent.ToArray();
         for (var i = count - 1; i > 0; i--)
         {
-            totals[parentArray[i]] += totals[i];
-            files[parentArray[i]] += files[i];
+            WaitForTreeBatch(i, cancellationToken);
+            var parent = nodeParents[i];
+            totals[parent] += totals[i];
+            files[parent] += files[i];
+            if (allocated is not null)
+            {
+                // Both nodes are still in clusters. Convert the child after its total reaches its parent.
+                allocated[parent] = checked(allocated[parent] + allocated[i]);
+                allocated[i] = recordAllocation!.ToBytes(allocated[i]);
+            }
         }
 
+        NtfsRecordAllocation? allocation = null;
+        if (allocated is not null)
+        {
+            allocated[0] = recordAllocation!.ToBytes(allocated[0]);
+            allocation = new NtfsRecordAllocation(recordAllocation.ToBytes(reservedClusters),
+                recordAllocation.ToBytes(unlinkedClusters), table.BitmapAllocation, incompleteRecords);
+        }
+
+        ScanGate.Wait(cancellationToken);
         stopwatch.Stop();
-        return new FolderTree(rootPath, parentArray, nodeNames.ToArray(), totals, files, engineName, stopwatch.Elapsed);
+        var tree = new FolderTree(rootPath, nodeParents, nodeNames, totals, files, engineName, stopwatch.Elapsed,
+            allocated, allocation, contiguousChildStarts: childStarts);
+        cancellationToken.ThrowIfCancellationRequested();
+        return tree;
+    }
+
+    private static void WaitForTreeBatch(int index, CancellationToken cancellationToken)
+    {
+        if ((index & 4095) == 0)
+        {
+            ScanGate.Wait(cancellationToken);
+        }
     }
 
     /// <summary>

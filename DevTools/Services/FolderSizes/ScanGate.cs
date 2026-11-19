@@ -1,41 +1,116 @@
 namespace DevTools.Services.FolderSizes;
 
 /// <summary>
-/// Lets a folder the user just clicked be sized first. While any priority job holds a pause,
-/// the background all-drive scans (folder walk and NTFS MFT read) wait at their next safe point.
+/// Lets a clicked folder be sized first by pausing background work on shared physical disks.
+/// When either side has unknown backing disks, background work waits conservatively.
 /// </summary>
 public static class ScanGate
 {
-    private static readonly ManualResetEventSlim Open = new(true);
-    private static int _pauses;
+    private static readonly object Sync = new();
+    // Flow the volume's disk set to both async scan tasks and the walker's dedicated threads.
+    private static readonly AsyncLocal<int[]?> ScanDisks = new();
+    private static PauseHandle[] _active = [];
 
     /// <summary>Pauses background scans until the returned handle is disposed.</summary>
-    public static IDisposable Pause()
+    public static IDisposable Pause() => Pause([]);
+
+    internal static IDisposable Pause(int[] disks)
     {
-        if (Interlocked.Increment(ref _pauses) == 1)
+        var pause = new PauseHandle(disks);
+        lock (Sync)
         {
-            Open.Reset();
+            Volatile.Write(ref _active, [.. _active, pause]);
         }
 
-        return new Releaser();
+        return pause;
     }
 
-    /// <summary>Blocks while a priority job is running. Call between units of background work.</summary>
+    internal static DiskScope ForDisks(int[]? disks)
+    {
+        var previous = ScanDisks.Value;
+        ScanDisks.Value = disks;
+        return new DiskScope(previous);
+    }
+
+    /// <summary>Blocks while priority work uses a shared disk. Call between units of background work.</summary>
     public static void Wait(CancellationToken cancellationToken)
     {
-        Open.Wait(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        while (GetResumeTask() is { } resume)
+        {
+            resume.WaitAsync(cancellationToken).GetAwaiter().GetResult();
+        }
     }
 
-    private sealed class Releaser : IDisposable
+    /// <summary>Lets an asynchronous background worker yield until priority work finishes.</summary>
+    internal static async ValueTask WaitAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        while (GetResumeTask() is { } resume)
+        {
+            await resume.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static Task? GetResumeTask()
+    {
+        var active = Volatile.Read(ref _active);
+        if (active.Length == 0)
+        {
+            return null;
+        }
+
+        var disks = ScanDisks.Value;
+        foreach (var pause in active)
+        {
+            if (disks is not { Length: > 0 } || pause.Disks.Length == 0 || SharesDisk(disks, pause.Disks))
+            {
+                return pause.Resume.Task;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool SharesDisk(int[] scanDisks, int[] priorityDisks)
+    {
+        foreach (var disk in scanDisks)
+        {
+            if (Array.IndexOf(priorityDisks, disk) >= 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    internal readonly struct DiskScope(int[]? previous) : IDisposable
+    {
+        public void Dispose() => ScanDisks.Value = previous;
+    }
+
+    private sealed class PauseHandle(int[] disks) : IDisposable
     {
         private int _released;
 
+        internal int[] Disks { get; } = disks;
+        internal TaskCompletionSource Resume { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref _released, 1) == 0 && Interlocked.Decrement(ref _pauses) == 0)
+            if (Interlocked.Exchange(ref _released, 1) != 0)
             {
-                Open.Set();
+                return;
             }
+
+            lock (Sync)
+            {
+                var index = Array.IndexOf(_active, this);
+                Volatile.Write(ref _active, [.. _active.AsSpan(0, index), .. _active.AsSpan(index + 1)]);
+            }
+
+            Resume.SetResult();
         }
     }
 }

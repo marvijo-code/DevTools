@@ -1,4 +1,9 @@
+using System.Buffers.Binary;
+using System.Runtime.InteropServices;
+using System.Text;
+using DevTools.Models;
 using DevTools.Services.FolderSizes;
+using Microsoft.Win32.SafeHandles;
 using Xunit;
 
 namespace DiskUsageAnalyzer.Tests.FolderSizes;
@@ -23,9 +28,28 @@ public sealed class FolderTreeTests
         Assert.Equal(500, tree.GetTotalBytes(tree.Find(@"C:\dev\repo\node_modules")));
         Assert.Equal(10, tree.GetDirectFileBytes(tree.Find(@"C:\dev\repo")));
         Assert.Equal(1, tree.GetDirectFileBytes(0));
+        Assert.Null(tree.GetDirectAllocatedBytes(0));
+        Assert.Empty(tree.GetChildrenByAllocation(0, 2));
         Assert.Equal(-1, tree.Find(@"C:\missing"));
         Assert.Equal(-1, tree.Find(@"D:\dev"));
         Assert.Equal([@"C:\Users", @"C:\dev"], tree.GetChildren(0).Select(tree.GetPath).ToArray());
+    }
+
+    [Theory]
+    [InlineData(@"C:\")]
+    [InlineData(@"\\?\Volume{79a4539d-d920-44db-8e41-f44ed94c9f36}\")]
+    public void GetPath_PreservesExactNamesAndVolumeRoot(string root)
+    {
+        var builder = new FolderTreeBuilder(root);
+        var first = builder.AddChildFolder(0, "Documents");
+        var second = builder.AddChildFolder(first, "Mixed Case");
+        var third = builder.AddChildFolder(second, "\u00e9t\u00e9");
+        var tree = builder.Build("fixture", TimeSpan.Zero);
+
+        Assert.Equal(root, tree.GetPath(0));
+        Assert.Equal(root + "Documents", tree.GetPath(first));
+        Assert.Equal(root + @"Documents\Mixed Case", tree.GetPath(second));
+        Assert.Equal(root + "Documents\\Mixed Case\\\u00e9t\u00e9", tree.GetPath(third));
     }
 
     [Fact]
@@ -47,47 +71,324 @@ public sealed class FolderTreeTests
     }
 
     [Fact]
-    public async Task Walker_SizesNestedFoldersAndSkipsJunctions()
+    public void Builder_AcceptsAnExplicitTotalAfterAddingFolders()
     {
-        var root = Path.Combine(Path.GetTempPath(), "devtools-walk-" + Guid.NewGuid().ToString("N"));
-        var deep = Path.Combine(root, "a", "b", "c");
-        Directory.CreateDirectory(deep);
-        Directory.CreateDirectory(Path.Combine(root, "z"));
-        await File.WriteAllBytesAsync(Path.Combine(deep, "big.bin"), new byte[40000]);
-        await File.WriteAllBytesAsync(Path.Combine(root, "a", "small.bin"), new byte[100]);
-        await File.WriteAllBytesAsync(Path.Combine(root, "z", "z.bin"), new byte[5]);
-        var link = Path.Combine(root, "link-to-a");
-        // A junction needs no admin rights, unlike a symbolic link.
-        using (var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{Path.Combine(root, "a")}\"")
+        var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);
+        var measured = builder.AddFolder(@"C:\measured");
+        var child = builder.AddChildFolder(measured, "child");
+        builder.AddFilesToFolder(child, 80, 1, 4096);
+
+        builder.AddFolder(@"C:\measured", 100);
+        var other = builder.AddFolder(@"C:\other");
+        var listedFolders = Enumerable.Range(0, 12).Select(index => $"listed-{index}").ToList();
+        var firstListed = builder.AppendEnumeratedChildren(other, listedFolders);
+        builder.AddFilesToFolder(firstListed + 4, 10, 1, 4096);
+        var tree = builder.Build("fixture", TimeSpan.Zero);
+
+        Assert.Equal(80, tree.GetTotalBytes(child));
+        Assert.Equal(100, tree.GetTotalBytes(measured));
+        Assert.Equal(firstListed + 4, tree.Find(@"C:\other\listed-4"));
+        Assert.Equal(10, tree.GetTotalBytes(other));
+        Assert.Equal(110, tree.TotalBytes);
+        Assert.Equal(2, tree.TotalFiles);
+        Assert.Equal(8192, tree.GetAllocatedBytes(0));
+
+        builder.AddFolder(@"C:\", 0);
+        var withRootOverride = builder.Build("fixture", TimeSpan.Zero);
+        Assert.Equal(0, withRootOverride.TotalBytes);
+        Assert.Equal(8192, withRootOverride.GetAllocatedBytes(0));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(25)]
+    [InlineData(200)]
+    [InlineData(500)]
+    public void GetChildren_WideFolderMatchesFullRanking(int max)
+    {
+        var builder = new FolderTreeBuilder(@"C:\");
+        for (var i = 1999; i >= 0; i--)
         {
-            CreateNoWindow = true,
-            UseShellExecute = false,
-            RedirectStandardOutput = true
-        })!)
-        {
-            await mklink.WaitForExitAsync();
+            builder.AddFolder($@"C:\Folder-{i:D4}", (i * 39) % 17);
         }
 
-        Assert.True(Directory.Exists(link));
+        builder.AddFile(@"C:\empty.txt", 0);
+        var tree = builder.Build("test", TimeSpan.Zero);
 
+        Assert.Equal(tree.GetChildren(0).Take(max).ToArray(), tree.GetChildren(0, max).ToArray());
+        Assert.Equal(2000, tree.GetChildFolderCount(0));
+        Assert.Equal(1, tree.GetDirectFileCount(0));
+        Assert.Equal(0, tree.GetDirectFileBytes(0));
+    }
+
+    [Fact]
+    public void Find_WideFolderKeepsExactAndAmbiguousCaseMatchesDuringConcurrentLookups()
+    {
+        var builder = new FolderTreeBuilder(@"C:\");
+        var parent = builder.AddFolder(@"C:\wide");
+        var names = Enumerable.Range(0, 1500).Select(i => $"child-{i:D4}").ToList();
+        for (var variant = 0; variant < 64; variant++)
+        {
+            var name = "folders".ToCharArray();
+            for (var position = 0; position < 6; position++)
+            {
+                if ((variant & (1 << position)) != 0)
+                {
+                    name[position] = char.ToUpperInvariant(name[position]);
+                }
+            }
+
+            names[variant] = new string(name);
+        }
+
+        var first = builder.AppendEnumeratedChildren(parent, names);
+        var tree = builder.Build("test", TimeSpan.Zero);
+
+        Parallel.For(0, 64, variant =>
+        {
+            Assert.Equal(first + variant, tree.Find($@"C:\wide\{names[variant]}"));
+            Assert.Equal(-1, tree.Find(@"C:\wide\FOLDERS"));
+            Assert.Equal(first + 1000, tree.Find(@"C:\WIDE\CHILD-1000"));
+            Assert.Equal(-1, tree.Find(@"C:\wide\missing"));
+        });
+    }
+
+    [Fact]
+    public void DirectTotals_IncludeTheRemainderAfterWideContiguousChildRanges()
+    {
+        var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);
+        var container = builder.AddChildFolder(0, "container");
+        var children = Enumerable.Range(0, 1027).Select(index => $"folder-{index:D4}").ToList();
+        var first = builder.AppendEnumeratedChildren(container, children);
+        for (var index = 0; index < children.Count; index++)
+        {
+            builder.AddFilesToFolder(first + index, index + 1, 1, ((index % 16) + 1) * 4096L);
+        }
+
+        builder.AddFilesToFolder(container, 23, 2, 4096);
+        var tree = builder.Build("Fixture", TimeSpan.Zero);
+
+        Assert.Equal((23L, 2L), tree.GetDirectFileStatistics(container));
+        Assert.Equal(4096, tree.GetDirectAllocatedBytes(container));
+        Assert.Equal((1027L, 1L), tree.GetDirectFileStatistics(first + 1026));
+        Assert.Equal(12288, tree.GetDirectAllocatedBytes(first + 1026));
+    }
+
+    [Fact]
+    public void Tree_IndexesChildrenWhenTheirNodeNumbersAreInterleaved()
+    {
+        var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);
+        var first = builder.AddChildFolder(0, "first");
+        var second = builder.AddChildFolder(0, "second");
+        var start = builder.AppendEnumeratedChildren(first,
+            Enumerable.Range(0, 1500).Select(index => $"folder-{index:D4}").ToList());
+        var unrelated = builder.AddChildFolder(second, "unrelated");
+        var last = builder.AddChildFolder(first, "last");
+        builder.AddFilesToFolder(start, 10, 1, 4096);
+        builder.AddFilesToFolder(last, 20, 1, 8192);
+        builder.AddFilesToFolder(first, 5, 1, 4096);
+        builder.AddFilesToFolder(unrelated, 50, 1, 16384);
+        var tree = builder.Build("Fixture", TimeSpan.Zero);
+
+        Assert.Equal(1501, tree.GetChildFolderCount(first));
+        Assert.Equal([last, start], tree.GetChildren(first, 2));
+        Assert.Equal([last, start], tree.GetChildrenByAllocation(first, 2));
+        Assert.Equal([unrelated], tree.GetChildren(second));
+        Assert.Equal((5L, 1L), tree.GetDirectFileStatistics(first));
+        Assert.Equal(4096, tree.GetDirectAllocatedBytes(first));
+        for (var index = 0; index < 6; index++)
+        {
+            Assert.Equal(last, tree.Find(@"C:\FIRST\LAST"));
+            Assert.Equal(-1, tree.Find(@"C:\first\unrelated"));
+        }
+    }
+
+    [Fact]
+    public void EnumeratedSiblings_KeepDistinctNamesAndTotalsThroughRefresh()
+    {
+        var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);
+        var root = builder.AddFolder(@"C:\workspace");
+        var first = builder.AppendEnumeratedChildren(root, ["source", "Source", "Other"]);
+        builder.AddFilesToFolder(first, 12, 1, 4096);
+        builder.AddFilesToFolder(first + 1, 4097, 1, 8192);
+        var tree = builder.Build("fixture", TimeSpan.Zero);
+
+        Assert.Equal(4109, tree.TotalBytes);
+        Assert.Equal(12288, tree.GetAllocatedBytes(root));
+        Assert.Equal(12, tree.GetTotalBytes(tree.Find(@"c:\WORKSPACE\source")));
+        Assert.Equal(4097, tree.GetTotalBytes(tree.Find(@"C:/workspace/Source/")));
+        Assert.Equal(first + 2, tree.Find(@"C:\workspace\OTHER"));
+        Assert.Equal(-1, tree.Find(@"C:\workspace\SOURCE"));
+
+        var paths = tree.GetChildren(root, 2).Select(tree.GetPath);
+        var entries = paths.Select(path => DiskUsageEntry.CreateCompleted(path, false, null, "", null)).ToArray();
+        var section = new DiskUsageSection("Largest Folders", "", [entries[0]]);
+        section.UpdateFrom(new DiskUsageSection(section.Title, "", entries));
+
+        Assert.Equal([@"C:\workspace\Source", @"C:\workspace\source"], section.Entries.Select(entry => entry.Path));
+    }
+
+    [Theory]
+    [InlineData(8)]
+    [InlineData(1200)]
+    public void AllocatedRanking_IncludesStorageWithNoLogicalFileBytes(int childCount)
+    {
+        var builder = new FolderTreeBuilder(@"C:\", trackAllocation: true);
+        var root = builder.AddFolder(@"C:\workspace");
+        var names = Enumerable.Range(0, childCount).Select(i => $"folder-{i:D4}").ToList();
+        names[0] = "logical";
+        names[^2] = "z-stream";
+        names[^1] = "a-stream";
+        var first = builder.AppendEnumeratedChildren(root, names);
+        var last = first + childCount - 1;
+        builder.AddFilesToFolder(root, 0, 0, 4096);
+        builder.AddFilesToFolder(first, 1024 * 1024, 1, 4096);
+        builder.AddFilesToFolder(last - 1, 0, 0, 16384);
+        builder.AddFilesToFolder(last, 0, 0, 16384);
+        var tree = builder.Build("fixture", TimeSpan.Zero);
+
+        Assert.Equal(first, Assert.Single(tree.GetChildren(root, 1)));
+        var largest = tree.GetChildrenByAllocation(root, 2);
+        Assert.Equal([last, last - 1], largest);
+        Assert.Equal(0L, tree.GetTotalBytes(last));
+        Assert.Equal(16384L, tree.GetDirectAllocatedBytes(last));
+        Assert.Equal(4096L, tree.GetDirectAllocatedBytes(root));
+        Assert.Equal(4096L, tree.GetAllocatedBytes(root) -
+            tree.GetDirectAllocatedBytes(root) - largest.Sum(child => tree.GetAllocatedBytes(child)));
+    }
+
+    [Fact]
+    public async Task Walker_ReportsAnUnavailableDirectoryAsIncomplete()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-unavailable-folder-");
         try
         {
-            var tree = await new ParallelFolderWalker().ScanAsync(root, null, CancellationToken.None, workerCount: 2);
+            var missing = Path.Combine(fixture.FullName, "missing");
+            var tree = await new ParallelFolderWalker().ScanAsync(missing, null, CancellationToken.None, workerCount: 1);
+            var node = tree.Find(missing);
 
-            var node = tree.Find(root);
-            Assert.True(node >= 0);
-            Assert.Equal(40105, tree.GetTotalBytes(node));
-            Assert.Equal(40100, tree.GetTotalBytes(tree.Find(Path.Combine(root, "a"))));
-            Assert.Equal(40000, tree.GetTotalBytes(tree.Find(deep)));
-            Assert.Equal(-1, tree.Find(link));
+            Assert.Equal(1, tree.IncompleteDirectoryCount);
+            Assert.True(tree.HasIncompleteScan(node));
+            Assert.Equal(0, tree.GetFileCount(node));
         }
         finally
         {
-            // Remove the junction itself first (never its target), then the temp tree.
-            Directory.Delete(link);
-            Directory.Delete(root, recursive: true);
+            fixture.Delete();
         }
     }
+
+    [Fact]
+    public async Task Walker_AccountsForJunctionStreamsWithoutScanningTheTarget()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-walk-");
+        var root = Path.Combine(fixture.FullName, "scan");
+        var deep = Path.Combine(root, "a", "b", "c");
+        var target = Path.Combine(fixture.FullName, "outside");
+        var link = Path.Combine(root, "junction");
+        try
+        {
+            Directory.CreateDirectory(deep);
+            Directory.CreateDirectory(Path.Combine(root, "z"));
+            Directory.CreateDirectory(target);
+            await File.WriteAllBytesAsync(Path.Combine(deep, "big.bin"), new byte[40000]);
+            await File.WriteAllBytesAsync(Path.Combine(root, "a", "small.bin"), new byte[100]);
+            await File.WriteAllBytesAsync(Path.Combine(root, "z", "z.bin"), new byte[5]);
+            var outsideFile = Path.Combine(target, "outside.bin");
+            await File.WriteAllBytesAsync(outsideFile, new byte[1024 * 1024]);
+            CreateJunction(link, target);
+
+            var preview = Assert.IsType<FolderPreview>(FolderFileListing.ReadChildFolders(root, 10, CancellationToken.None));
+            Assert.Equal(["a", "z"], preview.FolderNames);
+            Assert.Null(FolderFileListing.ReadChildFolders(link, 10, CancellationToken.None));
+
+            var walker = new ParallelFolderWalker();
+            var baseline = await walker.ScanAsync(root, null, CancellationToken.None, workerCount: 2);
+            var baselineBytes = Assert.IsType<long>(baseline.GetAllocatedBytes(baseline.Find(root)));
+            var payload = new byte[64 * 1024];
+            new Random(41).NextBytes(payload);
+            using (var stream = CreateFile(link + ":payload", 0x40000000, 7, IntPtr.Zero, 2, 0x02300000, IntPtr.Zero))
+            {
+                Assert.False(stream.IsInvalid, $"Could not create the junction stream. Windows error {Marshal.GetLastWin32Error()}.");
+                RandomAccess.Write(stream, payload, 0);
+            }
+
+            var clusterBytes = WindowsVolumePaths.GetAllocationUnitBytes(fixture.Root.FullName);
+            Assert.True(clusterBytes > 0);
+            var payloadAllocation = (1 + (payload.LongLength - 1) / clusterBytes) * clusterBytes;
+            var tree = await walker.ScanAsync(root, null, CancellationToken.None, workerCount: 2);
+            var node = tree.Find(root);
+            Assert.True(node >= 0);
+            Assert.Equal(40105, tree.GetTotalBytes(node));
+            Assert.Equal(3, tree.GetFileCount(node));
+            Assert.Equal(40100, tree.GetTotalBytes(tree.Find(Path.Combine(root, "a"))));
+            Assert.Equal(40000, tree.GetTotalBytes(tree.Find(deep)));
+            Assert.Equal(-1, tree.Find(link));
+            Assert.Equal(baselineBytes + payloadAllocation, tree.GetAllocatedBytes(node));
+            Assert.False(tree.HasIncompleteAllocation(node));
+
+            var logical = await walker.ScanAsync(root, null, CancellationToken.None, workerCount: 2, prioritize: true);
+            var logicalNode = logical.Find(root);
+            Assert.Equal(tree.GetTotalBytes(node), logical.GetTotalBytes(logicalNode));
+            Assert.Equal(tree.GetFileCount(node), logical.GetFileCount(logicalNode));
+            Assert.Null(logical.GetAllocatedBytes(logicalNode));
+            Assert.Equal(-1, logical.Find(link));
+
+            var junction = await walker.ScanAsync(link, null, CancellationToken.None, workerCount: 2, prioritize: true);
+            var junctionNode = junction.Find(link);
+            Assert.Equal(0, junction.GetTotalBytes(junctionNode));
+            Assert.Equal(0, junction.GetFileCount(junctionNode));
+            Assert.False(junction.HasIncompleteScan(junctionNode));
+            Assert.Equal(1024 * 1024, new FileInfo(outsideFile).Length);
+        }
+        finally
+        {
+            if (Directory.Exists(link))
+            {
+                Directory.Delete(link);
+            }
+
+            fixture.Delete(recursive: true);
+        }
+    }
+
+    private static void CreateJunction(string link, string target)
+    {
+        const uint mountPointTag = 0xA0000003;
+        const uint fsctlSetReparsePoint = 0x000900A4;
+        const int headerBytes = 8;
+        const int mountPointHeaderBytes = 8;
+        const int terminatorBytes = sizeof(char);
+        var substituteName = Encoding.Unicode.GetBytes(@"\??\" + target);
+        var printName = Encoding.Unicode.GetBytes(target);
+        var printNameOffset = substituteName.Length + terminatorBytes;
+        var pathOffset = headerBytes + mountPointHeaderBytes;
+        var data = new byte[pathOffset + printNameOffset + printName.Length + terminatorBytes];
+
+        BinaryPrimitives.WriteUInt32LittleEndian(data, mountPointTag);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(4), (ushort)(data.Length - headerBytes));
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(10), (ushort)substituteName.Length);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(12), (ushort)printNameOffset);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(14), (ushort)printName.Length);
+        substituteName.CopyTo(data.AsSpan(pathOffset));
+        printName.CopyTo(data.AsSpan(pathOffset + printNameOffset));
+
+        Directory.CreateDirectory(link);
+        using var directory = CreateFile(link, 0x40000000, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+        Assert.False(directory.IsInvalid, $"Could not open the junction fixture. Windows error {Marshal.GetLastWin32Error()}.");
+        Assert.True(DeviceIoControl(directory, fsctlSetReparsePoint, data, (uint)data.Length, IntPtr.Zero, 0, out _, IntPtr.Zero),
+            $"Could not create the fixture junction. Windows error {Marshal.GetLastWin32Error()}.");
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeviceIoControl(
+        SafeFileHandle file, uint code, byte[] input, uint inputSize, IntPtr output,
+        uint outputSize, out uint bytesReturned, IntPtr overlapped);
 
     [Fact]
     public async Task Walker_HonoursCancellation()

@@ -15,14 +15,16 @@ namespace DevTools;
 
 public sealed partial class MainPage : Page
 {
-    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _refreshTimer;
-    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _liveRunTimer;
-    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _resourceTimer;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _refreshTimer;
+    private Task? _workflowInitialization;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _liveDisplayTimer;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _resourceTimer;
     private readonly WindowZoomController _windowZoomController;
     private CancellationTokenSource? _selectionCts;
     private bool _isConfirmationDialogOpen;
+    private bool _startupRenderRecorded;
 
-    public MainViewModel ViewModel { get; } = new();
+    public MainViewModel ViewModel { get; } = new((Application.Current as App)?.TakeStartupSettingsRead());
 
     public MainPage()
     {
@@ -30,17 +32,7 @@ public sealed partial class MainPage : Page
         DataContext = ViewModel;
         _windowZoomController = new WindowZoomController(RootLayoutGrid);
         RegisterZoomKeyboardAccelerators();
-        ViewModel.PropertyChanged += ViewModel_PropertyChanged;
 
-        _refreshTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
-        _refreshTimer.Tick += RefreshTimer_Tick;
-        _liveRunTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
-        _liveRunTimer.Interval = TimeSpan.FromMilliseconds(500);
-        _liveRunTimer.Tick += LiveRunTimer_Tick;
-        _resourceTimer = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
-        _resourceTimer.Tick += ResourceTimer_Tick;
-        ApplyRefreshTimerSettings();
-        ApplyResourceTimerSettings();
         ApplyActivePaneState();
         RootLayoutGrid.KeyDown += RootLayoutGrid_KeyDown;
 
@@ -51,17 +43,43 @@ public sealed partial class MainPage : Page
     private void MainPage_Loaded(object sender, RoutedEventArgs e)
     {
         AppLog.Info("MainPage loaded.");
-        _liveRunTimer.Start();
-        ApplyResourceTimerSettings();
-        _ = InitializePageAsync();
+        ViewModel.PropertyChanged += ViewModel_PropertyChanged;
+        if (!_startupRenderRecorded)
+        {
+            CompositionTarget.Rendering += MainPage_FirstRendering;
+        }
+
+        // Allow pending layout and render work to run before initializing tab data and timers.
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (!IsLoaded)
+            {
+                return;
+            }
+
+            ApplyLiveDisplayTimerSettings();
+            ApplyRefreshTimerSettings();
+            ApplyResourceTimerSettings();
+            _ = InitializePageAsync();
+        });
+    }
+
+    private void MainPage_FirstRendering(object? sender, object args)
+    {
+        CompositionTarget.Rendering -= MainPage_FirstRendering;
+        _startupRenderRecorded = true;
+        var elapsed = Stopwatch.GetElapsedTime(App.StartupTimestamp);
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () => AppLog.Info($"Startup first render pass: {elapsed.TotalMilliseconds:F1} ms from app construction."));
     }
 
     private void MainPage_Unloaded(object sender, RoutedEventArgs e)
     {
+        CompositionTarget.Rendering -= MainPage_FirstRendering;
         AppLog.Info("MainPage unloaded.");
-        _refreshTimer.Stop();
-        _liveRunTimer.Stop();
-        _resourceTimer.Stop();
+        _refreshTimer?.Stop();
+        _liveDisplayTimer?.Stop();
+        _resourceTimer?.Stop();
         ViewModel.PropertyChanged -= ViewModel_PropertyChanged;
         _selectionCts?.Cancel();
         _selectionCts?.Dispose();
@@ -72,10 +90,9 @@ public sealed partial class MainPage : Page
         await ViewModel.RefreshOnTimerAsync(CancellationToken.None);
     }
 
-    private void LiveRunTimer_Tick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+    private void LiveDisplayTimer_Tick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
     {
-        ViewModel.RefreshLiveRunMetrics();
-        ViewModel.RefreshDiskUsageAnimation();
+        ViewModel.RefreshLiveDisplay();
     }
 
     private async void ResourceTimer_Tick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
@@ -85,15 +102,13 @@ public sealed partial class MainPage : Page
 
     private async Task InitializePageAsync()
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-
         try
         {
-            // The GitHub auth check runs alongside the tab load instead of in front of it.
-            var initialization = ViewModel.InitializeAsync(cts.Token);
-            // Tab data loads run unbounded - the 8s startup token is only for the auth/run check,
-            // and cancelling a disk scan mid-flight leaves the tab stuck on "Canceled".
-            if (ViewModel.IsKillProcessesVisible)
+            if (ViewModel.IsWorkflowExplorerVisible)
+            {
+                await EnsureWorkflowExplorerInitializedAsync();
+            }
+            else if (ViewModel.IsKillProcessesVisible)
             {
                 await ViewModel.EnsureKillProcessesLoadedAsync(CancellationToken.None);
             }
@@ -110,20 +125,44 @@ public sealed partial class MainPage : Page
                 await ViewModel.EnsureWorktreesLoadedAsync(CancellationToken.None);
             }
 
-            await initialization;
-            ApplyRefreshTimerSettings();
-            ApplyActivePaneState();
             AppLog.Info("InitializePageAsync completed.");
-        }
-        catch (OperationCanceledException)
-        {
-            ViewModel.AuthMessage = "GitHub auth check timed out. Click Reload Auth.";
-            ViewModel.StatusMessage = "Startup timed out while checking GitHub auth.";
-            AppLog.Info("InitializePageAsync timed out.");
         }
         catch (Exception ex)
         {
             AppLog.Error("InitializePageAsync failed.", ex);
+            ViewModel.StatusMessage = ex.Message;
+        }
+    }
+
+    private async Task EnsureWorkflowExplorerInitializedAsync()
+    {
+        if (_workflowInitialization is not null)
+        {
+            await _workflowInitialization;
+            return;
+        }
+
+        _workflowInitialization = InitializeWorkflowExplorerAsync();
+        await _workflowInitialization;
+        ApplyRefreshTimerSettings();
+    }
+
+    private async Task InitializeWorkflowExplorerAsync()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        try
+        {
+            await ViewModel.InitializeAsync(cts.Token);
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            ViewModel.AuthMessage = "GitHub auth check timed out. Click Reload Auth.";
+            ViewModel.StatusMessage = "Workflow Explorer initialization timed out.";
+            AppLog.Info("InitializeWorkflowExplorerAsync timed out.");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("InitializeWorkflowExplorerAsync failed.", ex);
             ViewModel.StatusMessage = ex.Message;
         }
     }
@@ -285,14 +324,20 @@ public sealed partial class MainPage : Page
 
     private async void OpenLogs_Click(object sender, RoutedEventArgs e)
     {
-        AppLog.Info($"Open Logs clicked. Folder={AppLog.LogDirectory}");
-        await Launcher.LaunchFolderPathAsync(AppLog.LogDirectory);
+        var directory = await AppLog.GetLogDirectoryAsync();
+        if (directory is null)
+        {
+            ViewModel.StatusMessage = "No writable log folder was found.";
+            return;
+        }
+
+        AppLog.Info($"Open Logs clicked. Folder={directory}");
+        await Launcher.LaunchFolderPathAsync(directory);
     }
 
     private void NavigateToResources_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowResources();
-        ApplyActivePaneState();
         ResourcesScroll.ChangeView(null, 0, null, true);
         ResourcesScroll.Focus(FocusState.Programmatic);
     }
@@ -315,24 +360,22 @@ public sealed partial class MainPage : Page
     private async void NavigateToKillProcesses_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowKillProcesses();
-        ApplyActivePaneState();
         ProcessFilterBox.Focus(FocusState.Programmatic);
         KillProcessesScroll.ChangeView(null, 0, null, true);
         KillProcessesScroll.Focus(FocusState.Programmatic);
         await ViewModel.EnsureKillProcessesLoadedAsync(CancellationToken.None);
     }
 
-    private void NavigateToRuns_Click(object sender, RoutedEventArgs e)
+    private async void NavigateToRuns_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowWorkflowExplorer();
-        ApplyActivePaneState();
         RunFilterBox.Focus(FocusState.Programmatic);
+        await EnsureWorkflowExplorerInitializedAsync();
     }
 
     private async void NavigateToDisk_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowDiskUsage();
-        ApplyActivePaneState();
         DiskScroll.ChangeView(null, 0, null, true);
         DiskScroll.Focus(FocusState.Programmatic);
         await ViewModel.EnsureDiskUsageLoadedAsync(CancellationToken.None);
@@ -341,7 +384,6 @@ public sealed partial class MainPage : Page
     private async void NavigateToOpenWork_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowOpenWork();
-        ApplyActivePaneState();
         OpenWorkScroll.ChangeView(null, 0, null, true);
         OpenWorkScroll.Focus(FocusState.Programmatic);
         await ViewModel.EnsureOpenWorkLoadedAsync(CancellationToken.None);
@@ -350,7 +392,6 @@ public sealed partial class MainPage : Page
     private async void NavigateToWorktrees_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowWorktrees();
-        ApplyActivePaneState();
         WorktreesScroll.ChangeView(null, 0, null, true);
         WorktreesScroll.Focus(FocusState.Programmatic);
         await ViewModel.EnsureWorktreesLoadedAsync(CancellationToken.None);
@@ -378,7 +419,6 @@ public sealed partial class MainPage : Page
             case CleanupActionKind.Navigate:
                 ViewModel.WorktreeFilter = "Safe to remove";
                 ViewModel.ShowWorktrees();
-                ApplyActivePaneState();
                 WorktreesScroll.ChangeView(null, 0, null, true);
                 await ViewModel.EnsureWorktreesLoadedAsync(CancellationToken.None);
                 return;
@@ -690,11 +730,33 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void BrowseFolder_Click(object sender, RoutedEventArgs e)
+    private void OpenFolderInExplorer_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement { Tag: string path })
+        if (sender is not FrameworkElement { Tag: string path })
         {
-            _ = ViewModel.BrowseFolderAsync(path);
+            return;
+        }
+
+        if (!Directory.Exists(path))
+        {
+            ViewModel.StatusMessage = $"Folder could not be resolved: {path}";
+            return;
+        }
+
+        OpenExistingPath(path);
+    }
+
+    private void StorageRowPrepared(ItemsRepeater sender, ItemsRepeaterElementPreparedEventArgs args) =>
+        ApplyStorageRowShade(args.Element, args.Index);
+
+    private void StorageRowIndexChanged(ItemsRepeater sender, ItemsRepeaterElementIndexChangedEventArgs args) =>
+        ApplyStorageRowShade(args.Element, args.NewIndex);
+
+    private static void ApplyStorageRowShade(UIElement element, int index)
+    {
+        if (element is FrameworkElement row && row.FindName("AlternateRowShade") is Border shade)
+        {
+            shade.Visibility = index % 2 == 0 ? Visibility.Collapsed : Visibility.Visible;
         }
     }
 
@@ -727,6 +789,7 @@ public sealed partial class MainPage : Page
 
     private void RegisterZoomKeyboardAccelerators()
     {
+        KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
         RegisterZoomAccelerator(VirtualKey.Add, VirtualKeyModifiers.Control, zoomIn: true);
         RegisterZoomAccelerator(VirtualKey.Subtract, VirtualKeyModifiers.Control, zoomIn: false);
     }
@@ -1040,18 +1103,30 @@ public sealed partial class MainPage : Page
         await ViewModel.DeleteBiggestFileAsync(entry, CancellationToken.None);
     }
 
-    private void NavigateToRepos_Click(object sender, RoutedEventArgs e)
+    private void RepositoryExpander_Expanding(Expander sender, ExpanderExpandingEventArgs args) =>
+        EnsureRepositorySetupLoaded();
+
+    private void EnsureRepositorySetupLoaded()
+    {
+        if (RepositorySetupContent is null)
+        {
+            FindName(nameof(RepositorySetupContent));
+        }
+    }
+
+    private async void NavigateToRepos_Click(object sender, RoutedEventArgs e)
     {
         ViewModel.ShowWorkflowExplorer();
-        ApplyActivePaneState();
+        EnsureRepositorySetupLoaded();
         RepositoryExpander.IsExpanded = true;
         OwnerInputBox.Focus(FocusState.Programmatic);
+        await EnsureWorkflowExplorerInitializedAsync();
     }
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(MainViewModel.ProcessFilterText))
-            KillProcessesScroll.ChangeView(null, 0, null, true);
+            KillProcessesScroll?.ChangeView(null, 0, null, true);
 
         if (e.PropertyName is nameof(MainViewModel.AutoRefreshEnabled) or nameof(MainViewModel.RefreshIntervalSeconds))
         {
@@ -1064,14 +1139,20 @@ public sealed partial class MainPage : Page
             ApplyResourceTimerSettings();
         }
 
-        if (e.PropertyName is nameof(MainViewModel.IsKillProcessesVisible) or
-            nameof(MainViewModel.IsWorkflowExplorerVisible) or
-            nameof(MainViewModel.IsDiskUsageVisible) or
-            nameof(MainViewModel.IsOpenWorkVisible) or
-            nameof(MainViewModel.IsWorktreesVisible) or
-            nameof(MainViewModel.ActiveTab))
+        if (e.PropertyName == nameof(MainViewModel.ActiveTab))
         {
             ApplyActivePaneState();
+        }
+
+        if (ViewModel.IsKillProcessesVisible &&
+            e.PropertyName is nameof(MainViewModel.HasSelectedActivity) or nameof(MainViewModel.HasSelectedProcess))
+        {
+            EnsureSelectedProcessDetailsLoaded();
+        }
+
+        if (e.PropertyName == nameof(MainViewModel.NeedsLiveDisplayUpdates))
+        {
+            ApplyLiveDisplayTimerSettings();
         }
 
         if (e.PropertyName is nameof(MainViewModel.SelectedRun))
@@ -1083,17 +1164,48 @@ public sealed partial class MainPage : Page
 
     private void ApplyRefreshTimerSettings()
     {
-        _refreshTimer.Stop();
-        _refreshTimer.Interval = TimeSpan.FromSeconds(ViewModel.RefreshIntervalSeconds);
-
-        if (ViewModel.AutoRefreshEnabled)
+        if (_workflowInitialization?.IsCompletedSuccessfully != true)
         {
-            _refreshTimer.Start();
-            AppLog.Info($"Refresh timer active. Interval={ViewModel.RefreshIntervalSeconds}s");
             return;
         }
 
-        AppLog.Info("Refresh timer paused.");
+        _refreshTimer?.Stop();
+        if (!IsLoaded || !ViewModel.AutoRefreshEnabled)
+        {
+            AppLog.Info("Refresh timer paused.");
+            return;
+        }
+
+        if (_refreshTimer is null)
+        {
+            _refreshTimer = DispatcherQueue.CreateTimer();
+            _refreshTimer.Tick += RefreshTimer_Tick;
+        }
+
+        _refreshTimer.Interval = TimeSpan.FromSeconds(ViewModel.RefreshIntervalSeconds);
+        _refreshTimer.Start();
+        AppLog.Info($"Refresh timer active. Interval={ViewModel.RefreshIntervalSeconds}s");
+    }
+
+    private void ApplyLiveDisplayTimerSettings()
+    {
+        if (!IsLoaded || !ViewModel.NeedsLiveDisplayUpdates)
+        {
+            _liveDisplayTimer?.Stop();
+            return;
+        }
+
+        if (_liveDisplayTimer is null)
+        {
+            _liveDisplayTimer = DispatcherQueue.CreateTimer();
+            _liveDisplayTimer.Interval = TimeSpan.FromMilliseconds(500);
+            _liveDisplayTimer.Tick += LiveDisplayTimer_Tick;
+        }
+
+        if (!_liveDisplayTimer.IsRunning)
+        {
+            _liveDisplayTimer.Start();
+        }
     }
 
     /// <summary>
@@ -1102,12 +1214,18 @@ public sealed partial class MainPage : Page
     /// </summary>
     private void ApplyResourceTimerSettings()
     {
-        _resourceTimer.Stop();
+        _resourceTimer?.Stop();
 
-        if (!ViewModel.ResourceMonitoringEnabled)
+        if (!IsLoaded || !ViewModel.ResourceMonitoringEnabled)
         {
             AppLog.Info("Resource monitor paused.");
             return;
+        }
+
+        if (_resourceTimer is null)
+        {
+            _resourceTimer = DispatcherQueue.CreateTimer();
+            _resourceTimer.Tick += ResourceTimer_Tick;
         }
 
         _resourceTimer.Interval = TimeSpan.FromSeconds(ViewModel.ResourceIntervalSeconds);
@@ -1125,19 +1243,29 @@ public sealed partial class MainPage : Page
         var isOpenWorkVisible = context.ShowOpenWork;
         var isWorktreesVisible = context.ShowWorktrees;
 
-        KillProcessesContentPane.Visibility = isKillVisible ? Visibility.Visible : Visibility.Collapsed;
-        WorkflowContentPane.Visibility = isWorkflowVisible ? Visibility.Visible : Visibility.Collapsed;
-        DiskContentPane.Visibility = isDiskVisible ? Visibility.Visible : Visibility.Collapsed;
-        ResourcesContentPane.Visibility = isResourcesVisible ? Visibility.Visible : Visibility.Collapsed;
-        OpenWorkContentPane.Visibility = isOpenWorkVisible ? Visibility.Visible : Visibility.Collapsed;
-        WorktreesContentPane.Visibility = isWorktreesVisible ? Visibility.Visible : Visibility.Collapsed;
+        SetDeferredPaneVisibility(KillProcessesContentPane, nameof(KillProcessesContentPane), isKillVisible);
+        SetDeferredPaneVisibility(WorkflowContentPane, nameof(WorkflowContentPane), isWorkflowVisible);
+        SetDeferredPaneVisibility(DiskContentPane, nameof(DiskContentPane), isDiskVisible);
+        SetDeferredPaneVisibility(ResourcesContentPane, nameof(ResourcesContentPane), isResourcesVisible);
+        SetDeferredPaneVisibility(OpenWorkContentPane, nameof(OpenWorkContentPane), isOpenWorkVisible);
+        SetDeferredPaneVisibility(WorktreesContentPane, nameof(WorktreesContentPane), isWorktreesVisible);
 
         RunDetailsBorder.Visibility = Visibility.Visible;
         Grid.SetColumnSpan(MainContentBorder, 1);
-        DetailsScroll.Visibility = isWorkflowVisible ? Visibility.Visible : Visibility.Collapsed;
-        ProcessDetailsScroll.Visibility = isKillVisible ? Visibility.Visible : Visibility.Collapsed;
-        StorageOverviewScroll.Visibility = isDiskVisible ? Visibility.Visible : Visibility.Collapsed;
-        SystemOverviewScroll.Visibility = isResourcesVisible ? Visibility.Visible : Visibility.Collapsed;
+        var firstRunDetailsLoad = isWorkflowVisible && DetailsScroll is null;
+        SetDeferredPaneVisibility(DetailsScroll, nameof(DetailsScroll), isWorkflowVisible);
+        SetDeferredPaneVisibility(ProcessDetailsScroll, nameof(ProcessDetailsScroll), isKillVisible);
+        SetDeferredPaneVisibility(StorageOverviewScroll, nameof(StorageOverviewScroll), isDiskVisible);
+        SetDeferredPaneVisibility(SystemOverviewScroll, nameof(SystemOverviewScroll), isResourcesVisible);
+        if (isKillVisible)
+        {
+            EnsureSelectedProcessDetailsLoaded();
+        }
+
+        if (firstRunDetailsLoad)
+        {
+            UpdateRunDetailsExpanders();
+        }
         RunStatusBadge.Visibility = isWorkflowVisible && ViewModel.HasSelectedRun ? Visibility.Visible : Visibility.Collapsed;
 
         ApplyTabButtonState(ResourcesNavigationButton, isResourcesVisible);
@@ -1146,6 +1274,32 @@ public sealed partial class MainPage : Page
         ApplyTabButtonState(StorageNavigationButton, isDiskVisible);
         ApplyTabButtonState(OpenWorkNavigationButton, isOpenWorkVisible);
         ApplyTabButtonState(WorktreesNavigationButton, isWorktreesVisible);
+    }
+
+    private void EnsureSelectedProcessDetailsLoaded()
+    {
+        if (ViewModel.HasSelectedActivity && SelectedActivityDetails is null)
+        {
+            FindName(nameof(SelectedActivityDetails));
+        }
+
+        if (ViewModel.HasSelectedProcess && SelectedProcessDetails is null)
+        {
+            FindName(nameof(SelectedProcessDetails));
+        }
+    }
+
+    private void SetDeferredPaneVisibility(FrameworkElement? pane, string name, bool visible)
+    {
+        if (pane is null && visible)
+        {
+            pane = (FrameworkElement)FindName(name);
+        }
+
+        if (pane is not null)
+        {
+            pane.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 
     private static void ApplyTabButtonState(Button button, bool isActive)
@@ -1179,16 +1333,14 @@ public sealed partial class MainPage : Page
 
     private void UpdateRunDetailsExpanders()
     {
-        var selectedRun = ViewModel.SelectedRun;
-        if (selectedRun is null)
+        if (TriggerDetailsExpander is not { } trigger || PullRequestDescriptionExpander is not { } pullRequest)
         {
-            TriggerDetailsExpander.IsExpanded = false;
-            PullRequestDescriptionExpander.IsExpanded = false;
             return;
         }
 
-        TriggerDetailsExpander.IsExpanded = selectedRun.HasTriggerDetails;
-        PullRequestDescriptionExpander.IsExpanded = selectedRun.HasRunDescription;
+        var selectedRun = ViewModel.SelectedRun;
+        trigger.IsExpanded = selectedRun?.HasTriggerDetails == true;
+        pullRequest.IsExpanded = selectedRun?.HasRunDescription == true;
     }
 
     private void OpenPath_Click(object sender, RoutedEventArgs e)
@@ -1205,13 +1357,21 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        Process.Start(new ProcessStartInfo
-        {
-            FileName = targetPath,
-            UseShellExecute = true
-        });
+        OpenExistingPath(targetPath);
+    }
 
-        AppLog.Info($"Opened path: {targetPath}");
+    private void OpenExistingPath(string path)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+            AppLog.Info($"Opened path: {path}");
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            ViewModel.StatusMessage = $"Could not open {path}: {ex.Message}";
+            AppLog.Error($"Could not open {path}.", ex);
+        }
     }
 
     private async void ClearFolder_Click(object sender, RoutedEventArgs e)
@@ -1221,10 +1381,16 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        var targetPath = FindExistingPath(rawPath);
-        if (string.IsNullOrWhiteSpace(targetPath) || !Directory.Exists(targetPath))
+        var targetPath = rawPath.Trim().Trim('"');
+        if (!Path.IsPathFullyQualified(targetPath) || !Directory.Exists(targetPath))
         {
             ViewModel.StatusMessage = $"Folder could not be resolved: {rawPath}";
+            return;
+        }
+
+        if (!DiskUsageEntry.IsClearableDirectory(targetPath))
+        {
+            ViewModel.StatusMessage = $"Cleanup is disabled for {targetPath}.";
             return;
         }
 

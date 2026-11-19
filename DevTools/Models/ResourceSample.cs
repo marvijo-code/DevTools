@@ -101,16 +101,23 @@ public sealed record ResourceSample(
     IReadOnlyList<VolumeUsage> Volumes,
     IReadOnlyList<AgentSessionUsage> Sessions)
 {
+    private static readonly string? SystemDriveRoot = Path.GetPathRoot(Environment.SystemDirectory);
+
     /// <summary>The volume Windows is installed on, which is the one that hurts when it fills up.</summary>
-    public VolumeUsage? SystemVolume
+    public VolumeUsage? SystemVolume => FindVolume(SystemDriveRoot) ?? (Volumes.Count > 0 ? Volumes[0] : null);
+
+    internal VolumeUsage? FindVolume(string? name)
     {
-        get
+        for (var i = 0; i < Volumes.Count; i++)
         {
-            var systemRoot = Path.GetPathRoot(Environment.SystemDirectory);
-            return Volumes.FirstOrDefault(volume =>
-                       string.Equals(volume.Name, systemRoot, StringComparison.OrdinalIgnoreCase)) ??
-                   Volumes.FirstOrDefault();
+            var volume = Volumes[i];
+            if (string.Equals(volume.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                return volume;
+            }
         }
+
+        return null;
     }
 
     public long PhysicalUsedBytes => Math.Max(0, PhysicalTotalBytes - PhysicalAvailableBytes);

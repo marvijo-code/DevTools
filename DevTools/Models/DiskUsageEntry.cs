@@ -1,4 +1,5 @@
 using DevTools.Infrastructure;
+using DevTools.Services.FolderSizes;
 
 namespace DevTools.Models;
 
@@ -68,7 +69,7 @@ public sealed class DiskUsageEntry : ObservableObject
 
     public bool HasNote => !string.IsNullOrWhiteSpace(Note);
 
-    public bool CanClear => !IsMeasuring && Directory.Exists(Path) && IsClearableDirectory(Path);
+    public bool CanClear => ExistsOnDisk && !IsMeasuring && IsClearableDirectory(Path) && Directory.Exists(Path);
 
     public IReadOnlyList<DiskUsageEntry> Children => _children;
 
@@ -182,21 +183,29 @@ public sealed class DiskUsageEntry : ObservableObject
         RaisePropertyChanged(nameof(CanClear));
     }
 
-    public void SetChildren(IEnumerable<DiskUsageEntry> children)
-    {
-        // Keep nested folders open across a refresh that rebuilds the same children.
-        var previouslyExpanded = _children
-            .Where(child => child.IsExpanded)
-            .Select(child => child.Path)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        _children = children
+    public void SetChildren(IEnumerable<DiskUsageEntry> children) =>
+        SetRankedChildren(children
             .OrderByDescending(child => child.SizeBytes ?? -1)
             .ThenBy(child => child.Path, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+            .ToList());
+
+    internal void SetRankedChildren(IReadOnlyList<DiskUsageEntry> children)
+    {
+        // Keep nested folders open across a refresh that rebuilds the same children.
+        HashSet<string>? previouslyExpanded = null;
+        foreach (var child in _children)
+        {
+            if (child.IsExpanded)
+            {
+                (previouslyExpanded ??= new HashSet<string>(StringComparer.Ordinal)).Add(child.Path);
+            }
+        }
+
+        _children = children;
         foreach (var child in _children)
         {
             child.Parent = this;
-            if (previouslyExpanded.Contains(child.Path) && child.CanExpand)
+            if (previouslyExpanded?.Contains(child.Path) == true && child.CanExpand)
             {
                 child._isExpanded = true;
             }
@@ -244,19 +253,22 @@ public sealed class DiskUsageEntry : ObservableObject
         Usage = $"Measuring... {FormatDuration(now - _measurementStartedAt.Value)}";
     }
 
-    private static bool IsClearableDirectory(string rawPath)
+    internal static bool IsClearableDirectory(string rawPath)
     {
         try
         {
-            var fullPath = NormalizePath(System.IO.Path.GetFullPath(rawPath));
-            if (string.IsNullOrWhiteSpace(fullPath) || fullPath.Length <= 3)
+            var absolutePath = System.IO.Path.GetFullPath(rawPath);
+            var root = System.IO.Path.GetPathRoot(absolutePath);
+            var fullPath = NormalizePath(absolutePath);
+            if (fullPath.Length <= 3 || WindowsVolumePaths.GetVolumeGuid(root).HasValue ||
+                (root is not null && WindowsVolumePaths.IsRemovable(root)))
             {
                 return false;
             }
 
             var protectedPaths = new[]
             {
-                NormalizePath(System.IO.Path.GetPathRoot(fullPath) ?? string.Empty),
+                NormalizePath(root ?? string.Empty),
                 NormalizePath(Environment.GetFolderPath(Environment.SpecialFolder.Windows)),
                 NormalizePath(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)),
                 NormalizePath(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)),

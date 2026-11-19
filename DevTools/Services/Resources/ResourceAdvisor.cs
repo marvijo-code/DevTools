@@ -142,9 +142,11 @@ public sealed class ResourceAdvisor
     /// </summary>
     private static void AddDiskSpaceFindings(List<ResourceAdvice> findings, ResourceHistory history, ResourceSample latest)
     {
+        var systemVolume = latest.SystemVolume;
+        var oldest = history.Count >= MinimumTrendSamples ? history.Oldest : null;
         foreach (var volume in latest.Volumes)
         {
-            var isSystemVolume = ReferenceEquals(volume, latest.SystemVolume);
+            var isSystemVolume = ReferenceEquals(volume, systemVolume);
 
             if (volume.FreeBytes < CriticalFreeBytes || volume.FreePercent < 5)
             {
@@ -165,7 +167,10 @@ public sealed class ResourceAdvisor
                     "Clear build outputs and package caches from the Disk Usage tab before it becomes urgent."));
             }
 
-            AddFillRateFinding(findings, history, volume);
+            if (oldest is not null)
+            {
+                AddFillRateFinding(findings, oldest, latest, volume.Name);
+            }
         }
     }
 
@@ -173,22 +178,17 @@ public sealed class ResourceAdvisor
     /// Projects when a volume runs out based on the trend across the sampled window. Only reports when the
     /// window is long enough for the slope to mean anything and the drive is genuinely filling.
     /// </summary>
-    private static void AddFillRateFinding(List<ResourceAdvice> findings, ResourceHistory history, VolumeUsage volume)
+    private static void AddFillRateFinding(
+        List<ResourceAdvice> findings, ResourceSample firstSample, ResourceSample lastSample, string volumeName)
     {
-        var samples = history.Snapshot();
-        if (samples.Count < MinimumTrendSamples)
-        {
-            return;
-        }
-
-        var oldest = FindVolume(samples[0], volume.Name);
-        var newest = FindVolume(samples[^1], volume.Name);
+        var oldest = firstSample.FindVolume(volumeName);
+        var newest = lastSample.FindVolume(volumeName);
         if (oldest is null || newest is null)
         {
             return;
         }
 
-        var elapsed = samples[^1].Timestamp - samples[0].Timestamp;
+        var elapsed = lastSample.Timestamp - firstSample.Timestamp;
         if (elapsed <= TimeSpan.Zero)
         {
             return;
@@ -206,16 +206,10 @@ public sealed class ResourceAdvisor
 
         findings.Add(new ResourceAdvice(
             hoursRemaining < 12 ? ResourceAdviceSeverity.Critical : ResourceAdviceSeverity.Warning,
-            $"{volume.Name} is filling at {ByteFormatter.Format((long)bytesPerHour)}/hour",
+            $"{volumeName} is filling at {ByteFormatter.Format((long)bytesPerHour)}/hour",
             $"Free space dropped by {ByteFormatter.Format(consumedBytes)} over the last {FormatDuration(elapsed)}. " +
             $"At this rate the volume runs out in roughly {FormatDuration(TimeSpan.FromHours(hoursRemaining))}.",
             "Find what is writing - a runaway log, a build loop, or a container layer cache - rather than just deleting files."));
-    }
-
-    private static VolumeUsage? FindVolume(ResourceSample sample, string name)
-    {
-        return sample.Volumes.FirstOrDefault(volume =>
-            string.Equals(volume.Name, name, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string FormatDuration(TimeSpan duration)

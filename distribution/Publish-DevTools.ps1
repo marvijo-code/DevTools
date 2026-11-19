@@ -9,7 +9,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
 if (-not (Test-Path -LiteralPath (Join-Path $app 'DevTools.exe'))) { throw 'Release executable is missing.' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Start-DevTools.ps1'),(Join-Path $PSScriptRoot 'Update-DevTools.ps1'),(Join-Path $PSScriptRoot 'Install-DevTools.ps1'),(Join-Path $PSScriptRoot 'Register-DevTools.ps1') -Destination $app
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-& $compiler /nologo /target:winexe /platform:x64 /reference:System.Windows.Forms.dll ('/win32icon:' + (Join-Path $app 'icon.ico')) ('/out:' + (Join-Path $app 'DevTools.Launcher.exe')) (Join-Path $PSScriptRoot 'DevTools.Launcher.cs') (Join-Path $repositoryRoot 'DevTools\Infrastructure\ShellIdentity.cs')
+& $compiler /nologo /target:winexe /platform:x64 /reference:System.Windows.Forms.dll /reference:System.Runtime.Serialization.dll /reference:System.Xml.dll ('/win32icon:' + (Join-Path $app 'icon.ico')) ('/out:' + (Join-Path $app 'DevTools.Launcher.exe')) (Join-Path $PSScriptRoot 'DevTools.Launcher.cs') (Join-Path $repositoryRoot 'DevTools\Infrastructure\ShellIdentity.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Stable launcher build failed.' }
 $commit = git -C $repositoryRoot rev-parse HEAD
 @{ version=$Version; repository='marvijo-code/DevTools'; commit=$commit } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $app 'release.json') -Encoding utf8

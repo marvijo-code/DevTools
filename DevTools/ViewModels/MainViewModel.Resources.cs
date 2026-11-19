@@ -17,7 +17,7 @@ public sealed partial class MainViewModel
 
     private static readonly IReadOnlyList<int> ResourceIntervalChoices = [1, 2, 5];
 
-    private readonly ResourceMonitor _resourceMonitor = new();
+    private ResourceMonitor? _resourceMonitor;
     private readonly ResourceAdvisor _resourceAdvisor = new();
     private readonly ResourceHistory _resourceHistory = new(ResourceHistoryCapacity);
     private readonly SemaphoreSlim _resourceSampleGate = new(1, 1);
@@ -27,12 +27,12 @@ public sealed partial class MainViewModel
     private readonly ObservableCollection<VolumeUsage> _resourceVolumes = [];
     private readonly ObservableCollection<AgentSessionEntry> _agentSessions = [];
 
-    private IReadOnlyList<double> _cpuSeries = [];
-    private IReadOnlyList<double> _commitSeries = [];
-    private IReadOnlyList<double> _memorySeries = [];
-    private IReadOnlyList<double> _diskSeries = [];
-    private IReadOnlyList<double> _hardFaultSeries = [];
-    private IReadOnlyList<double> _diskFreeSeries = [];
+    private IReadOnlyList<double>? _cpuSeries;
+    private IReadOnlyList<double>? _commitSeries;
+    private IReadOnlyList<double>? _memorySeries;
+    private IReadOnlyList<double>? _diskSeries;
+    private IReadOnlyList<double>? _hardFaultSeries;
+    private IReadOnlyList<double>? _diskFreeSeries;
 
     private string _cpuValueText = "--";
     private string _commitValueText = "--";
@@ -59,17 +59,23 @@ public sealed partial class MainViewModel
 
     public IReadOnlyList<int> ResourceIntervalOptions => ResourceIntervalChoices;
 
-    public IReadOnlyList<double> CpuSeries => _cpuSeries;
+    public IReadOnlyList<double> CpuSeries =>
+        _cpuSeries ??= _resourceHistory.Series(static sample => sample.CpuPercent);
 
-    public IReadOnlyList<double> CommitSeries => _commitSeries;
+    public IReadOnlyList<double> CommitSeries =>
+        _commitSeries ??= _resourceHistory.Series(static sample => sample.CommitPercent);
 
-    public IReadOnlyList<double> MemorySeries => _memorySeries;
+    public IReadOnlyList<double> MemorySeries =>
+        _memorySeries ??= _resourceHistory.Series(static sample => sample.PhysicalUsedPercent);
 
-    public IReadOnlyList<double> DiskSeries => _diskSeries;
+    public IReadOnlyList<double> DiskSeries =>
+        _diskSeries ??= _resourceHistory.Series(static sample => sample.DiskBytesPerSecond / (1024d * 1024d));
 
-    public IReadOnlyList<double> HardFaultSeries => _hardFaultSeries;
+    public IReadOnlyList<double> HardFaultSeries =>
+        _hardFaultSeries ??= _resourceHistory.Series(static sample => sample.HardFaultsPerSecond);
 
-    public IReadOnlyList<double> DiskFreeSeries => _diskFreeSeries;
+    public IReadOnlyList<double> DiskFreeSeries =>
+        _diskFreeSeries ??= _resourceHistory.Series(static sample => (sample.SystemVolume?.FreeBytes ?? 0) / (1024d * 1024d * 1024d));
 
     public string CpuValueText => _cpuValueText;
 
@@ -172,7 +178,7 @@ public sealed partial class MainViewModel
 
         try
         {
-            var sample = await Task.Run(_resourceMonitor.Sample);
+            var sample = await Task.Run(() => (_resourceMonitor ??= new ResourceMonitor()).Sample());
 
             if (sample.PhysicalTotalBytes <= 0)
             {
@@ -180,14 +186,14 @@ public sealed partial class MainViewModel
                 return;
             }
 
-            if (!_resourceMonitor.HasBaseline)
+            if (_resourceMonitor?.HasBaseline != true)
             {
                 SetResourceStatus("Establishing baseline...");
                 return;
             }
 
             _resourceHistory.Add(sample);
-            UpdateSeries();
+            InvalidateResourceSeries();
             UpdateValueText(sample);
             SynchronizeWorkloads(sample);
             SynchronizeTopProcesses(sample);
@@ -215,27 +221,34 @@ public sealed partial class MainViewModel
         _resourceAdvice.Clear();
         _resourceVolumes.Clear();
         _agentSessions.Clear();
-        UpdateSeries();
+        InvalidateResourceSeries();
         SetResourceStatus("History cleared.");
     }
 
-    private void UpdateSeries()
+    private void InvalidateResourceSeries()
     {
-        _cpuSeries = _resourceHistory.Series(sample => sample.CpuPercent);
-        _commitSeries = _resourceHistory.Series(sample => sample.CommitPercent);
-        _memorySeries = _resourceHistory.Series(sample => sample.PhysicalUsedPercent);
-        _diskSeries = _resourceHistory.Series(sample => sample.DiskBytesPerSecond / (1024d * 1024d));
-        _hardFaultSeries = _resourceHistory.Series(sample => sample.HardFaultsPerSecond);
-        _diskFreeSeries = _resourceHistory.Series(sample =>
-            (sample.SystemVolume?.FreeBytes ?? 0) / (1024d * 1024d * 1024d));
+        _cpuSeries = null;
+        _commitSeries = null;
+        _memorySeries = null;
+        _diskSeries = null;
+        _hardFaultSeries = null;
+        _diskFreeSeries = null;
+        if (IsResourcesVisible)
+        {
+            RaiseResourceSeriesChanged();
+        }
 
+        RaisePropertyChanged(nameof(ResourceWindowText));
+    }
+
+    private void RaiseResourceSeriesChanged()
+    {
         RaisePropertyChanged(nameof(DiskFreeSeries));
         RaisePropertyChanged(nameof(CpuSeries));
         RaisePropertyChanged(nameof(CommitSeries));
         RaisePropertyChanged(nameof(MemorySeries));
         RaisePropertyChanged(nameof(DiskSeries));
         RaisePropertyChanged(nameof(HardFaultSeries));
-        RaisePropertyChanged(nameof(ResourceWindowText));
     }
 
     private void UpdateValueText(ResourceSample sample)

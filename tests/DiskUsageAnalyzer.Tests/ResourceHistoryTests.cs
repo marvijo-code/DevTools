@@ -21,6 +21,8 @@ public sealed class ResourceHistoryTests
         AddSamples(history, 1, 2, 3, 4, 5);
 
         Assert.Equal(3, history.Count);
+        Assert.Equal(3d, history.Oldest!.CpuPercent);
+        Assert.Equal(5d, history.Latest!.CpuPercent);
         Assert.Equal([3d, 4d, 5d], history.Series(sample => sample.CpuPercent));
     }
 
@@ -72,7 +74,28 @@ public sealed class ResourceHistoryTests
 
         Assert.Equal(0, history.Count);
         Assert.Null(history.Latest);
+        Assert.Null(history.Oldest);
+        Assert.Empty(history.Snapshot());
         Assert.Empty(history.Series(sample => sample.CpuPercent));
+        Assert.Equal(0d, history.Average(sample => sample.CpuPercent, 4));
+        Assert.Equal(0d, history.Peak(sample => sample.CpuPercent, 4));
+        AddSamples(history, 7);
+        Assert.Equal(7d, history.Oldest!.CpuPercent);
+        Assert.Equal([7d], history.Series(sample => sample.CpuPercent));
+    }
+
+    [Fact]
+    public void SystemVolume_PrefersTheWindowsVolumeAndFallsBackToTheFirstVolume()
+    {
+        var windowsRoot = Path.GetPathRoot(Environment.SystemDirectory)!;
+        var otherRoot = windowsRoot.Equals(@"Z:\", StringComparison.OrdinalIgnoreCase) ? @"Y:\" : @"Z:\";
+        var other = new VolumeUsage(otherRoot, "Other", 100, 20);
+        var windows = new VolumeUsage(windowsRoot.ToLowerInvariant(), "Windows", 100, 10);
+        var sample = ResourceSample.Empty with { Volumes = [other, windows] };
+
+        Assert.Same(windows, sample.SystemVolume);
+        Assert.Same(other, (sample with { Volumes = [other] }).SystemVolume);
+        Assert.Null(ResourceSample.Empty.SystemVolume);
     }
 
     [Fact]

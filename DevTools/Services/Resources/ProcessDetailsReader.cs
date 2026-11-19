@@ -44,6 +44,11 @@ public sealed class ProcessDetailsReader
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, int processId);
 
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetProcessTimes(IntPtr handle, out long creationTime, out long exitTime,
+        out long kernelTime, out long userTime);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
@@ -100,7 +105,12 @@ public sealed class ProcessDetailsReader
         return details;
     }
 
-    private static ProcessDetails ReadUncached(int processId)
+    internal static ProcessDetails ReadCurrent(int processId, DateTimeOffset startTime) =>
+        processId <= 0 || startTime == DateTimeOffset.MinValue
+            ? ProcessDetails.Empty
+            : ReadUncached(processId, startTime.ToFileTime());
+
+    private static ProcessDetails ReadUncached(int processId, long? expectedCreationTime = null)
     {
         // Protected and elevated processes deny the handle; that is expected and simply yields no detail.
         var handle = OpenProcess(ProcessQueryInformation | ProcessVmRead, false, processId);
@@ -111,6 +121,13 @@ public sealed class ProcessDetailsReader
 
         try
         {
+            // The PID could have been reused since the kernel snapshot.
+            if (expectedCreationTime is long expected &&
+                (!GetProcessTimes(handle, out var creationTime, out _, out _, out _) || creationTime != expected))
+            {
+                return ProcessDetails.Empty;
+            }
+
             if (NtQueryInformationProcess(handle, ProcessBasicInformation, out var info, Marshal.SizeOf<ProcessBasicInfo>(), out _) < 0 ||
                 info.PebBaseAddress == IntPtr.Zero)
             {

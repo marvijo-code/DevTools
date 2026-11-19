@@ -9,6 +9,42 @@ public sealed class MftFolderSizeScannerTests
     private const int Root = 5;
 
     [Fact]
+    public async Task ScanReservation_CancelsQueuedWorkAndCanBeReused()
+    {
+        using var active = await MftTableLoader.EnterScanAsync(CancellationToken.None);
+        using var cts = new CancellationTokenSource();
+        var queued = MftTableLoader.EnterScanAsync(cts.Token).AsTask();
+
+        Assert.False(queued.IsCompleted);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued);
+
+        active.Dispose();
+        active.Dispose();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        using var next = await MftTableLoader.EnterScanAsync(deadline.Token);
+    }
+
+    [Fact]
+    public void BuildTree_PausesForPriorityWorkAndCancelsTheWait()
+    {
+        var table = CreateTable(64);
+        AddDirectory(table, 24, Root, "fixture");
+        AddFile(table, 25, 24, "content.bin", 42);
+
+        using (ScanGate.Pause())
+        using (var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(40)))
+        {
+            Assert.ThrowsAny<OperationCanceledException>(() =>
+                MftFolderSizeScanner.BuildTree(table, @"C:\", "fixture", System.Diagnostics.Stopwatch.StartNew(), timeout.Token));
+        }
+
+        var result = MftFolderSizeScanner.BuildTree(table, @"C:\", "fixture", System.Diagnostics.Stopwatch.StartNew());
+        Assert.Equal(42, result.TotalBytes);
+        Assert.Equal(1, result.TotalFiles);
+    }
+
+    [Fact]
     public void RankChildFolders_RanksDirectChildrenBySubtreeSize()
     {
         var table = CreateTable(160);
@@ -77,6 +113,36 @@ public sealed class MftFolderSizeScannerTests
         Assert.Empty(hits);
     }
 
+    [Theory]
+    [InlineData(@"C:\", 4, 2100, @"C:\Other\outside.bin", 1500)]
+    [InlineData(@"C:\Target", 3, 600, @"C:\Target\Nested\largest.bin", 500)]
+    public void RankFiles_ReportsExactCountsAndRankingsForTheRequestedRoot(string root, int files, long bytes,
+        string topPath, long topSize)
+    {
+        var table = CreateTable(128);
+        AddDirectory(table, 24, Root, "Target");
+        AddDirectory(table, 25, 24, "Nested");
+        AddDirectory(table, 26, Root, "Other");
+        AddFile(table, 40, 24, "inside.bin", 100);
+        AddFile(table, 41, 25, "largest.bin", 500);
+        AddFile(table, 42, 24, "empty.bin", 0);
+        AddFile(table, 43, 26, "outside.bin", 1500);
+        AddFile(table, 44, 24, "extension.bin", 2000);
+        table.Flags[44] |= MftRecordTable.FlagExtension;
+        AddFile(table, 45, MftRecordTable.InvalidParentRecord, "unlinked.bin", 2000);
+        table.AllocSize[41] = 4096;
+        table.AllocSize[43] = 4096;
+
+        var result = MftScanner.RankFiles(table, root, 1, System.Diagnostics.Stopwatch.StartNew(), CancellationToken.None);
+
+        Assert.Equal(files, result.FilesSeen);
+        Assert.Equal(bytes, result.BytesSeen);
+        var top = Assert.Single(result.Top);
+        Assert.Equal(topPath, top.FullPath);
+        Assert.Equal(topSize, top.SizeBytes);
+        Assert.Equal(4096, top.AllocatedBytes);
+    }
+
     [Fact]
     public void RankChildFolders_SkipsZeroSizedAndNonChildRecords()
     {
@@ -120,8 +186,159 @@ public sealed class MftFolderSizeScannerTests
         Assert.Equal([@"C:\Users", @"C:\Windows"], tree.GetChildren(0).Select(tree.GetPath).ToArray());
     }
 
-    private static MftRecordTable CreateTable(int recordCount)
+    [Fact]
+    public void BuildTree_AttachesChildrenOfLaterRecordsAndLeavesCyclesUnattributed()
     {
+        var table = CreateTable(80, includeAllocation: true);
+        AddDirectory(table, 24, 30, "First");
+        AddDirectory(table, 30, Root, "Parent");
+        AddDirectory(table, 31, 32, "CycleStart");
+        AddDirectory(table, 32, 31, "CycleEnd");
+        AddFile(table, 40, 24, "attached.bin", 20);
+        AddFile(table, 41, 31, "cycle.bin", 30);
+        table.RecordAllocation!.SetParsedClusters(40, 1);
+        table.RecordAllocation.SetParsedClusters(41, 2);
+        table.RecordAllocation.SetParsedClusters(32, 1);
+
+        var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "NTFS MFT", System.Diagnostics.Stopwatch.StartNew());
+
+        var parent = tree.Find(@"C:\Parent");
+        var child = tree.Find(@"C:\Parent\First");
+        Assert.Equal([parent], tree.GetChildren(0));
+        Assert.Equal([child], tree.GetChildren(parent));
+        Assert.Empty(tree.GetChildren(child));
+        Assert.Equal((20L, 1L), tree.GetDirectFileStatistics(child));
+        Assert.Equal(3, tree.FolderCount);
+        Assert.Equal(20, tree.TotalBytes);
+        Assert.Equal(20, tree.GetTotalBytes(child));
+        Assert.Equal(4096, tree.GetAllocatedBytes(0));
+        Assert.Equal(new NtfsRecordAllocation(0, 12_288), tree.NtfsAllocation);
+    }
+
+    [Fact]
+    public void BuildTree_ReportsReservedRecordsApartFromFolderAllocation()
+    {
+        var table = CreateTable(160, includeAllocation: true);
+        AddDirectory(table, 24, Root, "Users");
+        AddFile(table, 40, 24, "data.bin", 25);
+        table.RecordAllocation!.SetParsedClusters(0, 2);
+        table.RecordAllocation.SetParsedClusters(24, 1);
+        table.RecordAllocation.SetParsedClusters(40, 2);
+
+        var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "NTFS MFT", System.Diagnostics.Stopwatch.StartNew());
+
+        Assert.Equal(25, tree.TotalBytes);
+        Assert.Equal(12_288, tree.GetAllocatedBytes(0));
+        Assert.Equal(new NtfsRecordAllocation(8192, 0), tree.NtfsAllocation);
+        Assert.Equal(12_288, tree.GetAllocatedBytes(tree.Find(@"C:\Users")));
+    }
+
+    [Fact]
+    public void ValidateParentReferences_KeepsStaleAndInvalidLinksOutOfFolderTotals()
+    {
+        var table = CreateTable(80, includeAllocation: true);
+        AddDirectory(table, Root, Root, ".");
+        AddDirectory(table, 24, Root, "Current");
+        AddDirectory(table, 25, Root, "Old");
+        AddDirectory(table, 26, 25, "Nested");
+        AddFile(table, 40, 24, "current.bin", 20);
+        AddFile(table, 41, 24, "stale.bin", 50);
+        AddFile(table, 42, 40, "parent-is-a-file.bin", 60);
+        AddFile(table, 43, 24, "unsequenced.bin", 70);
+        AddFile(table, 44, 25, "detached.bin", 90);
+        AddFile(table, 45, uint.MaxValue, "missing-parent.bin", 80);
+
+        var references = new uint[80];
+        references[Root] = (9U << 16) | 9U;
+        references[24] = (7U << 16) | 9U;
+        references[25] = (2U << 16) | 8U;
+        references[26] = (3U << 16) | 2U;
+        references[40] = (3U << 16) | 7U;
+        references[41] = 6;
+        references[42] = 3;
+        references[44] = 2;
+        references[45] = 7;
+        table.RecordAllocation!.SetParsedClusters(40, 1);
+        table.RecordAllocation.SetParsedClusters(41, 2);
+        table.RecordAllocation.SetParsedClusters(44, 2);
+
+        MftTableLoader.ValidateParentReferences(table.Parent, table.Flags, references, CancellationToken.None);
+        var tree = MftFolderSizeScanner.BuildTree(table, @"C:\", "test", System.Diagnostics.Stopwatch.StartNew());
+
+        Assert.Equal(24U, table.Parent[40]);
+        Assert.Equal(25U, table.Parent[44]);
+        Assert.Equal(MftRecordTable.InvalidParentRecord, table.Parent[25]);
+        Assert.All(new[] { 41, 42, 43, 45 }, index => Assert.False(table.IsNamedFile(index)));
+        Assert.Equal(20, tree.TotalBytes);
+        Assert.Equal(4096, tree.GetAllocatedBytes(0));
+        Assert.Equal(new NtfsRecordAllocation(0, 16_384), tree.NtfsAllocation);
+        Assert.Equal(-1, tree.Find(@"C:\Old"));
+        Assert.Equal(2, tree.FolderCount);
+    }
+
+    [Fact]
+    public void ResolveDirectoryRecord_PrefersExactCaseAndRejectsAmbiguousOrForeignPaths()
+    {
+        var table = CreateTable(80);
+        AddDirectory(table, 24, Root, "Workspace");
+        AddDirectory(table, 25, 24, "Repo");
+        AddDirectory(table, 26, 24, "repo");
+        AddDirectory(table, 27, 26, "Artifacts");
+
+        Assert.Equal((uint)Root, table.ResolveDirectoryRecord(@"C:\"));
+        Assert.Equal(25U, table.ResolveDirectoryRecord(@"C:\workspace\Repo"));
+        Assert.Equal(27U, table.ResolveDirectoryRecord(@"C:\workspace\repo\ARTIFACTS"));
+        Assert.Null(table.ResolveDirectoryRecord(@"C:\Workspace\Repo\Artifacts"));
+        Assert.Null(table.ResolveDirectoryRecord(@"C:\Workspace\REPO\Artifacts"));
+        Assert.Null(table.ResolveDirectoryRecord(@"D:\Workspace\repo"));
+    }
+
+    [Fact]
+    public void IsUnder_CachesValidAndInvalidPathsIncludingCycles()
+    {
+        var table = CreateTable(80);
+        table.Parent[Root] = Root;
+        table.Parent[24] = Root;
+        table.Parent[26] = 24;
+        table.Parent[27] = 26;
+        table.Parent[30] = 31;
+        table.Parent[31] = 30;
+        table.Parent[40] = MftRecordTable.InvalidParentRecord;
+        var state = new byte[table.RecordCount];
+
+        Assert.True(table.IsUnder(27, 24, state));
+        Assert.True(table.IsUnder(26, 24, state));
+        Assert.False(table.IsUnder(30, 24, state));
+        Assert.False(table.IsUnder(31, 24, state));
+        Assert.False(table.IsUnder(40, 24, state));
+        Assert.DoesNotContain((byte)3, state);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RecordAllocations_PreserveLargeCountsAcrossExtensionMerges(bool useWideVolume)
+    {
+        const uint clusterBytes = 4096;
+        var limit = useWideVolume ? (long)uint.MaxValue + 20 : uint.MaxValue;
+        var allocations = new MftRecordAllocations(4, clusterBytes, limit);
+        allocations.SetParsedClusters(0, limit);
+        allocations.SetParsedClusters(1, 9);
+        allocations.SetParsedClusters(2, 17);
+        allocations.SetParsedClusters(3, uint.MaxValue);
+
+        Assert.Equal(limit * clusterBytes, allocations[0]);
+        allocations.Merge(1, 0);
+        allocations.Merge(2, 0);
+        Assert.Equal((limit + 26) * clusterBytes, allocations[0]);
+        Assert.Equal(0, allocations[1]);
+        Assert.Equal(0, allocations[2]);
+        Assert.Equal((long)uint.MaxValue * clusterBytes, allocations[3]);
+    }
+
+    private static MftRecordTable CreateTable(int recordCount, bool includeAllocation = false)
+    {
+        var allocations = includeAllocation ? new MftRecordAllocations(recordCount, 4096, 1000) : null;
         return new MftRecordTable(
             @"C:\",
             recordCount,
@@ -130,7 +347,7 @@ public sealed class MftFolderSizeScannerTests
             new long[recordCount],
             new long[recordCount],
             new long[recordCount],
-            new string?[recordCount]);
+            new string?[recordCount], allocations);
     }
 
     private static void AddDirectory(MftRecordTable table, int index, uint parent, string name)

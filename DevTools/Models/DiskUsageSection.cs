@@ -7,6 +7,7 @@ public sealed class DiskUsageSection : ObservableObject
 {
     private string _summary;
     private bool _isExpanded;
+    private WeakReference<DiskUsageSection>? _lastScanSource;
 
     public DiskUsageSection(string title, string summary, IReadOnlyList<DiskUsageEntry> entries)
     {
@@ -33,6 +34,31 @@ public sealed class DiskUsageSection : ObservableObject
 
     public void UpdateFrom(DiskUsageSection source)
     {
+        _lastScanSource = null;
+        CopyFrom(source);
+    }
+
+    internal void UpdateFromScan(DiskUsageSection source)
+    {
+        // The analyzer supplies a new section when its scan results change.
+        if (_lastScanSource?.TryGetTarget(out var previous) == true && ReferenceEquals(previous, source))
+        {
+            return;
+        }
+
+        CopyFrom(source);
+        if (_lastScanSource is null)
+        {
+            _lastScanSource = new WeakReference<DiskUsageSection>(source);
+        }
+        else
+        {
+            _lastScanSource.SetTarget(source);
+        }
+    }
+
+    private void CopyFrom(DiskUsageSection source)
+    {
         if (!string.Equals(Title, source.Title, StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException($"Cannot update disk usage section '{Title}' from '{source.Title}'.");
@@ -45,10 +71,10 @@ public sealed class DiskUsageSection : ObservableObject
     private void SynchronizeEntries(IReadOnlyList<DiskUsageEntry> incomingEntries)
     {
         var desiredEntries = incomingEntries
-            .GroupBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(entry => entry.Path, StringComparer.Ordinal)
             .Select(group => group.First())
             .ToList();
-        var incomingPaths = new HashSet<string>(desiredEntries.Select(entry => entry.Path), StringComparer.OrdinalIgnoreCase);
+        var incomingPaths = new HashSet<string>(desiredEntries.Select(entry => entry.Path), StringComparer.Ordinal);
 
         for (var i = 0; i < desiredEntries.Count; i++)
         {
@@ -81,7 +107,7 @@ public sealed class DiskUsageSection : ObservableObject
     {
         for (var i = 0; i < Entries.Count; i++)
         {
-            if (string.Equals(Entries[i].Path, path, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(Entries[i].Path, path, StringComparison.Ordinal))
             {
                 return i;
             }

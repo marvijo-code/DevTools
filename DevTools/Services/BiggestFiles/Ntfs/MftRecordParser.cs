@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 
 namespace DevTools.Services.BiggestFiles.Ntfs;
 
@@ -9,11 +10,16 @@ public struct MftRecordInfo
     public bool InUse;
     public bool IsDirectory;
     public bool HasAttributeList;
+    internal bool HasIncompleteAllocation;
 
     /// <summary>Base record number (low 48 bits) when this is an extension record; 0 for a base record.</summary>
     public ulong BaseRecordNumber;
+    public ushort BaseRecordSequence;
+    public bool IsExtension;
+    public long AllocatedClusters;
 
     public bool HasName;
+    public ushort ParentRecordSequence;
 
     /// <summary>Parent directory record number (low 48 bits of the parent file reference).</summary>
     public ulong ParentRecordNumber;
@@ -42,12 +48,13 @@ public struct MftRecordInfo
 public static class MftRecordParser
 {
     private const int SectorSize = 512;
+    private const uint FileSignature = 0x454C4946; // FILE in little-endian order.
 
     // Attribute type codes.
     private const uint AttrStandardInformation = 0x10;
-    private const uint AttrAttributeList = 0x20;
+    internal const uint AttrAttributeList = 0x20;
     private const uint AttrFileName = 0x30;
-    private const uint AttrData = 0x80;
+    internal const uint AttrData = 0x80;
     private const uint AttrEnd = 0xFFFFFFFF;
 
     // $FILE_NAME namespaces.
@@ -61,7 +68,18 @@ public static class MftRecordParser
     /// non-FILE signature or a torn record (fixup mismatch). A not-in-use record still parses;
     /// callers inspect <see cref="MftRecordInfo.InUse"/>.
     /// </summary>
-    public static bool TryParseRecord(Span<byte> record, ref MftRecordInfo info)
+    public static bool TryParseRecord(Span<byte> record, ref MftRecordInfo info) =>
+        TryParseRecord(record, ref info, requireInUse: false, readLastWrite: true);
+
+    internal static bool TryParseRecord(
+        Span<byte> record,
+        ref MftRecordInfo info,
+        bool requireInUse,
+        bool readLastWrite,
+        bool countAllocation = false,
+        long volumeClusters = long.MaxValue,
+        NtfsVolumeBitmap? observedBitmap = null,
+        List<(long Lcn, long ClusterCount)>? attributeRuns = null)
     {
         info = default;
 
@@ -70,27 +88,41 @@ public static class MftRecordParser
             return false;
         }
 
-        // Signature "FILE".
-        if (record[0] != (byte)'F' || record[1] != (byte)'I' || record[2] != (byte)'L' || record[3] != (byte)'E')
+        if (BinaryPrimitives.ReadUInt32LittleEndian(record) != FileSignature)
         {
             return false;
         }
 
-        if (!ApplyFixups(record))
-        {
-            return false;
-        }
-
+        // The flags are in the record header, ahead of any sector trailer that needs fixups.
         var flags = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x16, 2));
-        info.InUse = (flags & 0x0001) != 0;
+        var inUse = (flags & 0x0001) != 0;
+        if ((requireInUse && !inUse) || !ApplyFixups(record))
+        {
+            info.HasIncompleteAllocation = countAllocation && inUse;
+            return false;
+        }
+
+        var usedBytes = GetUsedRecordLength(record);
+        if (usedBytes == 0)
+        {
+            info.HasIncompleteAllocation = countAllocation && inUse;
+            return false;
+        }
+
+        record = record[..usedBytes];
+        info.InUse = inUse;
         info.IsDirectory = (flags & 0x0002) != 0;
         info.SequenceNumber = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x10, 2));
-        info.BaseRecordNumber = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(0x20, 8)) & 0x0000FFFFFFFFFFFFUL;
+        var baseReference = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(0x20, 8));
+        info.BaseRecordNumber = baseReference & 0x0000FFFFFFFFFFFFUL;
+        info.BaseRecordSequence = (ushort)(baseReference >> 48);
+        info.IsExtension = baseReference != 0;
 
         var firstAttributeOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x14, 2));
         if (firstAttributeOffset < 0x18 || firstAttributeOffset >= record.Length)
         {
-            // No attributes but still a structurally valid record.
+            // The record header is readable, but there is no verified list of attributes.
+            info.HasIncompleteAllocation = countAllocation && inUse;
             return true;
         }
 
@@ -102,66 +134,130 @@ public static class MftRecordParser
             var attributeType = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(offset, 4));
             if (attributeType == AttrEnd)
             {
-                break;
+                return true;
             }
 
             var attributeLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(offset + 4, 4));
-            if (attributeLength < 0x10 || offset + attributeLength > record.Length)
+            if (attributeLength < 0x10 || attributeLength > record.Length - offset)
             {
                 break;
             }
 
-            var nonResident = record[offset + 8] != 0;
-            var nameLength = record[offset + 9];
+            var attribute = record.Slice(offset, attributeLength);
+            var form = attribute[8];
+            var nonResident = form == 1;
+            if (countAllocation && form != 0)
+            {
+                if (nonResident && TryGetMappingPairs(attribute, out var runs) &&
+                    TryDecodeRunList(runs, attributeRuns, out var allocated, volumeClusters: volumeClusters) &&
+                    allocated <= volumeClusters - info.AllocatedClusters)
+                {
+                    info.AllocatedClusters += allocated;
+                    if (observedBitmap is not null && attributeRuns is not null)
+                    {
+                        foreach (var (lcn, count) in attributeRuns)
+                        {
+                            observedBitmap.Mark(lcn, count);
+                        }
+                    }
+                }
+                else
+                {
+                    info.HasIncompleteAllocation = inUse;
+                }
+            }
 
             switch (attributeType)
             {
-                case AttrStandardInformation when !nonResident:
-                    ReadStandardInformation(record, offset, ref info);
+                case AttrStandardInformation when readLastWrite && form == 0:
+                    ReadStandardInformation(attribute, ref info);
                     break;
-                case AttrAttributeList:
+                case AttrAttributeList when form is 0 or 1:
                     info.HasAttributeList = true;
                     break;
-                case AttrFileName when !nonResident:
-                    ReadFileName(record, offset, ref info, ref bestNamespaceRank);
+                case AttrFileName when form == 0:
+                    ReadFileName(attribute, offset, ref info, ref bestNamespaceRank);
                     break;
-                case AttrData when nameLength == 0:
-                    ReadUnnamedData(record, offset, nonResident, ref info);
+                case AttrData when form is 0 or 1 && attribute[9] == 0:
+                    ReadUnnamedData(attribute, nonResident, ref info);
                     break;
             }
 
             offset += attributeLength;
         }
 
+        // The end marker only requires a type field, unlike a full attribute header.
+        if (countAllocation && inUse &&
+            (record.Length - offset < sizeof(uint) || BinaryPrimitives.ReadUInt32LittleEndian(record[offset..]) != AttrEnd))
+        {
+            info.HasIncompleteAllocation = true;
+        }
+
         return true;
     }
 
-    private static void ReadStandardInformation(ReadOnlySpan<byte> record, int attributeOffset, ref MftRecordInfo info)
+    private static int GetUsedRecordLength(ReadOnlySpan<byte> record)
     {
-        var contentOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(attributeOffset + 0x14, 2));
-        var start = attributeOffset + contentOffset;
-        if (start + 0x18 > record.Length)
-        {
-            return;
-        }
-
-        // Offset 0x08 within $STANDARD_INFORMATION is the last data-modification time (FILETIME).
-        info.LastWriteFileTime = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(start + 0x08, 8));
+        var length = BinaryPrimitives.ReadUInt32LittleEndian(record[0x18..]);
+        return length >= 0x30 && length <= (uint)record.Length ? (int)length : 0;
     }
 
-    private static void ReadFileName(ReadOnlySpan<byte> record, int attributeOffset, ref MftRecordInfo info, ref int bestNamespaceRank)
+    private static bool TryGetMappingPairs(ReadOnlySpan<byte> attribute, out ReadOnlySpan<byte> runs)
     {
-        var contentOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(attributeOffset + 0x14, 2));
-        var start = attributeOffset + contentOffset;
-        if (start + 0x42 > record.Length)
+        runs = default;
+        if (attribute.Length < 0x40)
+        {
+            return false;
+        }
+
+        var offset = BinaryPrimitives.ReadUInt16LittleEndian(attribute[0x20..]);
+        if (offset < 0x40 || offset >= attribute.Length)
+        {
+            return false;
+        }
+
+        runs = attribute[offset..];
+        return true;
+    }
+
+    internal static bool TryGetResidentValue(ReadOnlySpan<byte> attribute, out ReadOnlySpan<byte> value, out int offset)
+    {
+        value = default;
+        offset = 0;
+        if (attribute.Length < 0x18)
+        {
+            return false;
+        }
+
+        offset = BinaryPrimitives.ReadUInt16LittleEndian(attribute[0x14..]);
+        var length = BinaryPrimitives.ReadUInt32LittleEndian(attribute[0x10..]);
+        if (offset < 0x18 || offset > attribute.Length || length > (uint)(attribute.Length - offset))
+        {
+            return false;
+        }
+
+        value = attribute.Slice(offset, (int)length);
+        return true;
+    }
+
+    private static void ReadStandardInformation(ReadOnlySpan<byte> attribute, ref MftRecordInfo info)
+    {
+        if (TryGetResidentValue(attribute, out var value, out _) && value.Length >= 0x10)
+        {
+            info.LastWriteFileTime = BinaryPrimitives.ReadInt64LittleEndian(value[0x08..]);
+        }
+    }
+
+    private static void ReadFileName(ReadOnlySpan<byte> attribute, int attributeOffset, ref MftRecordInfo info, ref int bestNamespaceRank)
+    {
+        if (!TryGetResidentValue(attribute, out var value, out var contentOffset) || value.Length < 0x42)
         {
             return;
         }
 
-        var nameLengthChars = record[start + 0x40];
-        var nameNamespace = record[start + 0x41];
-        var nameStart = start + 0x42;
-        if (nameStart + nameLengthChars * 2 > record.Length)
+        var nameLengthChars = value[0x40];
+        var nameNamespace = value[0x41];
+        if (nameLengthChars == 0 || nameLengthChars * 2 > value.Length - 0x42)
         {
             return;
         }
@@ -174,39 +270,52 @@ public static class MftRecordParser
 
         bestNamespaceRank = rank;
         info.HasName = true;
-        info.ParentRecordNumber = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(start, 8)) & 0x0000FFFFFFFFFFFFUL;
-        info.NameOffsetInRecord = nameStart;
+        var parentReference = BinaryPrimitives.ReadUInt64LittleEndian(value);
+        info.ParentRecordNumber = parentReference & 0x0000FFFFFFFFFFFFUL;
+        info.ParentRecordSequence = (ushort)(parentReference >> 48);
+        info.NameOffsetInRecord = attributeOffset + contentOffset + 0x42;
         info.NameLengthChars = nameLengthChars;
         info.FileNameNamespace = nameNamespace;
     }
 
-    private static void ReadUnnamedData(ReadOnlySpan<byte> record, int attributeOffset, bool nonResident, ref MftRecordInfo info)
+    private static void ReadUnnamedData(ReadOnlySpan<byte> attribute, bool nonResident, ref MftRecordInfo info)
     {
         if (!nonResident)
         {
-            var contentLength = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(attributeOffset + 0x10, 4));
-            info.HasUnnamedData = true;
-            info.DataSizesValid = true;
-            info.DataRealSize = contentLength;
-            info.DataAllocatedSize = contentLength;
+            if (TryGetResidentValue(attribute, out var value, out _))
+            {
+                info.HasUnnamedData = true;
+                info.DataSizesValid = true;
+                info.DataRealSize = value.Length;
+                info.DataAllocatedSize = value.Length;
+            }
+
             return;
         }
 
-        var lowestVcn = BinaryPrimitives.ReadUInt64LittleEndian(record.Slice(attributeOffset + 0x10, 8));
-        info.HasUnnamedData = true;
+        if (attribute.Length < 0x40)
+        {
+            return;
+        }
 
-        // Only the first fragment (LowestVCN == 0) carries valid allocated/real sizes.
+        info.HasUnnamedData = true;
+        var lowestVcn = BinaryPrimitives.ReadUInt64LittleEndian(attribute[0x10..]);
         if (lowestVcn != 0 || info.DataSizesValid)
         {
             return;
         }
 
-        info.DataSizesValid = true;
-        info.DataAllocatedSize = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(attributeOffset + 0x28, 8));
-        info.DataRealSize = BinaryPrimitives.ReadInt64LittleEndian(record.Slice(attributeOffset + 0x30, 8));
+        var allocated = BinaryPrimitives.ReadInt64LittleEndian(attribute[0x28..]);
+        var logical = BinaryPrimitives.ReadInt64LittleEndian(attribute[0x30..]);
+        if (allocated >= 0 && logical >= 0)
+        {
+            info.DataSizesValid = true;
+            info.DataAllocatedSize = allocated;
+            info.DataRealSize = logical;
+        }
     }
 
-    private static int NamespaceRank(byte fileNameNamespace) => fileNameNamespace switch
+    internal static int NamespaceRank(byte fileNameNamespace) => fileNameNamespace switch
     {
         NamespaceWin32 => 3,
         NamespaceWin32Dos => 3,
@@ -216,36 +325,48 @@ public static class MftRecordParser
     };
 
     /// <summary>Applies the update-sequence array fixups in place. Returns false on a torn record.</summary>
+
     private static bool ApplyFixups(Span<byte> record)
     {
+        const int wordsPerSector = SectorSize / sizeof(ushort);
+        const int headerBytes = 8;
         var usaOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(4, 2));
         var usaCount = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(6, 2));
-        if (usaCount < 1)
+        if (record.Length % SectorSize != 0 || usaCount != record.Length / SectorSize + 1 ||
+            usaOffset < headerBytes || (usaOffset & 1) != 0 ||
+            usaOffset + usaCount * sizeof(ushort) > SectorSize - sizeof(ushort))
         {
             return false;
         }
 
-        var sectorCount = usaCount - 1;
-        if (usaOffset + usaCount * 2 > record.Length ||
-            sectorCount * SectorSize > record.Length)
+        // The sequence and sector tails use the same on-disk byte order.
+        var words = MemoryMarshal.Cast<byte, ushort>(record);
+        var fixups = words.Slice(usaOffset / sizeof(ushort), usaCount);
+        var sequence = fixups[0];
+        if (usaCount == 3)
         {
-            return false;
-        }
-
-        var updateSequenceNumber = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(usaOffset, 2));
-
-        for (var sector = 0; sector < sectorCount; sector++)
-        {
-            var tail = sector * SectorSize + (SectorSize - 2);
-            var current = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(tail, 2));
-            if (current != updateSequenceNumber)
+            // The usual 1 KiB record has two protected trailers. Validate both before writing either.
+            if (words[wordsPerSector - 1] != sequence || words[2 * wordsPerSector - 1] != sequence)
             {
                 return false;
             }
 
-            var replacement = record.Slice(usaOffset + 2 + sector * 2, 2);
-            record[tail] = replacement[0];
-            record[tail + 1] = replacement[1];
+            words[wordsPerSector - 1] = fixups[1];
+            words[2 * wordsPerSector - 1] = fixups[2];
+            return true;
+        }
+
+        for (var sector = 1; sector < fixups.Length; sector++)
+        {
+            if (words[sector * wordsPerSector - 1] != sequence)
+            {
+                return false;
+            }
+        }
+
+        for (var sector = 1; sector < fixups.Length; sector++)
+        {
+            words[sector * wordsPerSector - 1] = fixups[sector];
         }
 
         return true;
@@ -258,67 +379,98 @@ public static class MftRecordParser
     public static bool TryReadUnnamedDataRuns(Span<byte> record, List<(long Lcn, long ClusterCount)> extents)
     {
         extents.Clear();
-
-        if (record.Length < 0x30)
+        if (!TryPrepareRecord(record, out var prepared))
         {
             return false;
         }
 
-        if (record[0] != (byte)'F' || record[1] != (byte)'I' || record[2] != (byte)'L' || record[3] != (byte)'E')
+        var attribute = FindUnnamedAttribute(prepared, AttrData, 0);
+        return !attribute.IsEmpty && attribute[8] == 1 &&
+            TryGetMappingPairs(attribute, out var runs) &&
+            TryDecodeRunList(runs, extents, out _, allowSparse: false);
+    }
+
+    internal static bool TryPrepareRecord(Span<byte> record, out ReadOnlySpan<byte> prepared)
+    {
+        prepared = default;
+        if (record.Length < 0x30 || BinaryPrimitives.ReadUInt32LittleEndian(record) != FileSignature)
         {
             return false;
         }
 
-        if (!ApplyFixups(record))
+        var usedBytes = GetUsedRecordLength(record);
+        if (usedBytes == 0 || !ApplyFixups(record))
         {
             return false;
         }
 
-        var firstAttributeOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(0x14, 2));
-        var offset = (int)firstAttributeOffset;
+        prepared = record[..usedBytes];
+        return true;
+    }
 
+    internal static ReadOnlySpan<byte> FindUnnamedAttribute(ReadOnlySpan<byte> record, uint type, long lowestVcn, ushort? instance = null)
+    {
+        var offset = (int)BinaryPrimitives.ReadUInt16LittleEndian(record[0x14..]);
         while (offset >= 0x18 && offset + 0x10 <= record.Length)
         {
-            var attributeType = BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(offset, 4));
+            var attributeType = BinaryPrimitives.ReadUInt32LittleEndian(record[offset..]);
             if (attributeType == AttrEnd)
             {
                 break;
             }
 
-            var attributeLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(record.Slice(offset + 4, 4));
-            if (attributeLength < 0x10 || offset + attributeLength > record.Length)
+            var length = BinaryPrimitives.ReadUInt32LittleEndian(record[(offset + 4)..]);
+            if (length < 0x10 || length > (uint)(record.Length - offset))
             {
                 break;
             }
 
-            var nonResident = record[offset + 8] != 0;
-            var nameLength = record[offset + 9];
-
-            if (attributeType == AttrData && nameLength == 0 && nonResident)
+            var attribute = record.Slice(offset, (int)length);
+            if (attributeType == type && attribute[9] == 0 &&
+                (instance is null || BinaryPrimitives.ReadUInt16LittleEndian(attribute[0x0E..]) == instance))
             {
-                var runListOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.Slice(offset + 0x20, 2));
-                if (runListOffset < 0x40 || offset + runListOffset > offset + attributeLength)
+                if ((attribute[8] == 0 && lowestVcn == 0) ||
+                    (attribute[8] == 1 && attribute.Length >= 0x40 &&
+                        BinaryPrimitives.ReadInt64LittleEndian(attribute[0x10..]) == lowestVcn))
                 {
-                    return false;
+                    return attribute;
                 }
-
-                var runs = record.Slice(offset + runListOffset, attributeLength - runListOffset);
-                return TryDecodeRunList(runs, extents);
             }
 
-            offset += attributeLength;
+            offset += (int)length;
         }
 
-        return false;
+        return [];
+    }
+
+    internal static bool TryReadMftRuns(ReadOnlySpan<byte> attribute, long lowestVcn, long volumeClusters,
+        List<(long Lcn, long ClusterCount)> extents, out long clusters)
+    {
+        clusters = 0;
+        if (attribute.Length < 0x40 || attribute[8] != 1 || !TryGetMappingPairs(attribute, out var runs))
+        {
+            return false;
+        }
+
+        var highestVcn = BinaryPrimitives.ReadInt64LittleEndian(attribute[0x18..]);
+        return highestVcn >= lowestVcn && highestVcn < volumeClusters &&
+            TryDecodeRunList(runs, extents, out clusters, allowSparse: false, volumeClusters: volumeClusters) &&
+            clusters == highestVcn - lowestVcn + 1;
     }
 
     /// <summary>
     /// Decodes an NTFS data-run list into absolute (LCN, clusterCount) extents. Used to locate the
     /// <c>$MFT</c>'s own clusters from record 0. Sparse runs (offset size 0) are skipped.
     /// </summary>
-    public static bool TryDecodeRunList(ReadOnlySpan<byte> runList, List<(long Lcn, long ClusterCount)> extents)
+    public static bool TryDecodeRunList(ReadOnlySpan<byte> runList, List<(long Lcn, long ClusterCount)> extents) =>
+        TryDecodeRunList(runList, extents, out _);
+
+    private static bool TryDecodeRunList(
+        ReadOnlySpan<byte> runList, List<(long Lcn, long ClusterCount)>? extents, out long allocatedClusters,
+        bool allowSparse = true, long volumeClusters = long.MaxValue)
     {
-        extents.Clear();
+        extents?.Clear();
+        allocatedClusters = 0;
         var index = 0;
         long currentLcn = 0;
 
@@ -331,35 +483,78 @@ public static class MftRecordParser
             }
 
             var lengthSize = header & 0x0F;
-            var offsetSize = (header >> 4) & 0x0F;
-            if (lengthSize == 0 || index + lengthSize + offsetSize > runList.Length)
+            var offsetSize = header >> 4;
+            var fieldBytes = lengthSize + offsetSize;
+            if (lengthSize is < 1 or > 8 || offsetSize > 8 || fieldBytes > runList.Length - index)
             {
                 return false;
             }
 
-            var clusterCount = ReadUnsignedLittleEndian(runList.Slice(index, lengthSize));
-            index += lengthSize;
+            var fields = runList[index..];
+            index += fieldBytes;
+            // A single load covers typical runs. The shifts discard any bytes from the next run.
+            var usePackedRead = fieldBytes <= sizeof(ulong) && fields.Length >= sizeof(ulong);
+            var packed = usePackedRead ? BinaryPrimitives.ReadUInt64LittleEndian(fields) : 0UL;
+            var lengthShift = (sizeof(ulong) - lengthSize) * 8;
+            var clusterCount = usePackedRead
+                ? unchecked((long)((packed << lengthShift) >> lengthShift))
+                : ReadUnsignedLittleEndian(fields[..lengthSize]);
+            if (clusterCount <= 0)
+            {
+                return false;
+            }
 
             if (offsetSize == 0)
             {
+                if (!allowSparse)
+                {
+                    return false;
+                }
+
                 // Sparse run: no clusters on disk. Skip without moving the LCN cursor.
                 continue;
             }
 
-            var deltaLcn = ReadSignedLittleEndian(runList.Slice(index, offsetSize));
-            index += offsetSize;
-            currentLcn += deltaLcn;
+            if (clusterCount > volumeClusters - allocatedClusters)
+            {
+                return false;
+            }
 
-            extents.Add((currentLcn, clusterCount));
+            var offsetShift = (sizeof(ulong) - offsetSize) * 8;
+            var deltaLcn = usePackedRead
+                ? unchecked((long)((packed >> (lengthSize * 8)) << offsetShift)) >> offsetShift
+                : ReadSignedLittleEndian(fields.Slice(lengthSize, offsetSize));
+            if (deltaLcn < -currentLcn || deltaLcn > volumeClusters - clusterCount - currentLcn)
+            {
+                return false;
+            }
+
+            currentLcn += deltaLcn;
+            allocatedClusters += clusterCount;
+            extents?.Add((currentLcn, clusterCount));
         }
 
-        return true;
+        return false;
     }
 
     private static long ReadUnsignedLittleEndian(ReadOnlySpan<byte> bytes)
     {
-        long value = 0;
-        for (var i = 0; i < bytes.Length; i++)
+        switch (bytes.Length)
+        {
+            case 1:
+                return bytes[0];
+            case 2:
+                return BinaryPrimitives.ReadUInt16LittleEndian(bytes);
+            case 3:
+                return (uint)bytes[2] << 16 | BinaryPrimitives.ReadUInt16LittleEndian(bytes);
+            case 4:
+                return BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+            case 8:
+                return BinaryPrimitives.ReadInt64LittleEndian(bytes);
+        }
+
+        long value = BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+        for (var i = 4; i < bytes.Length; i++)
         {
             value |= (long)bytes[i] << (8 * i);
         }
@@ -369,19 +564,7 @@ public static class MftRecordParser
 
     private static long ReadSignedLittleEndian(ReadOnlySpan<byte> bytes)
     {
-        long value = 0;
-        for (var i = 0; i < bytes.Length; i++)
-        {
-            value |= (long)bytes[i] << (8 * i);
-        }
-
-        // Sign-extend from the top bit of the most significant byte.
-        var signBit = 1L << (8 * bytes.Length - 1);
-        if ((value & signBit) != 0)
-        {
-            value -= 1L << (8 * bytes.Length);
-        }
-
-        return value;
+        var shift = (sizeof(long) - bytes.Length) * 8;
+        return (ReadUnsignedLittleEndian(bytes) << shift) >> shift;
     }
 }

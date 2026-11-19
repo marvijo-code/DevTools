@@ -590,7 +590,9 @@ public sealed partial class MainViewModel : ObservableObject
 
             SetDiskUsageSections([]);
             _folderBrowserCompletedSizes.Clear();
-            _folderBrowserParentTallies.Clear();
+            _folderBrowserLiveWalks.Clear();
+            _folderBrowserQuickSizes.Clear();
+            _folderBrowserScannedRootBytes = 0;
             ClearLiveFolderSizes();
             SetProperty(ref _diskUsageAnalysis, "Scanning disk usage and streaming results as sections complete.",
                 nameof(DiskUsageAnalysis));
@@ -616,18 +618,28 @@ public sealed partial class MainViewModel : ObservableObject
                     RefreshFolderBrowserDrives(roots, update.CompletedRoot);
                 }
 
-                if (update.LogicalRoot is { } logicalRoot && !FolderBrowserUseAllocation &&
-                    string.Equals(Path.GetPathRoot(_folderBrowserPath), logicalRoot, StringComparison.OrdinalIgnoreCase))
+                if (update.LogicalRoot is { } logicalRoot)
                 {
-                    BrowseFolder(_folderBrowserPath, skipUnchanged: true);
+                    _folderBrowserLiveWalks.Remove(logicalRoot);
+                    if (!FolderBrowserUseAllocation &&
+                        string.Equals(Path.GetPathRoot(_folderBrowserPath), logicalRoot, StringComparison.OrdinalIgnoreCase))
+                    {
+                        BrowseFolder(_folderBrowserPath, skipUnchanged: true);
+                    }
                 }
 
-                ApplyFolderScanProgress(update.CompletedFolders, update.ParentTallies);
+                if (update.CompletedRoot is { } completedRoot)
+                {
+                    _folderBrowserLiveWalks.Remove(completedRoot);
+                }
+
+                ApplyFolderScanProgress(update.CompletedFolders, update.LiveWalk);
                 ApplyLiveFolderSizes(update.LiveSubfolders);
             });
 
             var snapshot = await _diskUsageAnalyzer.CaptureAsync(progress, cancellationToken);
             acceptProgress = false;
+            _folderBrowserLiveWalks.Clear();
             SetDiskUsageSections(snapshot.Sections);
             SetProperty(ref _diskUsageHeadline, snapshot.Headline, nameof(DiskUsageHeadline));
             SetProperty(ref _diskUsageAnalysis, snapshot.Analysis, nameof(DiskUsageAnalysis));
@@ -656,6 +668,7 @@ public sealed partial class MainViewModel : ObservableObject
         finally
         {
             acceptProgress = false;
+            _folderBrowserLiveWalks.Clear();
             SetDiskUsageRefreshing(false);
             _diskUsageRefreshGate.Release();
             AppLog.Info("RefreshDiskUsageAsync finished.");

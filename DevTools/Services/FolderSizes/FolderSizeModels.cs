@@ -38,7 +38,10 @@ internal readonly record struct CompletedFolderSize(
 
 internal readonly record struct LiveFolderSize(string Path, long Bytes);
 
-internal readonly record struct FolderScanTally(string Path, long ScannedBytes);
+internal readonly record struct LiveFolderRow(string Name, string Path, int Depth, long ScannedBytes,
+    bool IsSettled, bool HasExactSize, bool CanExpand, bool IsExpanded);
+
+internal sealed record LiveFolderView(long ScannedBytes, IReadOnlyList<LiveFolderRow> Rows);
 
 /// <summary>Progress of an all-folders scan of one drive.</summary>
 public sealed record FolderScanProgress(
@@ -50,5 +53,5 @@ public sealed record FolderScanProgress(
 {
     internal IReadOnlyList<CompletedFolderSize> CompletedFolders { get; init; } = [];
     internal IReadOnlyList<LiveFolderSize> LiveSubfolders { get; init; } = [];
-    internal IReadOnlyList<FolderScanTally> ParentTallies { get; init; } = [];
+    internal ParallelFolderWalker.LogicalFolderWalk? LiveWalk { get; init; }
 }

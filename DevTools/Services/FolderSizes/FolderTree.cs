@@ -637,6 +637,8 @@ public sealed class FolderTreeBuilder
 
     public int FolderCount => _parent.Count;
 
+    internal string GetName(int node) => _names[node];
+
     internal string GetPath(int node)
     {
         var names = new Stack<string>();

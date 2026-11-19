@@ -76,7 +76,8 @@ public sealed class ParallelFolderWalker
 
         using var workerCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var scanToken = workerCancellation.Token;
-        var logicalSubfolders = !measureAllocation && progress is not null ? new LogicalSubfolderProgress(startNode) : null;
+        var logicalSubfolders = !measureAllocation && progress is not null
+            ? new LogicalFolderWalk(fullRoot, startNode, builder, builderLock) : null;
         // Work down each branch in the logical pass so more subtrees finish while the drive is still being read.
         using var queue = logicalSubfolders is null
             ? new BlockingCollection<WalkJob>()
@@ -85,7 +86,6 @@ public sealed class ParallelFolderWalker
         var queuedStreamBatches = 0;
         long filesSeen = 0;
         List<CompletedFolderSize>? completedFolders = progress is null ? null : [];
-        HashSet<FolderBranch>? changedParents = logicalSubfolders is null ? null : [];
         queue.Add(new WalkJob(startNode, fullRoot), scanToken);
 
         var workers = workerCount is int requested
@@ -219,11 +219,6 @@ public sealed class ParallelFolderWalker
             branch.Incomplete |= incomplete;
             branch.IncompleteAllocation |= incompleteAllocation;
             branch.Pending += children - 1;
-            if (logicalBytes > 0)
-            {
-                changedParents?.Add(branch);
-            }
-
             if (branch.Pending == 0)
             {
                 completedFolders!.Add(new CompletedFolderSize(branch.Path,
@@ -242,21 +237,16 @@ public sealed class ParallelFolderWalker
 
             CompletedFolderSize[] ready;
             LiveFolderSize[] subfolders;
-            FolderScanTally[] parentTallies;
             int folders;
             lock (builderLock)
             {
                 ready = completedFolders!.Count > 0 ? completedFolders.ToArray() : [];
                 completedFolders.Clear();
-                subfolders = logicalSubfolders?.Drain(builder) ?? [];
-                parentTallies = changedParents is { Count: > 0 }
-                    ? changedParents.Select(parent => new FolderScanTally(parent.Path, parent.LogicalBytes)).ToArray()
-                    : [];
-                changedParents?.Clear();
+                subfolders = logicalSubfolders?.Drain() ?? [];
                 folders = builder.FolderCount;
             }
 
-            if (!completedOnly || ready.Length > 0 || subfolders.Length > 0 || parentTallies.Length > 0)
+            if (!completedOnly || ready.Length > 0 || subfolders.Length > 0)
             {
                 var files = Interlocked.Read(ref filesSeen);
                 var phase = measureAllocation ? "Measuring allocation" : "Measuring logical sizes";
@@ -266,7 +256,7 @@ public sealed class ParallelFolderWalker
                 {
                     CompletedFolders = ready,
                     LiveSubfolders = subfolders,
-                    ParentTallies = parentTallies
+                    LiveWalk = logicalSubfolders
                 });
             }
         }
@@ -535,19 +525,27 @@ public sealed class ParallelFolderWalker
         public bool IncompleteAllocation;
     }
 
-    // Accessed under builderLock. Child state is registered before each child is queued.
-    private sealed class LogicalSubfolderProgress
+    internal sealed class LogicalFolderWalk
     {
         private const int BatchSize = 4;
         private readonly int _root;
+        private readonly FolderTreeBuilder _builder;
+        private readonly object _sync;
         private readonly List<FolderState> _folders = [];
         private readonly Queue<(int Node, long Bytes)> _ready = new(BatchSize);
 
-        public LogicalSubfolderProgress(int root)
+        public LogicalFolderWalk(string scanRoot, int root, FolderTreeBuilder builder, object sync)
         {
+            ScanRoot = scanRoot;
             _root = root;
+            _builder = builder;
+            _sync = sync;
             CollectionsMarshal.SetCount(_folders, root + 1);
         }
+
+        public string ScanRoot { get; }
+
+        // The worker holds the builder lock and registers each child before its job is queued.
 
         public void FinishListing(int node, int firstChild, int childCount, long bytes, bool incomplete)
         {
@@ -558,33 +556,43 @@ public sealed class ParallelFolderWalker
             }
 
             var folders = CollectionsMarshal.AsSpan(_folders);
+            folders[node].FirstChild = firstChild;
+            folders[node].ChildCount = childCount;
             folders[node].RemainingChildren = childCount;
-            folders[node].Bytes = bytes;
-            folders[node].Incomplete = incomplete;
+            folders[node].IsListed = true;
 
-            // A completed child contributes once. The last child can finish its parent and other ancestors.
+            // Credit only the files read in this directory. Settling a subtree never adds those bytes again.
+            for (var ancestor = node; ; ancestor = folders[ancestor].Parent)
+            {
+                folders[ancestor].ScannedBytes += bytes;
+                folders[ancestor].Incomplete |= incomplete;
+                if (ancestor == _root)
+                {
+                    break;
+                }
+            }
+
+            // The last child can finish its parent and other ancestors.
             while (node != _root && folders[node].RemainingChildren == 0)
             {
                 ref var folder = ref folders[node];
                 var parent = folder.Parent;
-                if (parent != _root && !folder.Incomplete && folder.Bytes > 0)
+                if (parent != _root && !folder.Incomplete && folder.ScannedBytes > 0)
                 {
                     if (_ready.Count == BatchSize)
                     {
                         _ready.Dequeue();
                     }
 
-                    _ready.Enqueue((node, folder.Bytes));
+                    _ready.Enqueue((node, folder.ScannedBytes));
                 }
 
-                folders[parent].Bytes += folder.Bytes;
-                folders[parent].Incomplete |= folder.Incomplete;
                 folders[parent].RemainingChildren--;
                 node = parent;
             }
         }
 
-        public LiveFolderSize[] Drain(FolderTreeBuilder builder)
+        public LiveFolderSize[] Drain()
         {
             if (_ready.Count == 0)
             {
@@ -595,17 +603,97 @@ public sealed class ParallelFolderWalker
             for (var index = 0; index < results.Length; index++)
             {
                 var (node, bytes) = _ready.Dequeue();
-                results[index] = new LiveFolderSize(builder.GetPath(node), bytes);
+                results[index] = new LiveFolderSize(_builder.GetPath(node), bytes);
             }
 
             return results;
         }
 
+        public LiveFolderView Capture(string path, IReadOnlyList<string> previewNames, IReadOnlySet<string> expanded, int limit)
+        {
+            lock (_sync)
+            {
+                var parent = FindNode(path);
+                var rows = new List<LiveFolderRow>(previewNames.Count);
+                foreach (var name in previewNames)
+                {
+                    AddRow(FindChild(parent, name), name, path, 0);
+                }
+
+                return new LiveFolderView(parent < 0 ? 0 : _folders[parent].ScannedBytes, rows);
+
+                void AddRow(int node, string name, string parentPath, int depth)
+                {
+                    var fullPath = Path.Join(parentPath, name);
+                    var folder = node < 0 ? default : _folders[node];
+                    var canExpand = !folder.IsListed || folder.ChildCount > 0;
+                    var isExpanded = canExpand && expanded.Contains(fullPath);
+                    var settled = folder.IsListed && folder.RemainingChildren == 0;
+                    rows.Add(new LiveFolderRow(name, fullPath, depth, folder.ScannedBytes, settled,
+                        settled && !folder.Incomplete, canExpand, isExpanded));
+                    if (!isExpanded || folder.ChildCount == 0)
+                    {
+                        return;
+                    }
+
+                    var children = Enumerable.Range(folder.FirstChild, Math.Min(folder.ChildCount, limit));
+                    foreach (var child in children.OrderBy(_builder.GetName, StringComparer.OrdinalIgnoreCase))
+                    {
+                        AddRow(child, _builder.GetName(child), fullPath, depth + 1);
+                    }
+                }
+            }
+        }
+
+        private int FindNode(string path)
+        {
+            var node = _root;
+            var relative = Path.GetRelativePath(ScanRoot, path);
+            if (relative == ".")
+            {
+                return node;
+            }
+
+            foreach (var name in relative.Split(Path.DirectorySeparatorChar))
+            {
+                node = FindChild(node, name);
+                if (node < 0)
+                {
+                    break;
+                }
+            }
+
+            return node;
+        }
+
+        private int FindChild(int node, string name)
+        {
+            if (node < 0)
+            {
+                return -1;
+            }
+
+            var parent = _folders[node];
+            var end = parent.FirstChild + parent.ChildCount;
+            for (var child = parent.FirstChild; child < end; child++)
+            {
+                if (_builder.GetName(child).Equals(name, StringComparison.Ordinal))
+                {
+                    return child;
+                }
+            }
+
+            return -1;
+        }
+
         private struct FolderState
         {
             public int Parent;
+            public int FirstChild;
+            public int ChildCount;
             public int RemainingChildren;
-            public long Bytes;
+            public long ScannedBytes;
+            public bool IsListed;
             public bool Incomplete;
         }
     }

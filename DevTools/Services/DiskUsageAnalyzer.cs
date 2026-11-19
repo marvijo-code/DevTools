@@ -142,7 +142,7 @@ public sealed class DiskUsageAnalyzer
                 {
                     var now = DateTime.UtcNow;
                     if ((now - lastStatus).TotalMilliseconds < 400 &&
-                        update.CompletedFolders.Count == 0 && update.LiveSubfolders.Count == 0 && update.ParentTallies.Count == 0)
+                        update.CompletedFolders.Count == 0 && update.LiveSubfolders.Count == 0)
                     {
                         return;
                     }
@@ -155,7 +155,7 @@ public sealed class DiskUsageAnalyzer
                     {
                         CompletedFolders = update.CompletedFolders,
                         LiveSubfolders = update.LiveSubfolders,
-                        ParentTallies = update.ParentTallies
+                        LiveWalk = update.LiveWalk
                     });
                 }
             });
@@ -1358,5 +1358,5 @@ public sealed record DiskUsageProgress(string Headline, string StatusText, strin
     internal string? LogicalRoot { get; init; }
     internal IReadOnlyList<CompletedFolderSize> CompletedFolders { get; init; } = [];
     internal IReadOnlyList<LiveFolderSize> LiveSubfolders { get; init; } = [];
-    internal IReadOnlyList<FolderScanTally> ParentTallies { get; init; } = [];
+    internal ParallelFolderWalker.LogicalFolderWalk? LiveWalk { get; init; }
 }

@@ -241,7 +241,7 @@ public sealed class FolderFileListingTests
         var logicalReady = new TaskCompletionSource<FolderTree>(TaskCreationOptions.RunContinuationsAsynchronously);
         var seen = new List<CompletedFolderSize>();
         var live = new List<LiveFolderSize>();
-        var parentTallies = new List<FolderScanTally>();
+        ParallelFolderWalker.LogicalFolderWalk? liveWalk = null;
         Task<DriveScanResult>? scan = null;
         try
         {
@@ -251,7 +251,7 @@ public sealed class FolderFileListingTests
             {
                 seen.AddRange(update.CompletedFolders);
                 live.AddRange(update.LiveSubfolders);
-                parentTallies.AddRange(update.ParentTallies);
+                liveWalk ??= update.LiveWalk;
             });
             var drive = new DriveDescriptor(fixture.FullName, "Fixture", "NTFS", null);
             scan = new DriveUsageService().ScanDriveAsync(drive, progress, deadline.Token, volumeShare: 1, tryMft: false,
@@ -268,9 +268,13 @@ public sealed class FolderFileListingTests
             var early = Assert.Single(seen);
             Assert.Equal(8204, early.LogicalBytes);
             Assert.False(early.AllocationAttempted);
-            Assert.NotEmpty(parentTallies);
-            Assert.All(parentTallies, tally => Assert.Equal(child.FullName, tally.Path));
-            Assert.Equal(8204, parentTallies[^1].ScannedBytes);
+            var liveView = Assert.IsType<ParallelFolderWalker.LogicalFolderWalk>(liveWalk)
+                .Capture(fixture.FullName, ["child"], new HashSet<string> { child.FullName, nested.FullName }, 200);
+            Assert.Equal(8204, liveView.ScannedBytes);
+            Assert.Collection(liveView.Rows,
+                row => { Assert.Equal(8204, row.ScannedBytes); Assert.True(row.HasExactSize); },
+                row => { Assert.Equal(8204, row.ScannedBytes); Assert.True(row.HasExactSize); },
+                row => { Assert.Equal(11, row.ScannedBytes); Assert.True(row.HasExactSize); });
             Assert.Collection(live,
                 folder => Assert.Equal(new LiveFolderSize(leaf.FullName, 11), folder),
                 folder => Assert.Equal(new LiveFolderSize(nested.FullName, 8204), folder));
@@ -281,7 +285,6 @@ public sealed class FolderFileListingTests
             var finalNode = final.Find(child.FullName);
             Assert.Equal(8204, final.GetTotalBytes(finalNode));
             Assert.Equal(2, live.Count);
-            Assert.Equal(8204, parentTallies[^1].ScannedBytes);
             Assert.True(final.GetAllocatedBytes(finalNode) > 0);
             Assert.Contains(seen, folder => folder.Path == child.FullName && folder.AllocationAttempted);
         }
@@ -301,6 +304,44 @@ public sealed class FolderFileListingTests
             child.Delete();
             fixture.Delete();
         }
+    }
+
+    [Fact]
+    public void LogicalWalk_RollsEachListingUpEveryAncestorBeforeSettlingTheBranch()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var outerPath = Path.Join(root, "outer");
+        var innerPath = Path.Join(outerPath, "inner");
+        var builder = new FolderTreeBuilder(root);
+        var walk = new ParallelFolderWalker.LogicalFolderWalk(root, 0, builder, new object());
+        var expanded = new HashSet<string> { outerPath, innerPath };
+
+        var outer = builder.AppendEnumeratedChildren(0, ["outer"]);
+        walk.FinishListing(0, outer, 1, 3, incomplete: false);
+        var inner = builder.AppendEnumeratedChildren(outer, ["inner"]);
+        walk.FinishListing(outer, inner, 1, 5, incomplete: false);
+        var leaf = builder.AppendEnumeratedChildren(inner, ["leaf", "sibling"]);
+        walk.FinishListing(inner, leaf, 2, 7, incomplete: false);
+        walk.FinishListing(leaf, 0, 0, 11, incomplete: false);
+
+        Assert.Equal(new LiveFolderSize(Path.Join(innerPath, "leaf"), 11), Assert.Single(walk.Drain()));
+        var reading = walk.Capture(root, ["outer"], expanded, 200);
+        Assert.Equal(26, reading.ScannedBytes);
+        Assert.Equal(new long[] { 23, 18, 11, 0 }, reading.Rows.Select(row => row.ScannedBytes));
+        Assert.Equal(new[] { 0, 1, 2, 2 }, reading.Rows.Select(row => row.Depth));
+        Assert.False(reading.Rows[0].IsSettled);
+        Assert.False(reading.Rows[1].IsSettled);
+        Assert.True(reading.Rows[2].HasExactSize);
+
+        walk.FinishListing(leaf + 1, 0, 0, 13, incomplete: true);
+
+        Assert.Empty(walk.Drain());
+        var settled = walk.Capture(root, ["outer"], expanded, 200);
+        Assert.Equal(39, settled.ScannedBytes);
+        Assert.Equal(new long[] { 36, 31, 11, 13 }, settled.Rows.Select(row => row.ScannedBytes));
+        Assert.All(settled.Rows, row => Assert.True(row.IsSettled));
+        Assert.False(settled.Rows[0].HasExactSize);
+        Assert.False(settled.Rows[1].HasExactSize);
     }
 
     [Fact]

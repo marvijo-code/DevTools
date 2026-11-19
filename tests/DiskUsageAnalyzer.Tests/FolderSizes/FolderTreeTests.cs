@@ -281,6 +281,10 @@ public sealed class FolderTreeTests
             await File.WriteAllBytesAsync(outsideFile, new byte[1024 * 1024]);
             CreateJunction(link, target);
 
+            var preview = Assert.IsType<FolderPreview>(FolderFileListing.ReadChildFolders(root, 10, CancellationToken.None));
+            Assert.Equal(["a", "z"], preview.FolderNames);
+            Assert.Null(FolderFileListing.ReadChildFolders(link, 10, CancellationToken.None));
+
             var walker = new ParallelFolderWalker();
             var baseline = await walker.ScanAsync(root, null, CancellationToken.None, workerCount: 2);
             var baselineBytes = Assert.IsType<long>(baseline.GetAllocatedBytes(baseline.Find(root)));

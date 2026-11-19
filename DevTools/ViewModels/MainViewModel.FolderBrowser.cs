@@ -15,7 +15,7 @@ public sealed class FolderBrowserRow
     public FolderBrowserRow(
         string name,
         string path,
-        long sizeBytes,
+        long? sizeBytes,
         string detail,
         double sharePercent,
         int depth,
@@ -27,7 +27,7 @@ public sealed class FolderBrowserRow
         Name = name;
         Path = path;
         SizeBytes = sizeBytes;
-        SizeText = ByteFormatter.Format(sizeBytes);
+        SizeText = sizeBytes is long bytes ? ByteFormatter.Format(bytes) : "—";
         DetailText = detail;
         SharePercent = sharePercent;
         Depth = depth;
@@ -43,7 +43,9 @@ public sealed class FolderBrowserRow
 
     public string Path { get; }
 
-    public long SizeBytes { get; }
+    public long? SizeBytes { get; }
+
+    public bool HasMeasuredSize => SizeBytes.HasValue;
 
     public string SizeText { get; }
 
@@ -95,7 +97,7 @@ public sealed partial class MainViewModel
     private OrderedDictionary<(int Node, bool Allocation), FolderBrowserLayout>? _folderBrowserLayouts;
     private FolderTree? _folderBrowserFileTree;
     private string _folderBrowserPath = string.Empty;
-    private string _folderBrowserSummary = "The folder browser fills in when the first drive scan finishes.";
+    private string _folderBrowserSummary = "Discovering local drives.";
     private bool _showFolderBrowserVolumeSummary;
     private bool _canFolderBrowserGoUp;
     private bool _folderBrowserUseAllocation;
@@ -103,10 +105,10 @@ public sealed partial class MainViewModel
     private CancellationTokenSource? _folderBrowserClickCts;
 
 
-    /// <summary>Rows of the folder currently open in the browser, largest first at every level.</summary>
+    /// <summary>Folders can be browsed before measurement. Measured rows are sorted by size.</summary>
     public ObservableCollection<FolderBrowserRow> FolderBrowserRows => _folderBrowserRows;
 
-    /// <summary>Drive roots that have a finished folder tree.</summary>
+    /// <summary>Drive roots available in the folder browser.</summary>
     public ObservableCollection<FolderBrowserDrive> FolderBrowserDrives => _folderBrowserDrives;
 
     public string FolderBrowserPath => _folderBrowserPath;
@@ -238,9 +240,12 @@ public sealed partial class MainViewModel
         RaisePropertyChanged(nameof(FolderBrowserSummary));
         try
         {
-            if (await _diskUsageAnalyzer.SizeFolderNowAsync(path, cts.Token, measureAllocation) && !cts.IsCancellationRequested)
+            var sized = await _diskUsageAnalyzer.SizeFolderNowAsync(path, cts.Token, measureAllocation);
+            if (!cts.IsCancellationRequested && (!sized || !BrowseFolder(path)))
             {
-                BrowseFolder(path);
+                _showFolderBrowserVolumeSummary = false;
+                _folderBrowserSummary = $"Folder sizes for {path} are unavailable.";
+                RaisePropertyChanged(nameof(FolderBrowserSummary));
             }
         }
         catch (OperationCanceledException)
@@ -330,12 +335,18 @@ public sealed partial class MainViewModel
 
     private void ShowPendingBrowserDrive(string path, bool scanCompleted = false)
     {
-        _folderBrowserExpanded.Clear();
-        ResetFolderBrowserCaches(null);
-        if (_folderBrowserRows.Count > 0)
+        var keepPreview = _folderBrowserFileTree is null && _folderBrowserFileLoadCts is not null &&
+            string.Equals(path, _folderBrowserPath, StringComparison.OrdinalIgnoreCase);
+        if (!keepPreview)
         {
-            _folderBrowserRows.Clear();
+            _folderBrowserExpanded.Clear();
+            ResetFolderBrowserCaches(null);
+            if (_folderBrowserRows.Count > 0)
+            {
+                _folderBrowserRows.Clear();
+            }
         }
+
         _folderBrowserPath = path;
         _canFolderBrowserGoUp = false;
         _showFolderBrowserVolumeSummary = true;
@@ -347,6 +358,49 @@ public sealed partial class MainViewModel
         RaisePropertyChanged(nameof(FolderBrowserPath));
         RaisePropertyChanged(nameof(FolderBrowserSummary));
         RaisePropertyChanged(nameof(CanFolderBrowserGoUp));
+
+        if (!keepPreview && path.Length > 0)
+        {
+            _folderBrowserFileLoadCts = new CancellationTokenSource();
+            _ = LoadFolderBrowserPreviewAsync(path, _folderBrowserFileLoadCts.Token);
+        }
+    }
+
+    private async Task LoadFolderBrowserPreviewAsync(string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var preview = await Task.Run(
+                () => FolderFileListing.ReadChildFolders(path, FolderBrowserMaxRows, cancellationToken), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (preview is null)
+            {
+                return;
+            }
+
+            var rows = new List<FolderBrowserRow>(preview.FolderNames.Count + (preview.HasMore ? 1 : 0));
+            foreach (var name in preview.FolderNames)
+            {
+                rows.Add(new FolderBrowserRow(name, Path.Join(path, name), null, "Open to size this folder", 0, 0,
+                    canOpen: true, canExpand: false, isExpanded: false, isFile: false));
+            }
+
+            if (preview.HasMore)
+            {
+                rows.Add(new FolderBrowserRow("Additional folders", path, null,
+                    $"Preview limited to {FolderBrowserMaxRows:N0} folders", 0, 0,
+                    canOpen: false, canExpand: false, isExpanded: false, isFile: false));
+            }
+
+            UpdateFolderBrowserRows(rows);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error($"Loading the folder preview for '{path}' failed.", ex);
+        }
     }
 
     private void CancelFolderBrowserFileLoads()

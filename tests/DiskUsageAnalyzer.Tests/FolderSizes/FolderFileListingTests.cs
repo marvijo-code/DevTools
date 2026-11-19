@@ -107,6 +107,58 @@ public sealed class FolderFileListingTests
     }
 
     [Fact]
+    public void ReadChildFolders_ReturnsASortedBoundedPreviewOfImmediateDirectories()
+    {
+        var fixture = Directory.CreateTempSubdirectory("devtools-folder-preview-");
+        var directFile = Path.Combine(fixture.FullName, "ordinary.bin");
+        var zulu = fixture.CreateSubdirectory("Zulu");
+        var alpha = fixture.CreateSubdirectory("alpha");
+        var beta = fixture.CreateSubdirectory("Beta");
+        var nested = zulu.CreateSubdirectory("nested");
+        try
+        {
+            File.WriteAllBytes(directFile, [42]);
+
+            var complete = Assert.IsType<FolderPreview>(FolderFileListing.ReadChildFolders(
+                fixture.FullName, 3, CancellationToken.None));
+            Assert.Equal(["alpha", "Beta", "Zulu"], complete.FolderNames);
+            Assert.False(complete.HasMore);
+
+            var limited = Assert.IsType<FolderPreview>(FolderFileListing.ReadChildFolders(
+                fixture.FullName, 2, CancellationToken.None));
+            Assert.True(limited.HasMore);
+            Assert.Equal(2, limited.FolderNames.Count);
+            Assert.All(limited.FolderNames, name => Assert.Contains(name, complete.FolderNames));
+
+            var empty = Assert.IsType<FolderPreview>(FolderFileListing.ReadChildFolders(
+                beta.FullName, 2, CancellationToken.None));
+            Assert.Empty(empty.FolderNames);
+            Assert.False(empty.HasMore);
+            Assert.Null(FolderFileListing.ReadChildFolders(Path.Combine(fixture.FullName, "missing"), 2, CancellationToken.None));
+        }
+        finally
+        {
+            File.Delete(directFile);
+            nested.Delete();
+            beta.Delete();
+            alpha.Delete();
+            zulu.Delete();
+            fixture.Delete();
+        }
+    }
+
+    [Fact]
+    public void ReadChildFolders_HonoursCancellationBeforeAccessingTheFolder()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var error = Assert.Throws<OperationCanceledException>(() =>
+            FolderFileListing.ReadChildFolders(Path.GetTempPath(), 2, cancellation.Token));
+        Assert.Equal(cancellation.Token, error.CancellationToken);
+    }
+
+    [Fact]
     public void ReadLargest_HonoursCancellationBeforeAccessingTheFolder()
     {
         using var cts = new CancellationTokenSource();

@@ -583,6 +583,11 @@ public sealed partial class MainViewModel : ObservableObject
         {
             SetDiskUsageRefreshing(true);
             _hasDiskUsageSnapshot = false;
+            if (_folderBrowserFileTree is null)
+            {
+                CancelFolderBrowserFileLoads();
+            }
+
             SetDiskUsageSections([]);
             _diskUsageAnalysis = "Scanning disk usage and streaming results as sections complete.";
             SetDiskUsageStatus("Starting disk usage refresh...");

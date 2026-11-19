@@ -8,6 +8,8 @@ namespace DevTools.Services.FolderSizes;
 
 internal readonly record struct FolderFile(string Name, string Path, long Bytes);
 
+internal sealed record FolderPreview(IReadOnlyList<string> FolderNames, bool HasMore);
+
 internal sealed record FolderFileSnapshot(IReadOnlyList<FolderFile> Files, long TotalBytes, long FileCount)
 {
     internal bool Matches(long bytes, long fileCount) => TotalBytes == bytes && FileCount == fileCount;
@@ -102,6 +104,50 @@ internal static class FolderFileListing
             stopped.Cancel();
             await producer.ConfigureAwait(false);
         }
+    }
+
+    internal static FolderPreview? ReadChildFolders(string folder, int limit, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+
+        using var errorMode = WindowsVolumePaths.SuppressCriticalErrors();
+        var names = new List<string>(limit);
+        var hasMore = false;
+        try
+        {
+            if ((File.GetAttributes(folder) & System.IO.FileAttributes.ReparsePoint) != 0)
+            {
+                return null;
+            }
+
+            var entries = new FileSystemEnumerable<string>(
+                folder, static (ref FileSystemEntry entry) => entry.FileName.ToString(), ListingOptions)
+            {
+                ShouldIncludePredicate = (ref FileSystemEntry entry) =>
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return entry.IsDirectory && (entry.Attributes & System.IO.FileAttributes.ReparsePoint) == 0;
+                }
+            };
+            foreach (var name in entries)
+            {
+                if (names.Count == limit)
+                {
+                    hasMore = true;
+                    break;
+                }
+
+                names.Add(name);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.Security.SecurityException)
+        {
+            return null;
+        }
+
+        names.Sort(StringComparer.OrdinalIgnoreCase);
+        return new FolderPreview(names, hasMore);
     }
 
     public static FolderFileSnapshot? ReadLargest(string folder, int limit, CancellationToken cancellationToken = default)

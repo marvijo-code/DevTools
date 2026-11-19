@@ -104,12 +104,8 @@ internal static class DiskCapacityInventory
             var geometry = ReadDiskGeometry(buffer.AsSpan(0, geometryBytes));
             var total = geometry?.TotalBytes ?? QueryDiskLength(path, ref buffer);
 
-            DiskPartitionLayout? layout = null;
-            if (total is long capacity)
-            {
-                var bytes = Query(handle, GetDriveLayout, ref buffer);
-                layout = ReadPartitionLayout(buffer.AsSpan(0, bytes), capacity, geometry?.SectorBytes ?? 0);
-            }
+            var layoutBytes = Query(handle, GetDriveLayout, ref buffer);
+            var layout = ReadPartitionLayout(buffer.AsSpan(0, layoutBytes), total, geometry?.SectorBytes ?? 0);
 
             disks.Add(Reconcile(disk, total, layout?.Ranges, volumes, layout?.GptUsableRange, layout?.MbrSector));
         }
@@ -204,7 +200,7 @@ internal static class DiskCapacityInventory
         return extents;
     }
 
-    internal static DiskPartitionLayout? ReadPartitionLayout(ReadOnlySpan<byte> layout, long total, uint sectorBytes)
+    internal static DiskPartitionLayout? ReadPartitionLayout(ReadOnlySpan<byte> layout, long? total, uint sectorBytes)
     {
         // DRIVE_LAYOUT_INFORMATION_EX has a 48-byte header and 144-byte PARTITION_INFORMATION_EX entries.
         const int headerBytes = 48;
@@ -227,6 +223,7 @@ internal static class DiskCapacityInventory
             return null;
         }
 
+        var maximumOffset = total ?? long.MaxValue;
         var ranges = new HashSet<DiskRange>();
         for (var i = 0; i < count; i++)
         {
@@ -244,7 +241,7 @@ internal static class DiskCapacityInventory
                 continue;
             }
 
-            if (!range.FitsInside(total))
+            if (!range.FitsInside(maximumOffset))
             {
                 return null;
             }
@@ -258,14 +255,14 @@ internal static class DiskCapacityInventory
             // The GPT drive-layout union starts at byte 8, with a 16-byte disk ID ahead of the usable range.
             var usable = new DiskRange(BinaryPrimitives.ReadInt64LittleEndian(layout[24..]),
                 BinaryPrimitives.ReadInt64LittleEndian(layout[32..]));
-            if (usable.FitsInside(total) && usable.Start > 0 && usable.End < total &&
+            if (usable.FitsInside(maximumOffset) && usable.Start > 0 && (total is null || usable.End < maximumOffset) &&
                 ranges.All(range => range.Start >= usable.Start && range.End <= usable.End))
             {
                 gptUsableRange = usable;
             }
         }
 
-        DiskRange? mbrSector = style == MbrPartitionStyle && sectorBytes >= 512 && sectorBytes <= total && BitOperations.IsPow2(sectorBytes)
+        DiskRange? mbrSector = style == MbrPartitionStyle && sectorBytes >= 512 && sectorBytes <= maximumOffset && BitOperations.IsPow2(sectorBytes)
             ? new DiskRange(0, sectorBytes)
             : null;
         return new DiskPartitionLayout(ranges, gptUsableRange, mbrSector);

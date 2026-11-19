@@ -743,6 +743,7 @@ public sealed class VolumeSpaceTests
         var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(),
             [backingDisk, deviceWithoutExtents]);
         Assert.Contains("Disk 7 capacity is unavailable. Windows reports 300 bytes in volume extents.", summary.Summary);
+        Assert.Contains("40 are in matched filesystem capacities and 10 are beyond those capacities in the same extents.", summary.Summary);
         Assert.Contains("Disk 9 capacity is unavailable. Windows reported no volume extents.", summary.Summary);
         Assert.DoesNotContain("outside", summary.Summary);
     }
@@ -817,6 +818,12 @@ public sealed class VolumeSpaceTests
         Assert.Equal(256, capacity.UnassignedMbrSectorBytes);
         var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
         Assert.Contains("256 in the master boot record sector and 2,560 elsewhere outside partition and volume ranges.", summary.Summary);
+
+        var withoutDiskLength = Assert.IsType<DiskPartitionLayout>(DiskCapacityInventory.ReadPartitionLayout(layout, null, 0));
+        Assert.Equal(new DiskRange(512, 1024), Assert.Single(withoutDiskLength.Ranges));
+        Assert.Null(withoutDiskLength.MbrSector);
+        BinaryPrimitives.WriteInt64LittleEndian(partition[8..], long.MaxValue - 1);
+        Assert.Null(DiskCapacityInventory.ReadPartitionLayout(layout, null, 0));
     }
 
     [Fact]
@@ -834,16 +841,30 @@ public sealed class VolumeSpaceTests
         var parsed = Assert.IsType<DiskPartitionLayout>(DiskCapacityInventory.ReadPartitionLayout(layout, 1000, 512));
         Assert.Equal(new DiskRange(50, 850), parsed.GptUsableRange);
 
-        var capacity = DiskCapacityInventory.Reconcile(0, 1000, parsed.Ranges,
-        [
+        var volumes = new[]
+        {
             VolumeWithExtent(0, new DiskRange(0, 75), null),
             VolumeWithExtent(0, new DiskRange(280, 120), null),
             VolumeWithExtent(0, new DiskRange(870, 100), null)
-        ], gptUsableRange: parsed.GptUsableRange);
+        };
+        var capacity = DiskCapacityInventory.Reconcile(0, 1000, parsed.Ranges, volumes,
+            gptUsableRange: parsed.GptUsableRange);
 
         Assert.Equal(new DiskCapacity(0, 1000, 300, 295, 0, 0, 20, UnassignedGptUsableBytes: 395), capacity);
         var summary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [capacity]);
         Assert.Contains("395 unallocated in the GPT usable range and 30 remaining outside the GPT usable range.", summary.Summary);
+
+        var partialLayout = Assert.IsType<DiskPartitionLayout>(DiskCapacityInventory.ReadPartitionLayout(layout, null, 0));
+        Assert.True(partialLayout.Ranges.SetEquals(parsed.Ranges));
+        Assert.Equal(parsed.GptUsableRange, partialLayout.GptUsableRange);
+        var partialCapacity = DiskCapacityInventory.Reconcile(0, null, partialLayout.Ranges, volumes,
+            gptUsableRange: partialLayout.GptUsableRange);
+        var partialSummary = DiskUsage.BuildDriveSummarySection([], new Dictionary<string, DriveScanResult>(), [partialCapacity]);
+        Assert.Equal(capacity with { TotalBytes = null }, partialCapacity);
+        Assert.Contains("Disk 0 capacity is unavailable.", partialSummary.Summary);
+        Assert.Contains("300 bytes in partition ranges, including 280 outside reported volume extents.", partialSummary.Summary);
+        Assert.Contains("395 bytes are unallocated in the reported GPT usable range.", partialSummary.Summary);
+        Assert.DoesNotContain("remaining outside the GPT usable range", partialSummary.Summary);
 
         BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(24), 150);
         BinaryPrimitives.WriteInt64LittleEndian(layout.AsSpan(32), 750);

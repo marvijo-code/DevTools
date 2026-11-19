@@ -1028,9 +1028,7 @@ public sealed class DiskUsageAnalyzer
     {
         if (disk.TotalBytes is not long capacity)
         {
-            return disk.VolumeExtentBytes > 0
-                ? $"Disk {disk.DiskNumber} capacity is unavailable. Windows reports {disk.VolumeExtentBytes:N0} bytes in volume extents."
-                : $"Disk {disk.DiskNumber} capacity is unavailable. Windows reported no volume extents.";
+            return DescribePartialDiskCapacity(disk);
         }
 
         var total = $"Disk {disk.DiskNumber} has {capacity:N0} bytes.";
@@ -1062,6 +1060,36 @@ public sealed class DiskUsageAnalyzer
         }
 
         return $"{total} {volumeNotes}{otherPartitions:N0} in other partition ranges and {outsideNote}";
+    }
+
+    private static string DescribePartialDiskCapacity(DiskCapacity disk)
+    {
+        var note = disk.VolumeExtentBytes > 0
+            ? $"Disk {disk.DiskNumber} capacity is unavailable. Windows reports {disk.VolumeExtentBytes:N0} bytes in volume extents."
+            : $"Disk {disk.DiskNumber} capacity is unavailable. Windows reported no volume extents.";
+        if (disk.MatchedExtentBytes > 0)
+        {
+            note += $" Of those bytes, {disk.FileSystemBytes:N0} are in matched filesystem capacities and " +
+                $"{disk.MatchedExtentBytes - disk.FileSystemBytes:N0} are beyond those capacities in the same extents.";
+        }
+
+        if (disk.PartitionedBytes is long partitioned)
+        {
+            var otherPartitions = partitioned - disk.VolumeExtentBytesInPartitions;
+            note += $" Windows reports {partitioned:N0} bytes in partition ranges, " +
+                $"including {otherPartitions:N0} outside reported volume extents.";
+        }
+
+        if (disk.UnassignedGptUsableBytes is long usable)
+        {
+            note += $" {usable:N0} bytes are unallocated in the reported GPT usable range.";
+        }
+        else if (disk.UnassignedMbrSectorBytes is long bootSector)
+        {
+            note += $" {bootSector:N0} bytes are in the master boot record sector outside reported partition and volume ranges.";
+        }
+
+        return note;
     }
 
     private static string DescribeIncompleteFolderScan(FolderTree? tree) =>

@@ -121,6 +121,11 @@ public sealed partial class MainViewModel
             var bytes = safe.Sum(item => item.SizeBytes ?? 0);
             estimate = estimate with { SizeBytes = bytes, SizeText = $"{CleanupRules.FormatBytes(bytes)} in {safe.Count}" };
         }
+        else if (option.Key == CleanupAdvisor.ProjectsKey && _hasProjectsSnapshot)
+        {
+            var bytes = _allProjects.Sum(item => item.BuildOutputBytes);
+            estimate = estimate with { SizeBytes = bytes, SizeText = $"{CleanupRules.FormatBytes(bytes)} in {_allProjects.Count}" };
+        }
 
         if (!string.IsNullOrWhiteSpace(estimate.Reason))
         {

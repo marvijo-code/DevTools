@@ -124,6 +124,10 @@ public sealed partial class MainPage : Page
             {
                 await ViewModel.EnsureWorktreesLoadedAsync(CancellationToken.None);
             }
+            else if (ViewModel.IsProjectsVisible)
+            {
+                await ViewModel.EnsureProjectsLoadedAsync(CancellationToken.None);
+            }
 
             AppLog.Info("InitializePageAsync completed.");
         }
@@ -187,6 +191,10 @@ public sealed partial class MainPage : Page
         else if (ViewModel.IsWorktreesVisible)
         {
             await ViewModel.RefreshWorktreesAsync(CancellationToken.None);
+        }
+        else if (ViewModel.IsProjectsVisible)
+        {
+            await ViewModel.RefreshProjectsAsync(CancellationToken.None);
         }
     }
 
@@ -397,6 +405,118 @@ public sealed partial class MainPage : Page
         await ViewModel.EnsureWorktreesLoadedAsync(CancellationToken.None);
     }
 
+    private async void NavigateToProjects_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ShowProjects();
+        ProjectsScroll.ChangeView(null, 0, null, true);
+        ProjectsScroll.Focus(FocusState.Programmatic);
+        await ViewModel.EnsureProjectsLoadedAsync(CancellationToken.None);
+    }
+
+    private async void RefreshProjects_Click(object sender, RoutedEventArgs e)
+    {
+        await ViewModel.RefreshProjectsAsync(CancellationToken.None);
+    }
+
+    private void CancelProjectsOperation_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.CancelProjectsOperation();
+    }
+
+    private void SelectAllProjects_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.SelectAllVisibleProjects();
+    }
+
+    private void SelectBuildOutputProjects_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.SelectBuildOutputProjectsOnly();
+    }
+
+    private void ClearProjectSelection_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ClearProjectSelection();
+    }
+
+    private async void CleanSelectedProjects_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = ViewModel.GetSelectedProjects();
+        if (selected.Count == 0)
+        {
+            ViewModel.StatusMessage = "No projects selected to clean.";
+            return;
+        }
+
+        await ConfirmAndCleanProjectsAsync(selected);
+    }
+
+    private async void CleanSingleProject_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: ProjectCleanItem item } || !item.CanClean)
+        {
+            return;
+        }
+
+        await ConfirmAndCleanProjectsAsync([item]);
+    }
+
+    private async Task ConfirmAndCleanProjectsAsync(IReadOnlyList<ProjectCleanItem> targets)
+    {
+        var includeDeps = ViewModel.ProjectsIncludeDependencies;
+        var totalBytes = targets.Sum(t => t.ReclaimableBytes);
+        var folderCount = targets.Sum(t => t.Project.GetTargetArtifacts(includeDeps).Count);
+
+        var lines = new List<string>
+        {
+            includeDeps
+                ? $"Clean build outputs AND dependencies (node_modules, .venv, packages) for {targets.Count} project(s)?"
+                : $"Clean safe build outputs (bin, obj, target, .next, dist, __pycache__) for {targets.Count} project(s)?",
+            $"Total: {folderCount} folder(s), {CleanupRules.FormatBytes(totalBytes)}.",
+            string.Empty
+        };
+
+        foreach (var item in targets.Take(12))
+        {
+            lines.Add($"  [{item.EcosystemLabel}] {item.Name} ({item.SizeDisplay}) - {item.BreakdownText}");
+        }
+
+        if (targets.Count > 12)
+        {
+            lines.Add($"  ...and {targets.Count - 12} more project(s).");
+        }
+
+        lines.Add(string.Empty);
+        lines.Add(includeDeps
+            ? "Dependencies will need npm/bun/pip/dotnet restore before building again. Junctions are skipped."
+            : "Source code and dependencies are untouched. Build folders regenerate on your next build.");
+
+        var confirm = await ShowConfirmationDialogAsync(() => new ContentDialog
+        {
+            Title = $"Clean {targets.Count} Project(s)?",
+            Content = new ScrollViewer
+            {
+                MaxHeight = 340,
+                Content = new TextBlock
+                {
+                    Text = string.Join(Environment.NewLine, lines),
+                    TextWrapping = TextWrapping.Wrap,
+                    IsTextSelectionEnabled = true
+                }
+            },
+            PrimaryButtonText = $"Clean ({CleanupRules.FormatBytes(totalBytes)})",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot
+        });
+
+        if (confirm != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        await ViewModel.CleanProjectsAsync(targets, includeDeps);
+    }
+
     private async void RefreshOpenWork_Click(object sender, RoutedEventArgs e)
     {
         await ViewModel.RefreshOpenWorkAsync(CancellationToken.None);
@@ -417,6 +537,14 @@ public sealed partial class MainPage : Page
         switch (option.ActionKind)
         {
             case CleanupActionKind.Navigate:
+                if (option.Key == CleanupAdvisor.ProjectsKey)
+                {
+                    ViewModel.ShowProjects();
+                    ProjectsScroll.ChangeView(null, 0, null, true);
+                    await ViewModel.EnsureProjectsLoadedAsync(CancellationToken.None);
+                    return;
+                }
+
                 ViewModel.WorktreeFilter = "Safe to remove";
                 ViewModel.ShowWorktrees();
                 WorktreesScroll.ChangeView(null, 0, null, true);
@@ -504,6 +632,230 @@ public sealed partial class MainPage : Page
 
         AppLog.Info($"Remove worktree confirmed: {item.Path}");
         await ViewModel.RemoveWorktreeAsync(item, CancellationToken.None);
+    }
+
+    private void FilterSafeWorktrees_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.FilterToSafeAndSelectAll();
+    }
+
+    private void SelectAllWorktrees_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.SelectAllVisibleWorktrees();
+    }
+
+    private void SelectSafeWorktrees_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.SelectSafeVisibleWorktrees();
+    }
+
+    private void ClearWorktreeSelection_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ClearWorktreeSelection();
+    }
+
+    private void CancelBulkWorktreeRemoval_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.CancelBulkWorktreeRemoval();
+    }
+
+    private async void RemoveAllSafeWorktrees_Click(object sender, RoutedEventArgs e)
+    {
+        var safeItems = ViewModel.GetVisibleSafeWorktrees();
+        if (safeItems.Count == 0)
+        {
+            ViewModel.StatusMessage = "No visible safe-to-remove worktrees.";
+            return;
+        }
+
+        await ConfirmAndRemoveWorktreesBulkAsync(safeItems);
+    }
+
+    private async void RemoveSelectedWorktrees_Click(object sender, RoutedEventArgs e)
+    {
+        var selected = ViewModel.GetSelectedWorktrees();
+        if (selected.Count == 0)
+        {
+            ViewModel.StatusMessage = "No worktrees selected.";
+            return;
+        }
+
+        await ConfirmAndRemoveWorktreesBulkAsync(selected);
+    }
+
+    private async Task ConfirmAndRemoveWorktreesBulkAsync(IReadOnlyList<WorktreeItem> items)
+    {
+        var plan = WorktreeBulkPolicy.Plan(items.Select(item => item.ToBulkCandidate()));
+        if (plan.SafeItems.Count == 0 && plan.ApprovalRequiredItems.Count == 0)
+        {
+            ViewModel.StatusMessage = "None of the selected worktrees can be bulk-removed.";
+            return;
+        }
+
+        // Case 1: Only safe worktrees selected (all merged & clean or folder missing).
+        if (!plan.RequiresExplicitApproval)
+        {
+            var deleteMergedBranchesBox = new CheckBox
+            {
+                Content = "Also delete merged local git branches (safe git branch -d only)",
+                IsChecked = false
+            };
+
+            var body = new StackPanel { Spacing = 10 };
+            body.Children.Add(new ScrollViewer
+            {
+                MaxHeight = 320,
+                Content = new TextBlock
+                {
+                    Text = plan.BuildConfirmationSummary(includeApprovalRequired: false),
+                    TextWrapping = TextWrapping.Wrap,
+                    IsTextSelectionEnabled = true
+                }
+            });
+            body.Children.Add(deleteMergedBranchesBox);
+
+            var confirm = await ShowConfirmationDialogAsync(() => new ContentDialog
+            {
+                Title = $"Remove {plan.SafeItems.Count} Safe Worktree(s)?",
+                Content = body,
+                PrimaryButtonText = $"Remove {plan.SafeItems.Count} Safe ({WorktreeItem.FormatBytes(plan.SafeBytes)})",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = XamlRoot
+            });
+
+            if (confirm != ContentDialogResult.Primary)
+            {
+                return;
+            }
+
+            await ViewModel.RemoveWorktreesBulkAsync(
+                items,
+                explicitApprovalGranted: false,
+                deleteBranches: deleteMergedBranchesBox.IsChecked == true,
+                allowUnmergedBranchDelete: false);
+            return;
+        }
+
+        // Case 2: Selection contains unmerged branches, open PRs, dirty files, or detached commits.
+        // Safety rule: disallow deleting unmerged/unsafe worktrees by default; require explicit approval.
+        var guardBody = new StackPanel { Spacing = 10 };
+        guardBody.Children.Add(new TextBlock
+        {
+            Text = "Some selected worktrees have unmerged branches, open pull requests, or uncommitted files. Bulk removal blocks them by default.",
+            TextWrapping = TextWrapping.Wrap,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+        });
+        guardBody.Children.Add(new ScrollViewer
+        {
+            MaxHeight = 300,
+            Content = new TextBlock
+            {
+                Text = plan.BuildConfirmationSummary(includeApprovalRequired: false),
+                TextWrapping = TextWrapping.Wrap,
+                IsTextSelectionEnabled = true
+            }
+        });
+
+        if (plan.SafeItems.Count > 0)
+        {
+            var guardResult = await ShowConfirmationDialogAsync(() => new ContentDialog
+            {
+                Title = "Unmerged or Dirty Worktrees Selected",
+                Content = guardBody,
+                PrimaryButtonText = $"Remove Safe Only ({plan.SafeItems.Count})",
+                SecondaryButtonText = "Approve Unmerged Removal...",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = XamlRoot
+            });
+
+            if (guardResult == ContentDialogResult.Primary)
+            {
+                await ViewModel.RemoveWorktreesBulkAsync(
+                    items,
+                    explicitApprovalGranted: false,
+                    deleteBranches: false,
+                    allowUnmergedBranchDelete: false);
+                return;
+            }
+
+            if (guardResult != ContentDialogResult.Secondary)
+            {
+                return;
+            }
+        }
+
+        // Explicit approval prompt for unmerged/dirty/unsafe worktrees.
+        var ackCheckBox = new CheckBox
+        {
+            Content = $"I approve removing {plan.ApprovalRequiredItems.Count} unmerged/unsafe worktree folder(s).",
+            IsChecked = false
+        };
+        var deleteUnmergedBranchCheckBox = new CheckBox
+        {
+            Content = "Also force-delete their unmerged local branches (git branch -D - cannot be undone)",
+            IsChecked = false
+        };
+        var phraseBox = new TextBox
+        {
+            Header = "Type APPROVE to unlock removal",
+            PlaceholderText = "APPROVE"
+        };
+
+        var approvalPanel = new StackPanel { Spacing = 10 };
+        approvalPanel.Children.Add(new ScrollViewer
+        {
+            MaxHeight = 260,
+            Content = new TextBlock
+            {
+                Text = plan.BuildConfirmationSummary(includeApprovalRequired: true),
+                TextWrapping = TextWrapping.Wrap,
+                IsTextSelectionEnabled = true
+            }
+        });
+        approvalPanel.Children.Add(ackCheckBox);
+        approvalPanel.Children.Add(deleteUnmergedBranchCheckBox);
+        approvalPanel.Children.Add(phraseBox);
+
+        var totalTargets = plan.SafeItems.Count + plan.ApprovalRequiredItems.Count;
+        var approvalResult = await ShowConfirmationDialogAsync(() =>
+        {
+            var dialog = new ContentDialog
+            {
+                Title = $"Approve Removing {totalTargets} Worktree(s)?",
+                Content = approvalPanel,
+                PrimaryButtonText = $"Remove All ({totalTargets})",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+                IsPrimaryButtonEnabled = false,
+                XamlRoot = XamlRoot
+            };
+
+            void UpdateEnabled()
+            {
+                dialog.IsPrimaryButtonEnabled =
+                    ackCheckBox.IsChecked == true &&
+                    string.Equals(phraseBox.Text?.Trim(), "APPROVE", StringComparison.Ordinal);
+            }
+
+            ackCheckBox.Checked += (_, _) => UpdateEnabled();
+            ackCheckBox.Unchecked += (_, _) => UpdateEnabled();
+            phraseBox.TextChanged += (_, _) => UpdateEnabled();
+            return dialog;
+        });
+
+        if (approvalResult != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        var deleteUnmergedBranches = deleteUnmergedBranchCheckBox.IsChecked == true;
+        await ViewModel.RemoveWorktreesBulkAsync(
+            items,
+            explicitApprovalGranted: true,
+            deleteBranches: deleteUnmergedBranches,
+            allowUnmergedBranchDelete: deleteUnmergedBranches);
     }
 
     private async Task<ContentDialogResult> ShowConfirmationDialogAsync(Func<ContentDialog> createDialog)
@@ -1242,6 +1594,7 @@ public sealed partial class MainPage : Page
         var isResourcesVisible = context.ShowSystem;
         var isOpenWorkVisible = context.ShowOpenWork;
         var isWorktreesVisible = context.ShowWorktrees;
+        var isProjectsVisible = context.ShowProjects;
 
         SetDeferredPaneVisibility(KillProcessesContentPane, nameof(KillProcessesContentPane), isKillVisible);
         SetDeferredPaneVisibility(WorkflowContentPane, nameof(WorkflowContentPane), isWorkflowVisible);
@@ -1249,6 +1602,7 @@ public sealed partial class MainPage : Page
         SetDeferredPaneVisibility(ResourcesContentPane, nameof(ResourcesContentPane), isResourcesVisible);
         SetDeferredPaneVisibility(OpenWorkContentPane, nameof(OpenWorkContentPane), isOpenWorkVisible);
         SetDeferredPaneVisibility(WorktreesContentPane, nameof(WorktreesContentPane), isWorktreesVisible);
+        SetDeferredPaneVisibility(ProjectsContentPane, nameof(ProjectsContentPane), isProjectsVisible);
 
         RunDetailsBorder.Visibility = Visibility.Visible;
         Grid.SetColumnSpan(MainContentBorder, 1);
@@ -1274,6 +1628,7 @@ public sealed partial class MainPage : Page
         ApplyTabButtonState(StorageNavigationButton, isDiskVisible);
         ApplyTabButtonState(OpenWorkNavigationButton, isOpenWorkVisible);
         ApplyTabButtonState(WorktreesNavigationButton, isWorktreesVisible);
+        ApplyTabButtonState(ProjectsNavigationButton, isProjectsVisible);
     }
 
     private void EnsureSelectedProcessDetailsLoaded()
@@ -1445,28 +1800,10 @@ public sealed partial class MainPage : Page
 
     private static void ClearDirectoryContents(string directoryPath)
     {
-        foreach (var entry in Directory.EnumerateFileSystemEntries(directoryPath))
+        var outcome = FastPathDeleter.Delete(directoryPath, keepRoot: true);
+        if (outcome.Skipped > 0 && Directory.EnumerateFileSystemEntries(directoryPath).Any())
         {
-            if (Directory.Exists(entry))
-            {
-                ResetAttributes(entry);
-                Directory.Delete(entry, true);
-                continue;
-            }
-
-            ResetAttributes(entry);
-            File.Delete(entry);
-        }
-    }
-
-    private static void ResetAttributes(string path)
-    {
-        try
-        {
-            File.SetAttributes(path, System.IO.FileAttributes.Normal);
-        }
-        catch
-        {
+            throw new IOException($"Cleared {outcome.FilesDeleted:N0} file(s), but {outcome.Skipped:N0} locked item(s) could not be removed.");
         }
     }
 }

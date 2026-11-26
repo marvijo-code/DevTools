@@ -114,11 +114,30 @@ public sealed class WorktreeAnalyzer
     }
 
     /// <summary>
-    /// Removes one worktree folder. The branch and its commits always stay; only <paramref name="force"/> lets
-    /// uncommitted files be thrown away.
+    /// Removes one worktree folder using the fast parallel native deleter (safe junction unlinking +
+    /// POSIX semantics) followed by <c>git worktree prune</c>, falling back to <c>git worktree remove</c>
+    /// if locked files remain. The branch stays unless explicitly requested and permitted by
+    /// <see cref="WorktreeBulkPolicy"/>.
     /// </summary>
-    public async Task<(bool Success, string Message)> RemoveAsync(WorktreeItem item, bool force, CancellationToken cancellationToken)
+    public async Task<(bool Success, string Message)> RemoveAsync(
+        WorktreeItem item,
+        bool force,
+        CancellationToken cancellationToken,
+        bool deleteBranch = false,
+        bool allowUnmergedBranchDelete = false,
+        bool pruneImmediately = true)
     {
+        if (item.IsAppManaged)
+        {
+            return (false, $"Refused to remove app-managed worktree {item.Path}.");
+        }
+
+        if (item.IsDirty && !force)
+        {
+            return (false, $"Refused to remove dirty worktree {item.Path} without explicit force approval.");
+        }
+
+        var clock = Stopwatch.StartNew();
         if (item.IsLocked)
         {
             await RunGitAsync(item.RepositoryPath, ["worktree", "unlock", item.Path], cancellationToken);
@@ -126,12 +145,41 @@ public sealed class WorktreeAnalyzer
 
         if (item.IsMissing || !Directory.Exists(item.Path))
         {
-            var prune = await RunGitAsync(item.RepositoryPath, ["worktree", "prune"], cancellationToken);
-            return prune.ExitCode == 0
-                ? (true, $"Pruned the leftover record for {item.Path}.")
-                : (false, $"Prune failed for {item.Path}: {prune.Error}");
+            if (pruneImmediately)
+            {
+                var prune = await RunGitAsync(item.RepositoryPath, ["worktree", "prune"], cancellationToken);
+                if (prune.ExitCode != 0)
+                {
+                    return (false, $"Prune failed for {item.Path}: {prune.Error}");
+                }
+            }
+
+            var branchNote = await TryDeleteWorktreeBranchAsync(item, deleteBranch, allowUnmergedBranchDelete, cancellationToken);
+            return (true, $"Pruned the leftover record for {item.Path}.{branchNote}");
         }
 
+        // Fast path: delete the folder using our multi-threaded Rust/native deleter (safely unlinks
+        // junctions without recursing into targets), then prune git's worktree metadata.
+        var deleteOutcome = await FastPathDeleter.DeleteAsync(item.Path, keepRoot: false, workerCount: 0, cancellationToken);
+        if (deleteOutcome.RootRemoved || !Directory.Exists(item.Path))
+        {
+            if (pruneImmediately)
+            {
+                var prune = await RunGitAsync(item.RepositoryPath, ["worktree", "prune"], cancellationToken);
+                if (prune.ExitCode != 0)
+                {
+                    AppLog.Info($"git worktree prune after fast delete returned {prune.ExitCode}: {prune.Error}");
+                }
+            }
+
+            clock.Stop();
+            var branchNote = await TryDeleteWorktreeBranchAsync(item, deleteBranch, allowUnmergedBranchDelete, cancellationToken);
+            var engine = deleteOutcome.UsedNative ? "Rust native" : "parallel";
+            AppLog.Info($"Fast worktree remove ({engine}) {item.Path}: {deleteOutcome.FilesDeleted:N0} files, {CleanupRules.FormatBytes(deleteOutcome.BytesFreed)} in {clock.ElapsedMilliseconds} ms.");
+            return (true, $"Removed {item.Path} ({CleanupRules.FormatBytes(deleteOutcome.BytesFreed)}) in {clock.Elapsed.TotalSeconds:F2}s ({engine}).{branchNote}");
+        }
+
+        // Fallback to git worktree remove if any files remained locked.
         var arguments = new List<string> { "worktree", "remove" };
         if (force)
         {
@@ -140,10 +188,155 @@ public sealed class WorktreeAnalyzer
 
         arguments.Add(item.Path);
         var result = await RunGitAsync(item.RepositoryPath, arguments, cancellationToken, timeoutSeconds: 600);
-        AppLog.Info($"git worktree remove {(force ? "--force " : string.Empty)}{item.Path} => {result.ExitCode}. {result.Error}");
-        return result.ExitCode == 0
-            ? (true, $"Removed worktree {item.Path}.")
-            : (false, $"Could not remove {item.Path}: {FirstLine(result.Error)}");
+        AppLog.Info($"git worktree remove fallback {(force ? "--force " : string.Empty)}{item.Path} => {result.ExitCode}. {result.Error}");
+        if (result.ExitCode == 0)
+        {
+            var branchNote = await TryDeleteWorktreeBranchAsync(item, deleteBranch, allowUnmergedBranchDelete, cancellationToken);
+            return (true, $"Removed worktree {item.Path}.{branchNote}");
+        }
+
+        return (false, $"Could not remove {item.Path}: {FirstLine(result.Error)}");
+    }
+
+    /// <summary>
+    /// Removes multiple worktrees in parallel while enforcing <see cref="WorktreeBulkPolicy"/>.
+    /// Unmerged/dirty/unsafe worktrees are refused unless <paramref name="explicitApprovalGranted"/> is true.
+    /// </summary>
+    public async Task<WorktreeBulkResult> RemoveBulkAsync(
+        IReadOnlyList<WorktreeItem> selectedItems,
+        bool explicitApprovalGranted,
+        bool deleteBranches,
+        bool allowUnmergedBranchDelete,
+        IProgress<WorktreeBulkProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var clock = Stopwatch.StartNew();
+        var itemByPath = selectedItems.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
+        var plan = WorktreeBulkPolicy.Plan(selectedItems.Select(item => item.ToBulkCandidate()));
+        var targets = plan.GetApprovedTargets(explicitApprovalGranted)
+            .Select(candidate => itemByPath[candidate.Path])
+            .ToList();
+
+        var removed = new List<WorktreeItem>();
+        var failed = new List<(WorktreeItem Item, string Error)>();
+        var skippedUnsafe = explicitApprovalGranted
+            ? new List<WorktreeItem>()
+            : plan.ApprovalRequiredItems.Select(blocked => itemByPath[blocked.Item.Path]).ToList();
+        long bytesFreed = 0;
+        var completed = 0;
+        var resultsLock = new object();
+        var touchedRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        using var gate = new SemaphoreSlim(3, 3);
+        var tasks = targets.Select(async item =>
+        {
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                item.SetRemoving(true);
+                var force = item.IsDirty && explicitApprovalGranted;
+                var (success, message) = await RemoveAsync(
+                    item,
+                    force,
+                    cancellationToken,
+                    deleteBranch: false, // Defer branch delete until after repo prune so git sees worktree gone.
+                    allowUnmergedBranchDelete: false,
+                    pruneImmediately: false);
+
+                lock (resultsLock)
+                {
+                    if (success)
+                    {
+                        removed.Add(item);
+                        bytesFreed += item.SizeBytes ?? 0;
+                        touchedRepos.Add(item.RepositoryPath);
+                    }
+                    else
+                    {
+                        failed.Add((item, message));
+                    }
+
+                    completed++;
+                    progress?.Report(new WorktreeBulkProgress(completed, targets.Count, bytesFreed, item.Path));
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                lock (resultsLock)
+                {
+                    failed.Add((item, ex.Message));
+                    completed++;
+                    progress?.Report(new WorktreeBulkProgress(completed, targets.Count, bytesFreed, item.Path));
+                }
+            }
+            finally
+            {
+                item.SetRemoving(false);
+                gate.Release();
+            }
+        });
+
+        await Task.WhenAll(tasks);
+
+        // Prune once per touched repository (much faster than pruning after every single worktree).
+        foreach (var repoPath in touchedRepos)
+        {
+            await RunGitAsync(repoPath, ["worktree", "prune"], CancellationToken.None);
+        }
+
+        // Now safely delete branches for removed worktrees if requested and allowed by policy.
+        var branchesDeleted = 0;
+        if (deleteBranches)
+        {
+            foreach (var item in removed)
+            {
+                var (allowed, useForce, _) = WorktreeBulkPolicy.EvaluateBranchDeletion(
+                    item.ToBulkCandidate(),
+                    deleteBranchesRequested: true,
+                    allowUnmergedBranchDelete: allowUnmergedBranchDelete && explicitApprovalGranted);
+                if (!allowed)
+                {
+                    continue;
+                }
+
+                var branchFlag = useForce ? "-D" : "-d";
+                var branchResult = await RunGitAsync(item.RepositoryPath, ["branch", branchFlag, item.Branch], CancellationToken.None);
+                if (branchResult.ExitCode == 0)
+                {
+                    branchesDeleted++;
+                }
+            }
+        }
+
+        clock.Stop();
+        return new WorktreeBulkResult(removed, failed, skippedUnsafe, bytesFreed, branchesDeleted, clock.Elapsed);
+    }
+
+    private static async Task<string> TryDeleteWorktreeBranchAsync(
+        WorktreeItem item,
+        bool deleteBranch,
+        bool allowUnmergedBranchDelete,
+        CancellationToken cancellationToken)
+    {
+        var (allowed, useForce, _) = WorktreeBulkPolicy.EvaluateBranchDeletion(
+            item.ToBulkCandidate(),
+            deleteBranch,
+            allowUnmergedBranchDelete);
+        if (!allowed)
+        {
+            return string.Empty;
+        }
+
+        var flag = useForce ? "-D" : "-d";
+        var res = await RunGitAsync(item.RepositoryPath, ["branch", flag, item.Branch], cancellationToken);
+        return res.ExitCode == 0
+            ? $" Deleted local branch '{item.Branch}'."
+            : $" Local branch '{item.Branch}' was kept ({FirstLine(res.Error)}).";
     }
 
     /// <summary>Clears git's records of worktrees whose folders no longer exist, across every repository.</summary>
@@ -439,3 +632,13 @@ public sealed class WorktreeAnalyzer
 public sealed record WorktreeSnapshot(DateTimeOffset CapturedAt, IReadOnlyList<WorktreeItem> Items, string RootPath, int RepositoryCount, string Note);
 
 public sealed record WorktreeProgress(string StatusText, IReadOnlyList<WorktreeItem> Items, bool IsCompleted);
+
+public sealed record WorktreeBulkProgress(int Completed, int Total, long BytesFreed, string CurrentPath);
+
+public sealed record WorktreeBulkResult(
+    IReadOnlyList<WorktreeItem> Removed,
+    IReadOnlyList<(WorktreeItem Item, string Error)> Failed,
+    IReadOnlyList<WorktreeItem> SkippedUnsafe,
+    long BytesFreed,
+    int BranchesDeleted,
+    TimeSpan Elapsed);

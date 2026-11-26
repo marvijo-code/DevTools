@@ -35,6 +35,8 @@ public sealed partial class MainViewModel
     private string _selectedWorktreeRepositoryPath = string.Empty;
     private bool _isWorktreeRefreshing;
     private bool _hasWorktreeSnapshot;
+    private bool _isBulkRemovingWorktrees;
+    private CancellationTokenSource? _worktreeBulkCts;
 
     public ObservableCollection<WorktreeItem> Worktrees { get; } = [];
 
@@ -99,6 +101,232 @@ public sealed partial class MainViewModel
         _allWorktrees.Count == Worktrees.Count
             ? $"{Worktrees.Count} worktrees"
             : $"{Worktrees.Count} of {_allWorktrees.Count} worktrees";
+
+    public bool IsBulkRemovingWorktrees
+    {
+        get => _isBulkRemovingWorktrees;
+        private set
+        {
+            if (SetProperty(ref _isBulkRemovingWorktrees, value))
+            {
+                RaiseWorktreeBulkProperties();
+            }
+        }
+    }
+
+    public int SelectedWorktreeCount => _allWorktrees.Count(item => item.IsSelected);
+
+    public int SelectedSafeWorktreeCount => _allWorktrees.Count(item => item.IsSelected && item.IsSafeToRemove);
+
+    public int SelectedUnsafeWorktreeCount => _allWorktrees.Count(item => item.IsSelected && !item.IsSafeToRemove);
+
+    public long SelectedWorktreeBytes => _allWorktrees.Where(item => item.IsSelected).Sum(item => item.SizeBytes ?? 0);
+
+    public bool HasSelectedWorktrees => SelectedWorktreeCount > 0;
+
+    public bool CanBulkRemoveSelected => HasSelectedWorktrees && !_isBulkRemovingWorktrees && !_isWorktreeRefreshing;
+
+    public int SafeVisibleWorktreeCount => Worktrees.Count(item => item.IsSafeToRemove && item.CanRemove);
+
+    public long SafeVisibleWorktreeBytes => Worktrees.Where(item => item.IsSafeToRemove && item.CanRemove).Sum(item => item.SizeBytes ?? 0);
+
+    public bool CanRemoveAllSafeVisible => SafeVisibleWorktreeCount > 0 && !_isBulkRemovingWorktrees && !_isWorktreeRefreshing;
+
+    public string BulkRemoveSelectedButtonText => SelectedWorktreeCount == 0
+        ? "Remove Selected"
+        : $"Remove Selected ({SelectedWorktreeCount} - {WorktreeItem.FormatBytes(SelectedWorktreeBytes)})";
+
+    public string RemoveAllSafeButtonText => SafeVisibleWorktreeCount == 0
+        ? "Remove All Safe"
+        : $"Remove All Safe ({SafeVisibleWorktreeCount} - {WorktreeItem.FormatBytes(SafeVisibleWorktreeBytes)})";
+
+    public string SelectedWorktreeSummaryText
+    {
+        get
+        {
+            var selected = SelectedWorktreeCount;
+            if (selected == 0)
+            {
+                return "Select worktrees or filter to Safe to remove for bulk cleanup.";
+            }
+
+            var unsafeCount = SelectedUnsafeWorktreeCount;
+            var unsafeNote = unsafeCount == 0
+                ? "all safe to remove"
+                : $"{SelectedSafeWorktreeCount} safe, {unsafeCount} unmerged/dirty (needs approval)";
+            return $"Selected: {selected} ({WorktreeItem.FormatBytes(SelectedWorktreeBytes)}, {unsafeNote}).";
+        }
+    }
+
+    public IReadOnlyList<WorktreeItem> GetSelectedWorktrees() =>
+        _allWorktrees.Where(item => item.IsSelected).ToList();
+
+    public IReadOnlyList<WorktreeItem> GetVisibleSafeWorktrees() =>
+        Worktrees.Where(item => item.IsSafeToRemove && item.CanRemove).ToList();
+
+    public void SelectAllVisibleWorktrees()
+    {
+        foreach (var item in Worktrees)
+        {
+            if (item.CanSelect)
+            {
+                item.IsSelected = true;
+            }
+        }
+
+        RaiseWorktreeBulkProperties();
+    }
+
+    public void SelectSafeVisibleWorktrees()
+    {
+        foreach (var item in _allWorktrees)
+        {
+            item.IsSelected = false;
+        }
+
+        foreach (var item in Worktrees)
+        {
+            if (item.IsSafeToRemove && item.CanSelect)
+            {
+                item.IsSelected = true;
+            }
+        }
+
+        RaiseWorktreeBulkProperties();
+    }
+
+    public void ClearWorktreeSelection()
+    {
+        foreach (var item in _allWorktrees)
+        {
+            item.IsSelected = false;
+        }
+
+        RaiseWorktreeBulkProperties();
+    }
+
+    public void FilterToSafeAndSelectAll()
+    {
+        WorktreeFilter = "Safe to remove";
+        SelectSafeVisibleWorktrees();
+    }
+
+    public void CancelBulkWorktreeRemoval()
+    {
+        _worktreeBulkCts?.Cancel();
+    }
+
+    public async Task<WorktreeBulkResult?> RemoveWorktreesBulkAsync(
+        IReadOnlyList<WorktreeItem> targets,
+        bool explicitApprovalGranted,
+        bool deleteBranches,
+        bool allowUnmergedBranchDelete)
+    {
+        if (targets.Count == 0 || _isBulkRemovingWorktrees)
+        {
+            return null;
+        }
+
+        _worktreeBulkCts?.Dispose();
+        _worktreeBulkCts = new CancellationTokenSource();
+        var token = _worktreeBulkCts.Token;
+
+        IsBulkRemovingWorktrees = true;
+        SetWorktreeStatus($"Removing {targets.Count} worktree(s)...");
+        StatusMessage = $"Removing {targets.Count} worktree(s)...";
+
+        try
+        {
+            var progress = new Progress<WorktreeBulkProgress>(update =>
+            {
+                SetWorktreeStatus($"Removed {update.Completed} of {update.Total} ({WorktreeItem.FormatBytes(update.BytesFreed)} freed) - {update.CurrentPath}");
+            });
+
+            var result = await _worktreeAnalyzer.Value.RemoveBulkAsync(
+                targets,
+                explicitApprovalGranted,
+                deleteBranches,
+                allowUnmergedBranchDelete,
+                progress,
+                token);
+
+            foreach (var removed in result.Removed)
+            {
+                removed.SelectionChanged -= WorktreeItem_SelectionChanged;
+                removed.IsSelected = false;
+                _allWorktrees.Remove(removed);
+                Worktrees.Remove(removed);
+            }
+
+            var parts = new List<string>
+            {
+                $"Removed {result.Removed.Count} worktree(s) ({WorktreeItem.FormatBytes(result.BytesFreed)}) in {result.Elapsed.TotalSeconds:F2}s."
+            };
+            if (result.BranchesDeleted > 0)
+            {
+                parts.Add($"Deleted {result.BranchesDeleted} branch(es).");
+            }
+
+            if (result.SkippedUnsafe.Count > 0)
+            {
+                parts.Add($"Kept {result.SkippedUnsafe.Count} unmerged/dirty worktree(s) without approval.");
+            }
+
+            if (result.Failed.Count > 0)
+            {
+                parts.Add($"{result.Failed.Count} failed: {result.Failed[0].Error}");
+            }
+
+            var summary = string.Join(" ", parts);
+            StatusMessage = summary;
+            SetWorktreeStatus(summary);
+            UpdateWorktreeHeadline();
+            RaisePropertyChanged(nameof(VisibleWorktreesText));
+            RaiseWorktreeBulkProperties();
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            const string msg = "Bulk worktree removal canceled.";
+            StatusMessage = msg;
+            SetWorktreeStatus(msg);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("RemoveWorktreesBulkAsync failed.", ex);
+            StatusMessage = ex.Message;
+            SetWorktreeStatus($"Bulk worktree removal failed: {ex.Message}");
+            return null;
+        }
+        finally
+        {
+            IsBulkRemovingWorktrees = false;
+            _worktreeBulkCts?.Dispose();
+            _worktreeBulkCts = null;
+        }
+    }
+
+    private void WorktreeItem_SelectionChanged(object? sender, EventArgs e)
+    {
+        RaiseWorktreeBulkProperties();
+    }
+
+    private void RaiseWorktreeBulkProperties()
+    {
+        RaisePropertyChanged(nameof(SelectedWorktreeCount));
+        RaisePropertyChanged(nameof(SelectedSafeWorktreeCount));
+        RaisePropertyChanged(nameof(SelectedUnsafeWorktreeCount));
+        RaisePropertyChanged(nameof(SelectedWorktreeBytes));
+        RaisePropertyChanged(nameof(HasSelectedWorktrees));
+        RaisePropertyChanged(nameof(CanBulkRemoveSelected));
+        RaisePropertyChanged(nameof(SafeVisibleWorktreeCount));
+        RaisePropertyChanged(nameof(SafeVisibleWorktreeBytes));
+        RaisePropertyChanged(nameof(CanRemoveAllSafeVisible));
+        RaisePropertyChanged(nameof(BulkRemoveSelectedButtonText));
+        RaisePropertyChanged(nameof(RemoveAllSafeButtonText));
+        RaisePropertyChanged(nameof(SelectedWorktreeSummaryText));
+    }
 
     public void ShowWorktrees()
     {
@@ -267,10 +495,21 @@ public sealed partial class MainViewModel
 
     private void SetWorktrees(IReadOnlyList<WorktreeItem> items)
     {
+        foreach (var existing in _allWorktrees)
+        {
+            existing.SelectionChanged -= WorktreeItem_SelectionChanged;
+        }
+
         _allWorktrees.Clear();
-        _allWorktrees.AddRange(items);
+        foreach (var item in items)
+        {
+            item.SelectionChanged += WorktreeItem_SelectionChanged;
+            _allWorktrees.Add(item);
+        }
+
         SyncWorktreeRepositories(reorder: false);
         ApplyWorktreeFilter();
+        RaiseWorktreeBulkProperties();
     }
 
     /// <summary>
@@ -361,6 +600,7 @@ public sealed partial class MainViewModel
         }
 
         RaisePropertyChanged(nameof(VisibleWorktreesText));
+        RaiseWorktreeBulkProperties();
     }
 
     /// <summary>
@@ -426,6 +666,7 @@ public sealed partial class MainViewModel
         }
 
         SyncWorktreeRepositories(reorder: false);
+        RaiseWorktreeBulkProperties();
     }
 
     private void SetWorktreeStatus(string statusText)

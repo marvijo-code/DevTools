@@ -307,6 +307,9 @@
             <Button Content="Worktrees"
                     x:Name="WorktreesNavigationButton" Style="{StaticResource NavigationButtonStyle}"
                     Click="NavigateToWorktrees_Click" />
+            <Button Content="Projects"
+                    x:Name="ProjectsNavigationButton" Style="{StaticResource NavigationButtonStyle}"
+                    Click="NavigateToProjects_Click" />
             <Button Content="Storage"
                     x:Name="StorageNavigationButton" Style="{StaticResource NavigationButtonStyle}"
                     Click="NavigateToDisk_Click" />
@@ -2142,6 +2145,7 @@
             <Grid.RowDefinitions>
               <RowDefinition Height="Auto" />
               <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
               <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
@@ -2219,7 +2223,46 @@
               </Border>
             </Grid>
 
-            <Grid Grid.Row="2"
+            <Border Grid.Row="2"
+                    Padding="10,8"
+                    CornerRadius="10"
+                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1">
+              <StackPanel Spacing="6">
+                <StackPanel Orientation="Horizontal"
+                            Spacing="8">
+                  <Button Content="Filter: Safe to Remove"
+                          Click="FilterSafeWorktrees_Click"
+                          ToolTipService.ToolTip="Filter to Safe to remove and select all visible safe worktrees" />
+                  <Button Content="Select All"
+                          Click="SelectAllWorktrees_Click"
+                          ToolTipService.ToolTip="Select every currently visible removable worktree" />
+                  <Button Content="Select Safe Only"
+                          Click="SelectSafeWorktrees_Click"
+                          ToolTipService.ToolTip="Select only visible safe-to-remove worktrees" />
+                  <Button Content="Clear Selection"
+                          Click="ClearWorktreeSelection_Click"
+                          IsEnabled="{Binding HasSelectedWorktrees}" />
+                  <Button Content="{Binding BulkRemoveSelectedButtonText}"
+                          Click="RemoveSelectedWorktrees_Click"
+                          IsEnabled="{Binding CanBulkRemoveSelected}"
+                          Style="{ThemeResource AccentButtonStyle}" />
+                  <Button Content="{Binding RemoveAllSafeButtonText}"
+                          Click="RemoveAllSafeWorktrees_Click"
+                          IsEnabled="{Binding CanRemoveAllSafeVisible}" />
+                  <Button Content="Cancel"
+                          Click="CancelBulkWorktreeRemoval_Click"
+                          Visibility="{Binding IsBulkRemovingWorktrees, Converter={StaticResource BoolToVisibilityConverter}}" />
+                </StackPanel>
+                <TextBlock Text="{Binding SelectedWorktreeSummaryText}"
+                           FontSize="12"
+                           Opacity="0.74"
+                           TextWrapping="WrapWholeWords" />
+              </StackPanel>
+            </Border>
+
+            <Grid Grid.Row="3"
                   ColumnSpacing="12">
               <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="250" />
@@ -2286,11 +2329,20 @@
                             <Grid ColumnSpacing="10">
                               <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                               </Grid.ColumnDefinitions>
 
-                              <Border Padding="7,3"
+                              <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                        IsEnabled="{Binding CanSelect}"
+                                        MinWidth="24"
+                                        Padding="0"
+                                        VerticalAlignment="Center"
+                                        ToolTipService.ToolTip="Select this worktree for bulk removal" />
+
+                              <Border Grid.Column="1"
+                                      Padding="7,3"
                                       CornerRadius="6"
                                       VerticalAlignment="Center"
                                       Background="{Binding StateAccentBrush}">
@@ -2301,14 +2353,14 @@
                                            FontWeight="SemiBold" />
                               </Border>
 
-                              <TextBlock Grid.Column="1"
+                              <TextBlock Grid.Column="2"
                                          Text="{Binding RepositoryName}"
                                          FontFamily="Consolas"
                                          FontSize="12"
                                          Opacity="0.78"
                                          VerticalAlignment="Center" />
 
-                              <Border Grid.Column="2"
+                              <Border Grid.Column="3"
                                       Padding="8,3"
                                       CornerRadius="6"
                                       Background="{Binding StateAccentBrush}">
@@ -2370,6 +2422,243 @@
                 </StackPanel>
               </ScrollViewer>
             </Grid>
+          </Grid>
+
+          <Grid x:Name="ProjectsContentPane"
+                x:Load="False"
+                RowSpacing="10"
+                Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid ColumnSpacing="10">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+
+              <StackPanel Spacing="3">
+                <TextBlock Text="Project Cleaner"
+                           FontSize="20"
+                           FontWeight="SemiBold"
+                           Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                <TextBlock Text="{Binding ProjectsHeadline}"
+                           TextWrapping="WrapWholeWords"
+                           Opacity="0.72" />
+                <Grid ColumnSpacing="8">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <ProgressRing Width="16"
+                                Height="16"
+                                IsActive="{Binding IsProjectsScanning}"
+                                VerticalAlignment="Top" />
+                  <TextBlock Grid.Column="1"
+                             Text="{Binding ProjectsStatusText}"
+                             TextWrapping="WrapWholeWords"
+                             FontSize="12"
+                             Opacity="0.62" />
+                </Grid>
+              </StackPanel>
+
+              <Button Grid.Column="1"
+                      Content="Cancel"
+                      Click="CancelProjectsOperation_Click"
+                      Visibility="{Binding IsProjectsScanning, Converter={StaticResource BoolToVisibilityConverter}}"
+                      VerticalAlignment="Top" />
+              <Button Grid.Column="2"
+                      Content="Scan Projects"
+                      Click="RefreshProjects_Click"
+                      VerticalAlignment="Top" />
+            </Grid>
+
+            <Grid Grid.Row="1"
+                  ColumnSpacing="10">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="160" />
+                <ColumnDefinition Width="210" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+
+              <TextBox Header="Projects root folder"
+                       PlaceholderText="C:\dev"
+                       Text="{Binding ProjectsScanRoot, Mode=TwoWay}" />
+              <TextBox Grid.Column="1"
+                       Header="Search"
+                       PlaceholderText="solution, repo, ecosystem..."
+                       Text="{Binding ProjectsSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+              <ComboBox Grid.Column="2"
+                        Header="Ecosystem"
+                        HorizontalAlignment="Stretch"
+                        ItemsSource="{Binding ProjectEcosystemFilterOptions}"
+                        SelectedItem="{Binding ProjectsEcosystemFilter, Mode=TwoWay}" />
+              <ComboBox Grid.Column="3"
+                        Header="Sort by"
+                        HorizontalAlignment="Stretch"
+                        ItemsSource="{Binding ProjectSortOptions}"
+                        SelectedItem="{Binding ProjectsSort, Mode=TwoWay}" />
+              <Border Grid.Column="4"
+                      Padding="10,5"
+                      CornerRadius="8"
+                      VerticalAlignment="Bottom"
+                      Background="{ThemeResource AccentFillColorSecondaryBrush}">
+                <TextBlock Text="{Binding VisibleProjectsText}"
+                           FontWeight="SemiBold" />
+              </Border>
+            </Grid>
+
+            <Border Grid.Row="2"
+                    Padding="10,8"
+                    CornerRadius="10"
+                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1">
+              <StackPanel Spacing="6">
+                <StackPanel Orientation="Horizontal"
+                            Spacing="8">
+                  <CheckBox Content="Include dependencies (node_modules, .venv, packages)"
+                            IsChecked="{Binding ProjectsIncludeDependencies, Mode=TwoWay}"
+                            VerticalAlignment="Center" />
+                  <Button Content="Select All"
+                          Click="SelectAllProjects_Click" />
+                  <Button Content="Build Output Only"
+                          Click="SelectBuildOutputProjects_Click" />
+                  <Button Content="Clear Selection"
+                          Click="ClearProjectSelection_Click"
+                          IsEnabled="{Binding HasSelectedProjects}" />
+                  <Button Content="{Binding CleanSelectedProjectsButtonText}"
+                          Click="CleanSelectedProjects_Click"
+                          IsEnabled="{Binding CanCleanSelectedProjects}"
+                          Style="{ThemeResource AccentButtonStyle}" />
+                </StackPanel>
+                <TextBlock Text="{Binding SelectedProjectsSummaryText}"
+                           FontSize="12"
+                           Opacity="0.74"
+                           TextWrapping="WrapWholeWords" />
+              </StackPanel>
+            </Border>
+
+            <ScrollViewer x:Name="ProjectsScroll"
+                          Grid.Row="3"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+              <StackPanel Spacing="6">
+                <TextBlock Text="C# .sln/.csproj (bin, obj, TestResults, .vs), Node.js (.next, dist, build, node_modules), Rust (target), Python (__pycache__, .venv), Java/Gradle, CMake, and Unity. Junctions and symlinks are never traversed."
+                           TextWrapping="WrapWholeWords"
+                           Opacity="0.62"
+                           FontSize="12" />
+
+                <ItemsControl ItemsSource="{Binding CleanableProjects}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="models:ProjectCleanItem">
+                      <Border Padding="12"
+                              Margin="0,0,0,8"
+                              CornerRadius="14"
+                              HorizontalAlignment="Stretch"
+                              Background="{Binding BackgroundBrush}"
+                              BorderBrush="{Binding BorderBrush}"
+                              BorderThickness="1">
+                        <StackPanel Spacing="6">
+                          <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                              <ColumnDefinition Width="Auto" />
+                              <ColumnDefinition Width="Auto" />
+                              <ColumnDefinition Width="*" />
+                              <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                      IsEnabled="{Binding CanClean}"
+                                      MinWidth="24"
+                                      Padding="0"
+                                      VerticalAlignment="Center" />
+
+                            <Border Grid.Column="1"
+                                    Padding="7,3"
+                                    CornerRadius="6"
+                                    VerticalAlignment="Center"
+                                    Background="{Binding AccentBrush}">
+                              <TextBlock Text="{Binding SizeDisplay}"
+                                         Foreground="{Binding BadgeForegroundBrush}"
+                                         FontFamily="Consolas"
+                                         FontSize="12"
+                                         FontWeight="SemiBold" />
+                            </Border>
+
+                            <StackPanel Grid.Column="2"
+                                        Orientation="Horizontal"
+                                        Spacing="8"
+                                        VerticalAlignment="Center">
+                              <TextBlock Text="{Binding Name}"
+                                         FontSize="15"
+                                         FontWeight="SemiBold"
+                                         TextTrimming="CharacterEllipsis" />
+                              <TextBlock Text="{Binding MarkerFile}"
+                                         FontFamily="Consolas"
+                                         FontSize="11"
+                                         Opacity="0.68"
+                                         VerticalAlignment="Center" />
+                            </StackPanel>
+
+                            <Border Grid.Column="3"
+                                    Padding="8,3"
+                                    CornerRadius="6"
+                                    Background="{Binding AccentBrush}">
+                              <TextBlock Text="{Binding EcosystemLabel}"
+                                         Foreground="{Binding BadgeForegroundBrush}"
+                                         FontSize="12"
+                                         FontWeight="SemiBold" />
+                            </Border>
+                          </Grid>
+
+                          <HyperlinkButton Content="{Binding RootPath}"
+                                           Click="OpenPath_Click"
+                                           Tag="{Binding RootPath}"
+                                           HorizontalAlignment="Left"
+                                           Padding="0"
+                                           FontFamily="Consolas"
+                                           FontSize="12" />
+
+                          <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                              <ColumnDefinition Width="*" />
+                              <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel Spacing="2" VerticalAlignment="Center">
+                              <TextBlock Text="{Binding BreakdownText}"
+                                         FontSize="12"
+                                         Opacity="0.82"
+                                         TextWrapping="WrapWholeWords" />
+                              <TextBlock Text="{Binding ResultText}"
+                                         FontSize="12"
+                                         FontWeight="SemiBold"
+                                         Visibility="{Binding HasResult, Converter={StaticResource BoolToVisibilityConverter}}" />
+                            </StackPanel>
+
+                            <Button Grid.Column="1"
+                                    Content="{Binding CleanButtonText}"
+                                    Click="CleanSingleProject_Click"
+                                    Tag="{Binding}"
+                                    IsEnabled="{Binding CanClean}"
+                                    MinWidth="96"
+                                    VerticalAlignment="Center" />
+                          </Grid>
+                        </StackPanel>
+                      </Border>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </ScrollViewer>
           </Grid>
         </Grid>
       </Border>

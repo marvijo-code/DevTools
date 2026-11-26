@@ -61,6 +61,19 @@ public sealed class ParallelFolderWalker
         var volumeRoot = WindowsVolumePaths.GetContainingVolumeRoot(fullRoot, driveRoot);
         cancellationToken.ThrowIfCancellationRequested();
         using var pause = pauseBackgroundScans ? ScanGate.Pause(DiskCapacityInventory.ReadBackingDiskNumbers(volumeRoot)) : null;
+
+        // Fast native Rust parallel walk for logical-size scans when no live-progress callback is needed.
+        if (!measureAllocation && progress is null && Native.NativeFastEngine.IsAvailable)
+        {
+            var nativeWorkers = workerCount is int requestedNative
+                ? Math.Clamp(requestedNative, 1, 24)
+                : resources.WalkWorkerCount(ScanResources.ReadSeekPenalty(volumeRoot), prioritize, volumeShare);
+            var nativeWalk = Native.NativeFastEngine.TryWalkTreeNative(fullRoot, nativeWorkers, cancellationToken);
+            if (nativeWalk is not null)
+            {
+                return nativeWalk.Tree;
+            }
+        }
         var fileSystem = measureAllocation && volumeRoot is not null && OperatingSystem.IsWindows()
             ? WindowsVolumePaths.ReadVolumeInformation(volumeRoot).FileSystem
             : string.Empty;

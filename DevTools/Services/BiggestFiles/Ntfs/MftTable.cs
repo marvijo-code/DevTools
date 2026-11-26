@@ -909,7 +909,7 @@ internal static class MftTableLoader
             var channel = Channel.CreateBounded<Block>(new BoundedChannelOptions(queueCapacity)
             {
                 SingleReader = false,
-                SingleWriter = true,
+                SingleWriter = false,
                 FullMode = BoundedChannelFullMode.Wait
             });
 
@@ -965,83 +965,141 @@ internal static class MftTableLoader
                 }, cancellationToken);
             }
 
-            // Reader: stream extents, emit record-aligned blocks.
-            var carry = carryBytes > 0 ? new byte[carryBytes] : [];
-            var carryLength = 0;
-            var startRecordIndex = 0;
+            // Reader: stream extents as record-aligned blocks. On standard cluster-aligned volumes
+            // (e.g., 4 KB clusters / 1 KB records), multiple concurrent positional readers keep NVMe
+            // queues full instead of stalling at single-stream bandwidth.
             var parserCompletion = Task.WhenAll(parsers);
 
             try
             {
-                // Ignore reserved clusters beyond the initialized records, while keeping reads cluster-aligned.
-                var mftClustersRemaining = initializedClusters;
-                foreach (var (lcn, clusterCount) in extents)
+                if (carryBytes == 0 && clusterBytes % recordSize == 0 && initializedClusters > clustersPerChunk)
                 {
-                    var clustersRemaining = Math.Min(clusterCount, mftClustersRemaining);
-                    mftClustersRemaining -= clustersRemaining;
-                    var currentLcn = lcn;
-                    while (clustersRemaining > 0 && startRecordIndex < recordCount)
+                    var jobs = BuildAlignedReadJobs(extents, clusterBytes, recordSize, recordCount, clustersPerChunk * clusterBytes, initializedClusters);
+                    var readerCount = Math.Clamp(Environment.ProcessorCount / 4, 2, 4);
+                    var nextJob = -1;
+                    var totalSubmittedRecords = 0;
+                    var readers = new Task[readerCount];
+                    for (var rIdx = 0; rIdx < readerCount; rIdx++)
                     {
-                        await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                        if (parserCompletion.IsCompleted)
+                        readers[rIdx] = Task.Run(async () =>
                         {
-                            // Parsers died (fault/cancel): stop writing or the bounded channel deadlocks.
-                            await parserCompletion.ConfigureAwait(false);
-                            throw new InvalidOperationException("MFT parser workers exited early.");
-                        }
-
-                        var chunkClusters = (int)Math.Min(clustersRemaining, clustersPerChunk);
-                        var chunkBytes = chunkClusters * clusterBytes;
-                        var blockBuffer = ArrayPool<byte>.Shared.Rent(carryLength + chunkBytes);
-                        var queued = false;
-                        try
-                        {
-                            if (carryLength > 0)
+                            while (true)
                             {
-                                carry.AsSpan(0, carryLength).CopyTo(blockBuffer);
-                            }
+                                var jobIndex = Interlocked.Increment(ref nextJob);
+                                if (jobIndex >= jobs.Count)
+                                {
+                                    break;
+                                }
 
-                            ReadExact(volume, blockBuffer.AsSpan(carryLength, chunkBytes), currentLcn * clusterBytes);
+                                await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                                if (parserCompletion.IsCompleted)
+                                {
+                                    await parserCompletion.ConfigureAwait(false);
+                                    throw new InvalidOperationException("MFT parser workers exited early.");
+                                }
 
-                            var totalBytes = carryLength + chunkBytes;
-                            var recordsRemaining = recordCount - startRecordIndex;
-                            var fullRecords = Math.Min(totalBytes / recordSize, recordsRemaining);
-                            var consumedBytes = fullRecords * recordSize;
-                            // The last extent can include allocated space beyond the valid data length.
-                            carryLength = fullRecords == recordsRemaining ? 0 : totalBytes - consumedBytes;
-                            if (carryLength > 0)
-                            {
-                                blockBuffer.AsSpan(consumedBytes, carryLength).CopyTo(carry);
+                                var job = jobs[jobIndex];
+                                var blockBuffer = ArrayPool<byte>.Shared.Rent(job.Bytes);
+                                var queued = false;
+                                try
+                                {
+                                    ReadExact(volume, blockBuffer.AsSpan(0, job.Bytes), job.Offset);
+                                    await channel.Writer.WriteAsync(
+                                        new Block(blockBuffer, job.StartRecord, job.RecordCount),
+                                        cancellationToken).ConfigureAwait(false);
+                                    queued = true;
+                                    Interlocked.Add(ref totalSubmittedRecords, job.RecordCount);
+                                }
+                                finally
+                                {
+                                    if (!queued)
+                                    {
+                                        ArrayPool<byte>.Shared.Return(blockBuffer);
+                                    }
+                                }
                             }
-
-                            if (fullRecords > 0)
-                            {
-                                await channel.Writer.WriteAsync(new Block(blockBuffer, startRecordIndex, fullRecords), cancellationToken).ConfigureAwait(false);
-                                queued = true;
-                                startRecordIndex += fullRecords;
-                            }
-                        }
-                        finally
-                        {
-                            if (!queued)
-                            {
-                                ArrayPool<byte>.Shared.Return(blockBuffer);
-                            }
-                        }
-
-                        clustersRemaining -= chunkClusters;
-                        currentLcn += chunkClusters;
+                        }, cancellationToken);
                     }
 
-                    if (startRecordIndex >= recordCount)
+                    await Task.WhenAll(readers).ConfigureAwait(false);
+                    if (totalSubmittedRecords != recordCount)
                     {
-                        break;
+                        throw new IOException($"MFT extents covered {totalSubmittedRecords:N0} of {recordCount:N0} records.");
                     }
                 }
-
-                if (startRecordIndex != recordCount)
+                else
                 {
-                    throw new IOException($"MFT extents covered {startRecordIndex:N0} of {recordCount:N0} records.");
+                    // Carry-aware sequential reader for volumes whose clusters do not align to MFT records.
+                    var carry = carryBytes > 0 ? new byte[carryBytes] : [];
+                    var carryLength = 0;
+                    var startRecordIndex = 0;
+                    var mftClustersRemaining = initializedClusters;
+                    foreach (var (lcn, clusterCount) in extents)
+                    {
+                        var clustersRemaining = Math.Min(clusterCount, mftClustersRemaining);
+                        mftClustersRemaining -= clustersRemaining;
+                        var currentLcn = lcn;
+                        while (clustersRemaining > 0 && startRecordIndex < recordCount)
+                        {
+                            await ScanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                            if (parserCompletion.IsCompleted)
+                            {
+                                await parserCompletion.ConfigureAwait(false);
+                                throw new InvalidOperationException("MFT parser workers exited early.");
+                            }
+
+                            var chunkClusters = (int)Math.Min(clustersRemaining, clustersPerChunk);
+                            var chunkBytes = chunkClusters * clusterBytes;
+                            var blockBuffer = ArrayPool<byte>.Shared.Rent(carryLength + chunkBytes);
+                            var queued = false;
+                            try
+                            {
+                                if (carryLength > 0)
+                                {
+                                    carry.AsSpan(0, carryLength).CopyTo(blockBuffer);
+                                }
+
+                                ReadExact(volume, blockBuffer.AsSpan(carryLength, chunkBytes), currentLcn * clusterBytes);
+
+                                var totalBytes = carryLength + chunkBytes;
+                                var recordsRemaining = recordCount - startRecordIndex;
+                                var fullRecords = Math.Min(totalBytes / recordSize, recordsRemaining);
+                                var consumedBytes = fullRecords * recordSize;
+                                carryLength = fullRecords == recordsRemaining ? 0 : totalBytes - consumedBytes;
+                                if (carryLength > 0)
+                                {
+                                    blockBuffer.AsSpan(consumedBytes, carryLength).CopyTo(carry);
+                                }
+
+                                if (fullRecords > 0)
+                                {
+                                    await channel.Writer.WriteAsync(new Block(blockBuffer, startRecordIndex, fullRecords), cancellationToken).ConfigureAwait(false);
+                                    queued = true;
+                                    startRecordIndex += fullRecords;
+                                }
+                            }
+                            finally
+                            {
+                                if (!queued)
+                                {
+                                    ArrayPool<byte>.Shared.Return(blockBuffer);
+                                }
+                            }
+
+                            clustersRemaining -= chunkClusters;
+                            currentLcn += chunkClusters;
+                        }
+
+                        if (startRecordIndex >= recordCount)
+                        {
+                            break;
+                        }
+                    }
+
+                    if (startRecordIndex != recordCount)
+                    {
+                        throw new IOException($"MFT extents covered {startRecordIndex:N0} of {recordCount:N0} records.");
+                    }
                 }
 
                 channel.Writer.TryComplete();
@@ -1126,6 +1184,44 @@ internal static class MftTableLoader
 
             totalRead += read;
         }
+    }
+
+    private static List<(int StartRecord, int Bytes, int RecordCount, long Offset)> BuildAlignedReadJobs(
+        List<(long Lcn, long ClusterCount)> extents,
+        int clusterBytes,
+        int recordSize,
+        int recordCount,
+        int chunkBytes,
+        long initializedClusters)
+    {
+        var jobs = new List<(int StartRecord, int Bytes, int RecordCount, long Offset)>();
+        var clustersPerChunk = Math.Max(1, chunkBytes / clusterBytes);
+        var recordsPerCluster = clusterBytes / recordSize;
+        var mftClustersRemaining = initializedClusters;
+        var recordIndex = 0;
+        foreach (var (lcn, clusterCount) in extents)
+        {
+            if (recordIndex >= recordCount || mftClustersRemaining <= 0)
+            {
+                break;
+            }
+
+            var clustersRemaining = Math.Min(clusterCount, mftClustersRemaining);
+            mftClustersRemaining -= clustersRemaining;
+            var currentLcn = lcn;
+            while (clustersRemaining > 0 && recordIndex < recordCount)
+            {
+                var takeClusters = (int)Math.Min(clustersRemaining, clustersPerChunk);
+                var readBytes = takeClusters * clusterBytes;
+                var takeRecords = Math.Min(takeClusters * recordsPerCluster, recordCount - recordIndex);
+                jobs.Add((recordIndex, readBytes, takeRecords, currentLcn * clusterBytes));
+                recordIndex += takeRecords;
+                clustersRemaining -= takeClusters;
+                currentLcn += takeClusters;
+            }
+        }
+
+        return jobs;
     }
 
     private readonly record struct ExtensionRecord(

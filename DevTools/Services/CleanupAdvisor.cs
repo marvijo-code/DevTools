@@ -23,6 +23,7 @@ public sealed class CleanupAdvisor
     public const string DockerUnusedKey = "docker-unused";
     public const string DockerCompactKey = "docker-compact";
     public const string WorktreesKey = "worktrees";
+    public const string ProjectsKey = "projects";
     public const string RecycleBinKey = "recycle-bin";
     public const string DownloadsKey = "downloads";
 
@@ -160,6 +161,14 @@ public sealed class CleanupAdvisor
                 "Review worktrees",
                 CleanupActionKind.Navigate),
             new CleanupOption(
+                ProjectsKey,
+                "Project build and dependency folders",
+                CleanupVerdict.Safe,
+                "C# .sln/.csproj bin and obj folders, Node .next/dist/node_modules, Rust target, Python caches/.venv, and Gradle build directories.",
+                "Opens the Projects tab to scan and clean selected project build folders.",
+                "Clean projects",
+                CleanupActionKind.Navigate),
+            new CleanupOption(
                 RecycleBinKey,
                 "Recycle Bin",
                 CleanupVerdict.YourCall,
@@ -196,6 +205,7 @@ public sealed class CleanupAdvisor
                 RecycleBinKey => await EstimateRecycleBinAsync(cancellationToken),
                 DownloadsKey => await MeasureFoldersAsync([DownloadsPath], cancellationToken),
                 WorktreesKey => new CleanupEstimate(null, "See Worktrees tab"),
+                ProjectsKey => new CleanupEstimate(null, "See Projects tab"),
                 _ => new CleanupEstimate(null, "Unknown", IsAvailable: false)
             };
         }

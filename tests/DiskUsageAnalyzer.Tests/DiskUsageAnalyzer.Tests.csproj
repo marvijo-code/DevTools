@@ -4,6 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
@@ -55,6 +56,10 @@
     <Compile Include="..\..\DevTools\Services\FolderSizes\FolderSizeEngine.cs" Link="Services\FolderSizes\FolderSizeEngine.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\MftFolderSizeScanner.cs" Link="Services\FolderSizes\MftFolderSizeScanner.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\FolderTree.cs" Link="Services\FolderSizes\FolderTree.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\FolderIndexCache.cs" Link="Services\FolderSizes\FolderIndexCache.cs" />
+    <Compile Include="..\..\DevTools\Services\FolderSizes\NtfsUsnJournal.cs" Link="Services\FolderSizes\NtfsUsnJournal.cs" />
+    <Compile Include="..\..\DevTools\Services\Native\NativeFastEngine.cs" Link="Services\Native\NativeFastEngine.cs" />
+    <Compile Include="..\..\DevTools\Services\FastPathDeleter.cs" Link="Services\FastPathDeleter.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\FolderFileListing.cs" Link="Services\FolderSizes\FolderFileListing.cs" />
     <Compile Include="..\..\DevTools\Services\FolderSizes\DirectoryAllocationReader.cs" Link="Services\FolderSizes\DirectoryAllocationReader.cs" />
     <Compile Include="..\..\DevTools\Services\Resources\NativeResourceApi.cs" Link="Services\Resources\NativeResourceApi.cs" />
@@ -76,5 +81,13 @@
     <Compile Include="..\..\DevTools\Services\DiskCleanup\DiskCleanupService.cs" Link="Services\DiskCleanup\DiskCleanupService.cs" />
     <Compile Include="..\..\DevTools\Services\CleanupRules.cs" Link="Services\CleanupRules.cs" />
     <Compile Include="..\..\DevTools\Services\WorktreeGit.cs" Link="Services\WorktreeGit.cs" />
+    <Compile Include="..\..\DevTools\Services\WorktreeBulkPolicy.cs" Link="Services\WorktreeBulkPolicy.cs" />
+    <Compile Include="..\..\DevTools\Services\ProjectCleanerService.cs" Link="Services\ProjectCleanerService.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('..\..\native\devtools_native\target\release\devtools_native.dll')">
+    <None Include="..\..\native\devtools_native\target\release\devtools_native.dll" Link="devtools_native.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 </Project>

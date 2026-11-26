@@ -490,3 +490,6 @@ solution-config.props
 .dustprobe/
 .dustprobe*
 .tools/
+native/devtools_native/target/
+devtools_native.dll
+

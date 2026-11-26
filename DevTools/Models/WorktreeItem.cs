@@ -36,6 +36,7 @@ public sealed class WorktreeItem : ObservableObject
     private BranchPullRequest? _pullRequest;
     private bool _isAnalyzing = true;
     private bool _isRemoving;
+    private bool _isSelected;
     private bool _isHeadOnAnyBranch = true;
 
     public required string RepositoryName { get; init; }
@@ -93,6 +94,40 @@ public sealed class WorktreeItem : ObservableObject
         (IsMissing || (_state == WorktreeState.Merged && _dirtyCount == 0 && !IsLocked));
 
     public bool CanRemove => !_isAnalyzing && !_isRemoving && !IsAppManaged;
+
+    public bool CanSelect => CanRemove;
+
+    public bool RequiresApproval => !IsSafeToRemove && CanRemove;
+
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set
+        {
+            var clamped = value && CanSelect;
+            if (SetProperty(ref _isSelected, clamped))
+            {
+                SelectionChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+    }
+
+    public event EventHandler? SelectionChanged;
+
+    public WorktreeBulkCandidate ToBulkCandidate() => new(
+        Path,
+        RepositoryPath,
+        RepositoryName,
+        Branch,
+        State,
+        IsDetached,
+        IsLocked,
+        IsMissing,
+        IsDirty,
+        DirtyCount ?? 0,
+        IsAppManaged,
+        IsAnalyzing,
+        SizeBytes ?? 0);
 
     public string RemoveButtonText =>
         _isRemoving ? "Removing..." :
@@ -213,8 +248,17 @@ public sealed class WorktreeItem : ObservableObject
     public void SetRemoving(bool isRemoving)
     {
         _isRemoving = isRemoving;
+        if (isRemoving && _isSelected)
+        {
+            _isSelected = false;
+            RaisePropertyChanged(nameof(IsSelected));
+            SelectionChanged?.Invoke(this, EventArgs.Empty);
+        }
+
         RaisePropertyChanged(nameof(IsRemoving));
         RaisePropertyChanged(nameof(CanRemove));
+        RaisePropertyChanged(nameof(CanSelect));
+        RaisePropertyChanged(nameof(RequiresApproval));
         RaisePropertyChanged(nameof(RemoveButtonText));
     }
 
@@ -295,6 +339,8 @@ public sealed class WorktreeItem : ObservableObject
         RaisePropertyChanged(nameof(PullRequestButtonText));
         RaisePropertyChanged(nameof(IsSafeToRemove));
         RaisePropertyChanged(nameof(CanRemove));
+        RaisePropertyChanged(nameof(CanSelect));
+        RaisePropertyChanged(nameof(RequiresApproval));
         RaisePropertyChanged(nameof(RemoveButtonText));
         RaisePropertyChanged(nameof(SizeDisplay));
         RaisePropertyChanged(nameof(StateBadgeText));

@@ -144,6 +144,88 @@ public sealed class FolderTree
     /// <summary>Drive root, for example <c>C:\</c>.</summary>
     public string RootPath { get; }
 
+    internal static FolderTree Restore(
+        string rootPath,
+        int[] parent,
+        string[] names,
+        long[] totalBytes,
+        long[] fileCount,
+        string engineName,
+        TimeSpan elapsed,
+        long[]? allocatedBytes = null,
+        NtfsRecordAllocation? ntfsAllocation = null,
+        BitArray? incompleteSubtrees = null,
+        int incompleteDirectoryCount = 0,
+        BitArray? incompleteAllocationSubtrees = null,
+        int incompleteAllocationDirectoryCount = 0) =>
+        new(rootPath, parent, names, totalBytes, fileCount, engineName, elapsed,
+            allocatedBytes, ntfsAllocation, incompleteSubtrees, incompleteDirectoryCount,
+            incompleteAllocationSubtrees, incompleteAllocationDirectoryCount);
+
+    internal int[] ParentNodes => _parent;
+    internal string[] NameNodes => _names;
+    internal long[] TotalBytesNodes => _totalBytes;
+    internal long[] FileCountNodes => _fileCount;
+    internal long[]? AllocatedBytesNodes => _allocatedBytes;
+    internal BitArray? IncompleteSubtreesBits => _incompleteSubtrees;
+    internal BitArray? IncompleteAllocationSubtreesBits => _incompleteAllocationSubtrees;
+
+    /// <summary>
+    /// Creates an updated copy of this tree after re-measuring direct file totals in a bounded set
+    /// of directories reported by the NTFS USN journal. Propagates deltas cleanly up to node 0.
+    /// </summary>
+    internal FolderTree ApplyDirectFileUpdates(
+        IReadOnlyList<(int Node, long NewDirectBytes, long NewDirectFiles)> updates,
+        string engineName,
+        TimeSpan elapsed)
+    {
+        var totals = (long[])_totalBytes.Clone();
+        var files = (long[])_fileCount.Clone();
+        foreach (var (node, newDirectBytes, newDirectFiles) in updates)
+        {
+            if (node < 0 || node >= totals.Length)
+            {
+                continue;
+            }
+
+            var (oldDirectBytes, oldDirectFiles) = GetDirectFileStatistics(node);
+            var deltaBytes = newDirectBytes - oldDirectBytes;
+            var deltaFiles = newDirectFiles - oldDirectFiles;
+            if (deltaBytes == 0 && deltaFiles == 0)
+            {
+                continue;
+            }
+
+            var current = node;
+            for (var guard = 0; guard < 4096; guard++)
+            {
+                totals[current] = Math.Max(0, totals[current] + deltaBytes);
+                files[current] = Math.Max(0, files[current] + deltaFiles);
+                if (current == 0)
+                {
+                    break;
+                }
+
+                current = _parent[current];
+            }
+        }
+
+        return new FolderTree(
+            RootPath,
+            (int[])_parent.Clone(),
+            (string[])_names.Clone(),
+            totals,
+            files,
+            engineName,
+            elapsed,
+            _allocatedBytes is null ? null : (long[])_allocatedBytes.Clone(),
+            NtfsAllocation,
+            _incompleteSubtrees is null ? null : new BitArray(_incompleteSubtrees),
+            IncompleteDirectoryCount,
+            _incompleteAllocationSubtrees is null ? null : new BitArray(_incompleteAllocationSubtrees),
+            IncompleteAllocationDirectoryCount);
+    }
+
     public string EngineName { get; }
 
     public TimeSpan Elapsed { get; }

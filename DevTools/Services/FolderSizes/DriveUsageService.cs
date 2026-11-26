@@ -241,9 +241,16 @@ public sealed class DriveUsageService
         void Report(string engine, string message) =>
             progress?.Report(new FolderScanProgress(root, engine, message, 0, TimeSpan.Zero));
 
+        // Try hashed persistent index cache + NTFS USN Journal incremental refresh first.
+        if (TryLoadOrRefreshCachedTree(drive, tryMft, notes, cancellationToken) is { } cachedResult)
+        {
+            return cachedResult;
+        }
+
         if (tryMft)
         {
             Report("NTFS MFT", $"Reading the NTFS Master File Table of {root}...");
+            var usnBefore = NtfsUsnJournal.TryQueryCursor(root);
             using var mftCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             mftCts.CancelAfter(MftTimeout);
             var mftProgress = new InlineProgress<FolderSizeProgress>(update => progress?.Report(new FolderScanProgress(
@@ -253,7 +260,7 @@ public sealed class DriveUsageService
                 "NTFS MFT", root, notes, cancellationToken).ConfigureAwait(false);
             if (tree is not null)
             {
-                return Done(drive, tree, notes);
+                return Done(drive, tree, notes, usnBefore);
             }
         }
         else if (string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase))
@@ -266,10 +273,20 @@ public sealed class DriveUsageService
         FolderTree? logical = null;
         if (publishLogicalTree is not null && string.Equals(drive.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase))
         {
-            Report(ParallelFolderWalker.EngineName, $"Measuring logical folder sizes on {root}...");
-            logical = await TryEngineAsync(
-                () => _walker.ScanVolumeAsync(root, progress, cancellationToken, volumeShare, measureAllocation: false),
-                "Logical folder walk", root, notes, cancellationToken).ConfigureAwait(false);
+            if (progress is null && Native.NativeFastEngine.IsAvailable)
+            {
+                logical = await TryEngineAsync(
+                    () => Task.Run(() => Native.NativeFastEngine.TryWalkTreeNative(root, 0, cancellationToken)?.Tree!, cancellationToken),
+                    "Rust fast walk", root, notes, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (logical is null)
+            {
+                Report(ParallelFolderWalker.EngineName, $"Measuring logical folder sizes on {root}...");
+                logical = await TryEngineAsync(
+                    () => _walker.ScanVolumeAsync(root, progress, cancellationToken, volumeShare, measureAllocation: false),
+                    "Logical folder walk", root, notes, cancellationToken).ConfigureAwait(false);
+            }
             if (logical is not null)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -283,7 +300,7 @@ public sealed class DriveUsageService
             ParallelFolderWalker.EngineName, root, notes, cancellationToken).ConfigureAwait(false);
         var result = walked ?? logical;
         return result is not null
-            ? Done(drive, result, notes)
+            ? Done(drive, result, notes, usnCursor: null)
             : new DriveScanResult(drive, null, "None", string.Join(" ", notes));
     }
 
@@ -293,9 +310,120 @@ public sealed class DriveUsageService
     public Task<FolderTree> WalkFolderAsync(string path, CancellationToken cancellationToken, bool measureAllocation = false) =>
         _walker.ScanPriorityFolderAsync(path, cancellationToken, measureAllocation);
 
-    private static DriveScanResult Done(DriveDescriptor drive, FolderTree tree, List<string> notes)
+    private static DriveScanResult? TryLoadOrRefreshCachedTree(
+        DriveDescriptor drive,
+        bool tryMft,
+        List<string> notes,
+        CancellationToken cancellationToken)
     {
-        AppLog.Info($"Drive {drive.RootPath}: {tree.EngineName} sized {tree.FolderCount:N0} folders ({ByteFormatter.Format(tree.TotalBytes)} in {tree.TotalFiles:N0} files) in {tree.Elapsed.TotalSeconds:F1}s.");
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        if (!FolderIndexCache.TryLoad(drive.RootPath, out var cachedTree, out var metadata) || metadata is null)
+        {
+            return null;
+        }
+
+        var sizedLocal = metadata.SizedAt.ToLocalTime();
+        if (tryMft && metadata.UsnJournalId != 0)
+        {
+            var previousCursor = new UsnJournalCursor(metadata.UsnJournalId, metadata.NextUsn, metadata.LowestValidUsn);
+            var delta = NtfsUsnJournal.TryReadDelta(drive.RootPath, previousCursor, cancellationToken);
+            if (delta.CanApplyIncrementally)
+            {
+                if (delta.ModifiedFileDirectories.Count == 0)
+                {
+                    clock.Stop();
+                    AppLog.Info($"Drive {drive.RootPath}: verified hashed index via USN journal in {clock.ElapsedMilliseconds} ms ({cachedTree.FolderCount:N0} folders, hash={metadata.TreeHash:X16}). {delta.Reason}");
+                    notes.Add($"Verified index from {sizedLocal:yyyy-MM-dd HH:mm} ({delta.Reason})");
+                    if (delta.NewNextUsn > metadata.NextUsn)
+                    {
+                        FolderIndexCache.SaveInBackground(drive.RootPath, cachedTree,
+                            new UsnJournalCursor(metadata.UsnJournalId, delta.NewNextUsn, metadata.LowestValidUsn));
+                    }
+
+                    return RefreshDriveSpace(drive, cachedTree, notes);
+                }
+
+                var updates = new List<(int Node, long NewDirectBytes, long NewDirectFiles)>(delta.ModifiedFileDirectories.Count);
+                var allResolvedInTree = true;
+                foreach (var dirPath in delta.ModifiedFileDirectories)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var node = cachedTree.Find(dirPath);
+                    if (node < 0)
+                    {
+                        allResolvedInTree = false;
+                        break;
+                    }
+
+                    if (!TryMeasureDirectFiles(dirPath, out var directBytes, out var directFiles))
+                    {
+                        allResolvedInTree = false;
+                        break;
+                    }
+
+                    updates.Add((node, directBytes, directFiles));
+                }
+
+                if (allResolvedInTree)
+                {
+                    clock.Stop();
+                    var updated = cachedTree.ApplyDirectFileUpdates(updates, "NTFS MFT (USN incremental)", clock.Elapsed);
+                    AppLog.Info($"Drive {drive.RootPath}: incrementally updated {updates.Count} changed folder(s) via USN journal in {clock.ElapsedMilliseconds} ms.");
+                    notes.Add($"Incremental USN update ({updates.Count} changed folder(s) in {clock.ElapsedMilliseconds} ms).");
+                    FolderIndexCache.SaveInBackground(drive.RootPath, updated,
+                        new UsnJournalCursor(metadata.UsnJournalId, delta.NewNextUsn, metadata.LowestValidUsn));
+                    return RefreshDriveSpace(drive, updated, notes);
+                }
+            }
+            else
+            {
+                AppLog.Info($"Drive {drive.RootPath}: USN incremental refresh skipped ({delta.Reason}); running fresh scan.");
+                return null;
+            }
+        }
+
+        clock.Stop();
+        AppLog.Info($"Drive {drive.RootPath}: loaded SHA-256 verified folder index from {sizedLocal:yyyy-MM-dd HH:mm} in {clock.ElapsedMilliseconds} ms ({cachedTree.FolderCount:N0} folders, hash={metadata.TreeHash:X16}).");
+        notes.Add($"Loaded verified index from {sizedLocal:yyyy-MM-dd HH:mm} ({cachedTree.FolderCount:N0} folders).");
+        return RefreshDriveSpace(drive, cachedTree, notes);
+    }
+
+    private static bool TryMeasureDirectFiles(string directoryPath, out long directBytes, out long directFiles)
+    {
+        directBytes = 0;
+        directFiles = 0;
+        try
+        {
+            var options = new EnumerationOptions
+            {
+                IgnoreInaccessible = false,
+                RecurseSubdirectories = false,
+                ReturnSpecialDirectories = false,
+                AttributesToSkip = 0
+            };
+            var entries = new System.IO.Enumeration.FileSystemEnumerable<(bool IsDirectory, long Length)>(
+                directoryPath,
+                (ref System.IO.Enumeration.FileSystemEntry entry) => (entry.IsDirectory, entry.Length),
+                options);
+            foreach (var entry in entries)
+            {
+                if (!entry.IsDirectory)
+                {
+                    directBytes += Math.Max(0, entry.Length);
+                    directFiles++;
+                }
+            }
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static DriveScanResult RefreshDriveSpace(DriveDescriptor drive, FolderTree tree, List<string> notes)
+    {
         if (ReadVolumeSpace(drive.RootPath) is { } refreshed)
         {
             drive = drive with { Space = refreshed };
@@ -306,6 +434,13 @@ public sealed class DriveUsageService
         }
 
         return new DriveScanResult(drive, tree, tree.EngineName, string.Join(" ", notes));
+    }
+
+    private static DriveScanResult Done(DriveDescriptor drive, FolderTree tree, List<string> notes, UsnJournalCursor? usnCursor = null)
+    {
+        AppLog.Info($"Drive {drive.RootPath}: {tree.EngineName} sized {tree.FolderCount:N0} folders ({ByteFormatter.Format(tree.TotalBytes)} in {tree.TotalFiles:N0} files) in {tree.Elapsed.TotalSeconds:F1}s.");
+        FolderIndexCache.SaveInBackground(drive.RootPath, tree, usnCursor);
+        return RefreshDriveSpace(drive, tree, notes);
     }
 
     private static async Task<FolderTree?> TryEngineAsync(

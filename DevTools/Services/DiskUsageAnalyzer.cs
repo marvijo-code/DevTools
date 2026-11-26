@@ -26,6 +26,7 @@ public sealed class DiskUsageAnalyzer
 
     private readonly DriveUsageService _driveUsage = new();
     private readonly Func<string, CancellationToken, bool, Task<FolderTree>> _walkFolder;
+    private readonly bool _usesDefaultWalker;
     private readonly object _treesLock = new();
     private readonly Dictionary<(string Path, long InventoryVersion, bool Allocation), FolderWalk> _folderWalks = new();
     private readonly Dictionary<string, FolderTree> _trees = new(StringComparer.OrdinalIgnoreCase);
@@ -38,11 +39,13 @@ public sealed class DiskUsageAnalyzer
     public DiskUsageAnalyzer()
     {
         _walkFolder = _driveUsage.WalkFolderAsync;
+        _usesDefaultWalker = true;
     }
 
     internal DiskUsageAnalyzer(Func<string, CancellationToken, bool, Task<FolderTree>> walkFolder)
     {
         _walkFolder = walkFolder;
+        _usesDefaultWalker = false;
     }
 
     /// <summary>The folder trees from the last scan, system drive first.</summary>
@@ -820,6 +823,37 @@ public sealed class DiskUsageAnalyzer
         if (TryFindNode(path, out var tree, out var node))
         {
             return tree!.GetTotalBytes(node);
+        }
+
+        if (_usesDefaultWalker && Native.NativeFastEngine.IsAvailable)
+        {
+            var hasActiveWalk = false;
+            lock (_treesLock)
+            {
+                hasActiveWalk = _folderWalks.Count > 0;
+            }
+
+            if (!hasActiveWalk)
+            {
+                try
+                {
+                    var nativeMeasured = await Task.Run(
+                        () => Native.NativeFastEngine.TryMeasureDirectoryNative(path, workerCount: 0, cancellationToken),
+                        cancellationToken).ConfigureAwait(false);
+                    if (nativeMeasured is { } measured)
+                    {
+                        return measured.TotalBytes;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Info($"Native measure fallback for {path}: {ex.Message}");
+                }
+            }
         }
 
         try

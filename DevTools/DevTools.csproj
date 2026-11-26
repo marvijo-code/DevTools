@@ -1,6 +1,7 @@
 <Project Sdk="Uno.Sdk">
   <PropertyGroup>
     <TargetFrameworks>net10.0-windows10.0.26100</TargetFrameworks>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
     <OutputType>Exe</OutputType>
     <UnoSingleProject>true</UnoSingleProject>
@@ -39,6 +40,22 @@
 
   <ItemGroup>
     <PackageReference Include="System.Management" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <NativeRustProjectDir>$(MSBuildThisFileDirectory)..\native\devtools_native</NativeRustProjectDir>
+    <NativeRustDllPath>$(NativeRustProjectDir)\target\release\devtools_native.dll</NativeRustDllPath>
+  </PropertyGroup>
+
+  <Target Name="BuildNativeRustEngine" BeforeTargets="AssignTargetPaths" Condition="'$(OS)' == 'Windows_NT' and Exists('$(NativeRustProjectDir)\Cargo.toml') and !Exists('$(NativeRustDllPath)')">
+    <Exec Command="cargo build --release --manifest-path &quot;$(NativeRustProjectDir)\Cargo.toml&quot;" IgnoreExitCode="true" />
+  </Target>
+
+  <ItemGroup Condition="Exists('$(NativeRustDllPath)')">
+    <Content Include="$(NativeRustDllPath)" Link="devtools_native.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

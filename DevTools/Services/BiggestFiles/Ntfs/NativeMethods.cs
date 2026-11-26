@@ -21,6 +21,7 @@ internal static class NativeMethods
     private const uint FileShareWrite = 0x00000002;
     private const uint FileShareDelete = 0x00000004;
     private const uint OpenDirectory = 0x02000000;
+    private const uint SequentialScan = 0x08000000;
     private const uint OpenExisting = 3;
     private const uint FsctlGetNtfsVolumeData = 0x00090064;
     private const uint FsctlGetVolumeBitmap = 0x0009006F;
@@ -70,7 +71,7 @@ internal static class NativeMethods
             FileShareRead | FileShareWrite,
             IntPtr.Zero,
             OpenExisting,
-            0,
+            SequentialScan,
             IntPtr.Zero);
 
         if (handle.IsInvalid)

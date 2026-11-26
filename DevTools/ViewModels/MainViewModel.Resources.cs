@@ -127,6 +127,7 @@ public sealed partial class MainViewModel
         MainContentTab.KillProcesses => SelectedActivity?.Subtitle ?? SelectedProcess?.Note ?? "Select a thread, tab or process to see its details.",
         MainContentTab.OpenWork => OpenWorkStatusText,
         MainContentTab.Worktrees => WorktreeStatusText,
+        MainContentTab.Projects => ProjectsStatusText,
         _ => "Disk usage and scan information for this machine."
     };
 
